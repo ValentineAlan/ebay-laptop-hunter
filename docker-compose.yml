@@ -1,0 +1,52 @@
+services:
+  hunter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ebay-laptop-hunter:0.7.9
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Europe/London}
+      DASHBOARD_PORT: "8080"
+      EBAY_CLIENT_ID: ${EBAY_CLIENT_ID}
+      EBAY_CLIENT_SECRET: ${EBAY_CLIENT_SECRET}
+    volumes:
+      - ${HUNTER_DATA_PATH:-./data}:/data
+    ports:
+      - "${HUNTER_PORT:-8080}:8080"
+    depends_on:
+      - sid-helper
+
+  browser:
+    image: lscr.io/linuxserver/chromium:latest
+    restart: unless-stopped
+    shm_size: "1gb"
+    environment:
+      PUID: ${PUID:-568}
+      PGID: ${PGID:-568}
+      TZ: ${TZ:-Europe/London}
+      CHROME_CLI: >-
+        --remote-debugging-port=9222
+        --remote-debugging-address=0.0.0.0
+    volumes:
+      - ${BROWSER_CONFIG_PATH:-./browser-config}:/config
+    ports:
+      - "${CHROMIUM_HTTP_PORT:-30310}:3000"
+      - "${CHROMIUM_HTTPS_PORT:-30311}:3001"
+
+  sid-helper:
+    build:
+      context: .
+      dockerfile: Dockerfile.ebaysid-helper
+    image: ebay-ebaysid-helper:0.1.1
+    restart: unless-stopped
+    network_mode: "service:browser"
+    environment:
+      TZ: ${TZ:-Europe/London}
+      HUNTER_DATA: /data
+      EBAY_CDP_URL: http://127.0.0.1:9222
+      EBAY_SID_POLL_SECONDS: "5"
+    volumes:
+      - ${HUNTER_DATA_PATH:-./data}:/data
+    depends_on:
+      - browser
