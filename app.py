@@ -1,4 +1,4 @@
-# eBay Laptop Hunter v0.7.9
+# eBay Laptop Hunter v0.8.0
 #
 # Features:
 #   - eBay GB laptop discovery
@@ -50,7 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # VERSION / CONFIG
 # ============================================================
 
-VERSION = "0.7.9"
+VERSION = "0.8.0"
 
 DB = "/data/hunter.db"
 LOG_FILE = "/data/hunter.log"
@@ -106,11 +106,12 @@ POLL_90_PERCENT = 600
 
 # Valuation
 MIN_COMPARABLES = 3
-HIGH_CONFIDENCE_COMPARABLES = 12
 MEDIUM_CONFIDENCE_COMPARABLES = 6
 
 # Don't use ancient active observations indefinitely.
 COMPARABLE_MAX_AGE_DAYS = 30
+SOLD_CACHE_MAX_AGE_DAYS = 7
+SOLD_EVIDENCE_VERSION = "2"
 
 
 # ============================================================
@@ -450,6 +451,9 @@ def init_db():
         )
     """)
 
+    for name, sql_type in {"evidence_version": "TEXT", "currency": "TEXT"}.items():
+        ensure_column(conn, "sold_comparables", name, sql_type)
+
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_sold_model
         ON sold_comparables (brand, model)
@@ -717,7 +721,10 @@ def api_get(
                 MARKETPLACE,
 
             "Accept":
-                "application/json"
+                "application/json",
+            **({"X-EBAY-C-ENDUSERCTX": "contextualLocation=" + urllib.parse.quote(
+                "country=GB,zip=" + os.environ["BUYER_POSTCODE"], safe="")}
+               if os.environ.get("BUYER_POSTCODE") else {})
         }
     )
 
@@ -795,54 +802,23 @@ def get_item(
 # ============================================================
 
 def item_price(item):
-    return (
-        safe_float(
-            item.get(
-                "price",
-                {}
-            ).get(
-                "value"
-            )
-        )
-        or 0.0
-    )
-
+    price = item.get("price") or {}
+    value = safe_float(price.get("value"))
+    if price.get("currency") != "GBP" or value is None or not math.isfinite(value) or value <= 0:
+        return None
+    return value
 
 def shipping_price(item):
-    options = (
-        item.get(
-            "shippingOptions"
-        )
-        or []
-    )
-
+    # Missing/calculated/collection-only postage is not free delivery.
     prices = []
-
-    for option in options:
-
-        value = safe_float(
-            option.get(
-                "shippingCost",
-                {}
-            ).get(
-                "value"
-            )
-        )
-
-        if value is not None:
-            prices.append(
-                value
-            )
-
-    if not prices:
-        return 0.0
-
-    return min(prices)
-
-
-# ============================================================
-# ASPECTS
-# ============================================================
+    for option in item.get("shippingOptions") or []:
+        if "PICKUP" in str(option.get("shippingServiceCode", "")).upper():
+            continue
+        cost = option.get("shippingCost") or {}
+        value = safe_float(cost.get("value"))
+        if cost.get("currency") == "GBP" and value is not None and math.isfinite(value) and value >= 0:
+            prices.append(value)
+    return min(prices) if prices else None
 
 def aspects_dict(detail):
     result = {}
@@ -1026,11 +1002,8 @@ def identify_brand(
 MODEL_PATTERNS = [
 
     # Dell
-    r"\bLatitude\s+"
-    r"(?:E)?\d{4}\b",
-
-    r"\bLatitude\s+"
-    r"\d{4}\s+Detachable\b",
+    r"\bLatitude\s+\d{4}\s+Detachable\b",
+    r"\bLatitude\s+(?:E)?\d{4}\b",
 
     r"\bVostro\s+\d{4}\b",
 
@@ -1089,8 +1062,7 @@ MODEL_PATTERNS = [
     r"(?:\s+[A-Za-z0-9-]+)?\b",
 
     # Microsoft
-    r"\bSurface\s+Pro\s+"
-    r"\d{1,2}\b",
+    r"\bSurface\s+Pro\s+\d{1,2}(?:\+|\s+Plus)?(?!\w)",
 
     r"\bSurface\s+Laptop\s+"
     r"\d{1,2}\b",
@@ -1122,6 +1094,7 @@ def clean_model(model):
         model,
         flags=re.I,
     )
+    model = re.sub(r"(Surface\s+Pro\s+\d+)\s+Plus$", r"\1+", model, flags=re.I)
     return model.strip()
 
 
@@ -1159,6 +1132,12 @@ def precise_model_for_valuation(brand, model):
     if re.fullmatch(r"XPS\s+(?:13|15|17)", value, re.I):
         return False
 
+    # These names are reused across generations and Intel/AMD platforms.
+    if re.fullmatch(r"ThinkPad\s+(?:[TXELP]\d{2}[A-Za-z]?|X1\s+(?:Carbon|Yoga))", value, re.I):
+        return False
+    if re.match(r"IdeaPad\s+(?:Slim\s+)?[13579](?:\s|$)", value, re.I):
+        return False
+
     # Strong known-specific shapes.
     patterns = (
         r"^Latitude\s+(?:E)?\d{4}(?:\s+Detachable)?$",
@@ -1168,13 +1147,13 @@ def precise_model_for_valuation(brand, model):
         r"^(?:240|245|250|255|340|348|430|440|450|455|470)\s+G\d{1,2}$",
         r"^ThinkPad\s+(?:(?:T|X|E|L|P)\d{2,3}[A-Za-z]?|X1\s+(?:Carbon|Yoga))(?:\s+Gen\s+\d+)?$",
         r"^IdeaPad\s+(?:Slim\s+)?[A-Za-z0-9-]+(?:\s+[A-Za-z0-9-]+)?$",
-        r"^Surface\s+(?:Pro|Laptop)\s+\d{1,2}$",
+        r"^Surface\s+(?:Pro|Laptop)\s+\d{1,2}\+?$",
     )
     if any(re.fullmatch(p, value, re.I) for p in patterns):
         return True
 
-    # Generic safety net: a model normally needs a distinguishing number/code.
-    return bool(re.search(r"\d", value)) and len(value) >= 4
+    # A digit alone does not identify a generation or platform.
+    return False  # Unrecognised family codes need an explicit identity rule.
 
 
 def identify_model(
@@ -2216,6 +2195,9 @@ def classify_faults(
         + normalise(condition)
     ).lower()
 
+    text = re.sub(r"\b(?:no|without)\s+(?:a\s+)?bios\s+password\b", "", text)
+    text = re.sub(r"\bhinges?\s+(?:are\s+)?(?:good|fine|working|intact)\b", "", text)
+
     high = [
         "liquid damage",
         "water damage",
@@ -2242,6 +2224,12 @@ def classify_faults(
         "unknown fault",
         "untested",
         "spare parts",
+        "spares",
+        "faulty",
+        "not working",
+        "mdm locked",
+        "activation locked",
+        "autopilot locked",
         "for parts",
         "parts or not working"
     ]
@@ -2358,7 +2346,8 @@ def analyse_listing(
     conn,
     token,
     summary,
-    fetch_detail=True
+    fetch_detail=True,
+    supplied_detail=None
 ):
     title = normalise(
         summary.get(
@@ -2381,8 +2370,8 @@ def analyse_listing(
         "itemId"
     ]
 
-    detail = {}
-    detail_status = "NOT_REQUESTED"
+    detail = supplied_detail or {}
+    detail_status = "COMPLETE" if supplied_detail else "NOT_REQUESTED"
 
     if (
         fetch_detail
@@ -2467,17 +2456,17 @@ def analyse_listing(
 
     fault_level, reasons = (
         classify_faults(
-            title,
+            text,
             condition
         )
     )
 
     price = item_price(
-        summary
+        detail if detail.get("price") else summary
     )
 
     postage = shipping_price(
-        summary
+        detail if detail.get("shippingOptions") else summary
     )
 
     return {
@@ -2497,7 +2486,7 @@ def analyse_listing(
             postage,
 
         "total":
-            price + postage,
+            price + postage if price is not None and postage is not None else None,
 
         "buying_options":
             summary.get(
@@ -2888,7 +2877,7 @@ def update_known_summary(
             postage,
 
         "total":
-            price + postage,
+            price + postage if price is not None and postage is not None else None,
 
         "buying_options":
             summary.get(
@@ -3388,33 +3377,27 @@ def repair_v078_model_and_sold_cache(conn):
     )
 
 
+def repair_v080_valuation_cache(conn):
+    """Invalidate legacy price assumptions once; retain raw history for audit."""
+    key = "v0.8.0_conservative_valuation"
+    if conn.execute("SELECT 1 FROM app_migrations WHERE migration_key=?", (key,)).fetchone():
+        return
+    conn.execute("UPDATE sold_searches SET status='STALE', searched_at=NULL")
+    conn.execute("""UPDATE listings SET estimated_value=NULL, valuation_q1=NULL,
+        valuation_q3=NULL, comparable_count=NULL, valuation_confidence=NULL,
+        undervaluation_gbp=NULL, undervaluation_pct=NULL, deal_score=NULL,
+        valuation_basis='REANALYSIS_REQUIRED', valuation_research_at=NULL""")
+    conn.execute("INSERT INTO app_migrations VALUES (?,?)", (key, iso_now()))
+    conn.commit()
+
+
 def sold_search_queries(row):
     """Use exact model only when it is a real model identity, not a family."""
+    if target_valuation_problem(row):
+        return []
     brand = normalise(row["brand"])
     model = valuation_model(brand, row["model"])
-    cpu = normalise(row["cpu"])
-    ram = row["ram_gb"]
-    storage = row["storage_gb"]
-    queries = []
-
-    if brand and model and precise_model_for_valuation(brand, model):
-        queries.append(f"{brand} {model}")
-    elif brand and cpu:
-        q = f"{brand} {cpu}"
-        if ram:
-            q += f" {ram}GB"
-        if storage:
-            q += f" {storage}GB"
-        queries.append(q)
-    elif cpu:
-        q = cpu
-        if ram:
-            q += f" {ram}GB"
-        if storage:
-            q += f" {storage}GB"
-        queries.append(q)
-
-    return list(dict.fromkeys(q for q in queries if research_query_key(q)))
+    return [f"{brand} {model}"] if brand and model else []
 
 
 def sold_search_is_fresh(conn, key):
@@ -3426,7 +3409,7 @@ def sold_search_is_fresh(conn, key):
         return False
     try:
         age = utcnow() - datetime.fromisoformat(row["searched_at"])
-        return age.total_seconds() < PRODUCT_RESEARCH_CACHE_HOURS * 3600
+        return 0 <= age.total_seconds() < PRODUCT_RESEARCH_CACHE_HOURS * 3600
     except Exception:
         return False
 
@@ -3444,12 +3427,20 @@ def _parse_sold_result(result):
         if result.get("averageshipping") is not None
         else result.get("avgshipping")
     )
-    if avg_postage is None and result.get("freeshipping"):
+    if avg_postage is None and result.get("freeshipping") is True:
         avg_postage = 0.0
-    if avg_postage is None:
-        avg_postage = 0.0
+    currency = research_currency(result.get("avgsalesprice"))
+    if currency != "GBP" or avg_price is None or not math.isfinite(avg_price):
+        avg_price = None
+    shipping_currency = research_currency(result.get("averageshipping") or result.get("avgshipping"))
+    if shipping_currency not in (None, "GBP"):
+        avg_postage = None
+    if avg_postage is not None and not math.isfinite(avg_postage):
+        avg_postage = None
 
     units = _research_value(result.get("itemssold"))
+    if units is None or not math.isfinite(units) or units <= 0:
+        units = 1
     total_sales = _research_value(result.get("totalsales"))
     last_sold = _research_text(result.get("datelastsold"))
     formats = _research_text(listing.get("formatList") or result.get("formatList"))
@@ -3473,11 +3464,12 @@ def _parse_sold_result(result):
         "cpu_generation": cpu.get("generation"),
         "ram_gb": ram,
         "storage_gb": storage,
+        "currency": currency,
         "avg_sold_price": avg_price,
         "avg_postage": avg_postage,
         "delivered_price": (
             avg_price + avg_postage
-            if avg_price is not None
+            if avg_price is not None and avg_postage is not None and avg_postage >= 0
             else None
         ),
         "units_sold": max(1, int(units or 1)),
@@ -3524,14 +3516,14 @@ def collect_sold_search(conn, keywords):
                 """INSERT OR REPLACE INTO sold_comparables(
                     query_key,item_id,title,brand,model,cpu,cpu_generation,
                     ram_gb,storage_gb,avg_sold_price,avg_postage,delivered_price,
-                    units_sold,total_sales,last_sold,formats,collected_at,source
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'EBAY_PRODUCT_RESEARCH')""",
+                    units_sold,total_sales,last_sold,formats,collected_at,currency,evidence_version,source
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'EBAY_PRODUCT_RESEARCH')""",
                 (
                     key, row["item_id"], row["title"], row["brand"], row["model"],
                     row["cpu"], row["cpu_generation"], row["ram_gb"],
                     row["storage_gb"], row["avg_sold_price"], row["avg_postage"],
                     row["delivered_price"], row["units_sold"], row["total_sales"],
-                    row["last_sold"], row["formats"], iso_now(),
+                    row["last_sold"], row["formats"], iso_now(), row["currency"], SOLD_EVIDENCE_VERSION,
                 ),
             )
         collected = len(parsed)
@@ -3545,6 +3537,7 @@ def collect_sold_search(conn, keywords):
         return collected
 
     except Exception as exc:
+        conn.rollback()
         conn.execute(
             """INSERT INTO sold_searches(query_key,keywords,searched_at,status,result_count,error)
                VALUES (?,?,?,'ERROR',0,?)
@@ -3577,6 +3570,8 @@ def collect_needed_sold_data(conn, maximum=PRODUCT_RESEARCH_SEARCHES_PER_CYCLE):
     rows = conn.execute("""
         SELECT * FROM listings
         WHERE cpu IS NOT NULL
+          AND active=1
+          AND classifier_version=?
           AND trim(cpu) <> ''
           AND (
                 (brand IS NOT NULL AND trim(brand) <> '')
@@ -3587,18 +3582,14 @@ def collect_needed_sold_data(conn, maximum=PRODUCT_RESEARCH_SEARCHES_PER_CYCLE):
             CASE WHEN estimated_value IS NULL THEN 0 ELSE 1 END,
             COALESCE(valuation_research_at, '1970-01-01') ASC,
             first_seen ASC
-        LIMIT 500
-    """).fetchall()
+    """, (VERSION,)).fetchall()
 
     done = 0
     attempted_listings = 0
 
     for row in rows:
-        if calculate_sold_valuation(conn, row) is not None:
-            continue
-
         queries = sold_search_queries(row)
-        if not queries:
+        if not queries or all(sold_search_is_fresh(conn, research_query_key(q)) for q in queries):
             continue
 
         attempted_listings += 1
@@ -3657,78 +3648,176 @@ def collect_needed_sold_data(conn, maximum=PRODUCT_RESEARCH_SEARCHES_PER_CYCLE):
     return done
 
 
+def row_value(row, key, default=None):
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return default
+
+
+def research_currency(value):
+    """Recognise explicit GBP evidence; never infer currency from a number."""
+    if isinstance(value, dict):
+        currency = value.get("currency") or value.get("currencyCode")
+        if currency:
+            return str(currency).upper()
+        currencies = {research_currency(v) for v in value.values()} - {None}
+    elif isinstance(value, list):
+        currencies = {research_currency(v) for v in value} - {None}
+    elif isinstance(value, str):
+        currencies = set()
+        for code, marker in (("GBP", "£"), ("USD", "$"), ("EUR", "€")):
+            if marker in value or re.search(r"\b" + code + r"\b", value, re.I):
+                currencies.add(code)
+    else:
+        return None
+    return next(iter(currencies)) if len(currencies) == 1 else None
+
+
+def evidence_age_days(value):
+    text = normalise(value)
+    if not text:
+        return None
+    try:
+        date = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        date = None
+        for fmt in ("%d %b %Y", "%d %B %Y", "%d/%m/%Y", "%b %d, %Y", "%d %b %Y %H:%M"):
+            try:
+                date = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                pass
+        if date is None:
+            return None
+    if date.tzinfo is None:
+        date = date.replace(tzinfo=timezone.utc)
+    age = (utcnow() - date).total_seconds() / 86400
+    return age if age >= 0 else None
+
+
+def ordinary_laptop(title, condition=""):
+    text = normalise(title) + " " + normalise(condition)
+    if classify_faults(text)[0] != "NORMAL":
+        return False
+    # Aggregates, options, accessories and retail/refurbished offerings are not
+    # directly comparable to one ordinary used laptop.
+    return not re.search(
+        r"\b(?:lot(?:\s+of)?\s*\d+|bundle|job\s*lot|\d+\s*[x×]\s*(?:laptops?|Dell|HP|Lenovo)|"
+        r"[x×]\s*\d+|\d+\s+laptops?|choose|choice|various|refurbished|renewed|"
+        r"brand new|sealed|warranty|charger only|screen only|keyboard only|"
+        r"replacement|for Dell|for HP|for Lenovo|no ram|no memory)\b|"
+        r"\b\d+\s*(?:GB|TB)?\s*(?:/|or)\s*\d+\s*(?:GB|TB)\b", text, re.I
+    ) and not is_genuinely_new(condition)
+
+
+def exact_spec_identity(row):
+    cpu = parse_cpu(row_value(row, "cpu"), "VALUATION")
+    confidence = row_value(row, "cpu_confidence", "EXACT")
+    return bool(
+        precise_model_for_valuation(row_value(row, "brand"), row_value(row, "model"))
+        and cpu and cpu["confidence"] == "EXACT" and confidence == "EXACT"
+        and row_value(row, "ram_gb") and row_value(row, "storage_gb")
+    )
+
+
+def target_valuation_problem(target):
+    if row_value(target, "classifier_version") != VERSION:
+        return "REANALYSIS_REQUIRED"
+    if not exact_spec_identity(target):
+        return "INCOMPLETE_IDENTITY_OR_SPEC"
+    if row_value(target, "status") != "NORMAL" or not ordinary_laptop(
+        row_value(target, "title"), row_value(target, "condition")
+    ):
+        return "CONDITION_REQUIRES_REVIEW"
+    if not row_value(target, "total") or row_value(target, "postage") is None:
+        return "UNKNOWN_DELIVERED_COST"
+    return None
+
+
+def insufficient_valuation(reason, count=0):
+    return dict(estimated_value=None, q1=None, q3=None, count=count,
+                confidence="INSUFFICIENT_DATA", undervaluation_gbp=None,
+                undervaluation_pct=None, deal_score=None, basis=reason)
+
+
+def same_spec(target, comp):
+    return (exact_spec_identity(comp)
+            and normalise(target["brand"]).lower() == normalise(comp["brand"]).lower()
+            and normalise(valuation_model(target["brand"], target["model"])).lower()
+                == normalise(valuation_model(comp["brand"], comp["model"])).lower()
+            and normalise(target["cpu"]).lower() == normalise(comp["cpu"]).lower()
+            and target["ram_gb"] == comp["ram_gb"]
+            and target["storage_gb"] == comp["storage_gb"]
+            and advertised_variants(target) == advertised_variants(comp))
+
+
+def advertised_variants(row):
+    """Do not transfer an advertised premium to an unspecified target.
+
+    This is a conservative title check, not a complete display/GPU parser.
+    Missing and advertised features intentionally do not match.
+    """
+    text = normalise(row_value(row, "title")).lower()
+    patterns = {
+        "fhd": r"\b(?:fhd|1080p|1920\s*[x×]\s*1080)\b",
+        "uhd": r"\b(?:uhd|4k|3840\s*[x×]\s*2160)\b",
+        "oled": r"\boled\b",
+        "ips": r"\bips\b",
+        "hdd": r"\b(?:hdd|hard disk)\b",
+        "emmc": r"\bemmc\b",
+    }
+    markers = {key for key, pattern in patterns.items() if re.search(pattern, text)}
+    if re.search(r"\b(?:touch|touchscreen)\b", text) and not re.search(r"\bnon[- ]?touch", text):
+        markers.add("touch")
+    markers.update(re.sub(r"\s+", "", m) for m in re.findall(
+        r"\b(?:rtx\s*\d{4}(?:\s*ti)?|gtx\s*\d{3,4}(?:\s*ti)?|"
+        r"rx\s*\d{3,4}[a-z]*|quadro\s*[a-z]?\d{3,4}|\d{2,3}\s*hz)\b", text))
+    return markers
+
+
+def select_sold_evidence(conn, target):
+    selected = remove_price_outliers(sold_candidates(conn, target))
+    return selected if len(selected) >= MIN_COMPARABLES else []
+
+
 def sold_candidates(conn, target):
-    tb = normalise(target["brand"]).lower()
-    tm_raw = valuation_model(target["brand"], target["model"])
-    tm = normalise(tm_raw).lower()
-    tc = normalise(target["cpu"]).lower()
-    precise = precise_model_for_valuation(target["brand"], tm_raw)
-
-    where = ["delivered_price IS NOT NULL", "delivered_price > 0"]
-    params = []
-    if tb and tm and precise:
-        where.append("query_key=?")
-        params.append(research_query_key(f"{normalise(target['brand'])} {tm_raw}"))
-    elif tb and tc:
-        q = f"{normalise(target['brand'])} {normalise(target['cpu'])}"
-        if target["ram_gb"]:
-            q += f" {target['ram_gb']}GB"
-        if target["storage_gb"]:
-            q += f" {target['storage_gb']}GB"
-        where.append("query_key=?")
-        params.append(research_query_key(q))
-
+    if target_valuation_problem(target):
+        return []
     rows = conn.execute(
-        "SELECT * FROM sold_comparables WHERE " + " AND ".join(where), params
+        "SELECT * FROM sold_comparables WHERE delivered_price > 0 "
+        "AND currency='GBP' AND evidence_version=? AND LOWER(brand)=LOWER(?) "
+        "AND LOWER(model)=LOWER(?)", (SOLD_EVIDENCE_VERSION, target["brand"], target["model"])
     ).fetchall()
     best = {}
-    for row in rows:
-        rb = normalise(row["brand"]).lower()
-        rm = normalise(valuation_model(row["brand"], row["model"])).lower()
-        rc = normalise(row["cpu"]).lower()
-        sold_title = normalise(row["title"]).lower()
-        specific_token_match = bool(tm and tm in sold_title)
-        exact_model = bool(
-            precise and tb and tm and rb == tb and rm == tm
-            and specific_token_match
-        )
-        exact_cpu = bool(tc and rc == tc)
-        same_brand = bool(tb and rb == tb)
-        same_gen = bool(
-            target["cpu_generation"] and row["cpu_generation"]
-            and target["cpu_generation"] == row["cpu_generation"]
-        )
-
-        if precise and not exact_model:
+    fingerprints = set()
+    for row in sorted(rows, key=lambda r: r["collected_at"], reverse=True):
+        if not row["item_id"] or row["item_id"].startswith("title:"):
             continue
-
-        ram_score = 12 if target["ram_gb"] and row["ram_gb"] == target["ram_gb"] else (
-            5 if target["ram_gb"] and row["ram_gb"] and abs(target["ram_gb"] - row["ram_gb"]) <= 8 else 0
-        )
-        storage_score = 10 if target["storage_gb"] and row["storage_gb"] == target["storage_gb"] else (
-            4 if target["storage_gb"] and row["storage_gb"] and max(target["storage_gb"], row["storage_gb"]) / min(target["storage_gb"], row["storage_gb"]) <= 2 else 0
-        )
-
-        if exact_model:
-            similarity = 55 + (23 if exact_cpu else 10 if same_gen else 0) + ram_score + storage_score
-            tier = "EXACT_MODEL"
-        elif not precise and same_brand and exact_cpu:
-            similarity = 48 + ram_score + storage_score
-            tier = "BRAND_CPU_SPEC"
-        elif not precise and exact_cpu:
-            similarity = 38 + ram_score + storage_score
-            tier = "CPU_SPEC"
-        else:
+        # Browse IDs contain the legacy item ID between vertical bars.
+        if row["item_id"] in str(target["item_id"]).split("|"):
             continue
-
-        units = max(1, int(row["units_sold"] or 1))
-        weight = max(1.0, math.sqrt(min(units, 100))) * max(.35, similarity / 100)
-        c = {"row": row, "total": float(row["delivered_price"]), "similarity": similarity,
-             "tier": tier, "units": units, "weight": weight}
-        if row["item_id"] not in best or similarity > best[row["item_id"]]["similarity"]:
-            best[row["item_id"]] = c
+        age = evidence_age_days(row["last_sold"])
+        cache_age = evidence_age_days(row["collected_at"])
+        if (age is None or age > PRODUCT_RESEARCH_DAY_RANGE or cache_age is None
+                or cache_age > SOLD_CACHE_MAX_AGE_DAYS):
+            continue
+        if not same_spec(target, row) or not ordinary_laptop(row["title"]):
+            continue
+        if row["avg_postage"] is None or row["avg_postage"] < 0:
+            continue
+        price = float(row["delivered_price"])
+        if not math.isfinite(price):
+            continue
+        # Repeated identical adverts must not manufacture independent evidence.
+        fingerprint = normalise(row["title"]).lower()
+        if row["item_id"] in best or fingerprint in fingerprints:
+            continue
+        fingerprints.add(fingerprint)
+        best[row["item_id"]] = dict(row=row, total=price, similarity=100,
+            tier="EXACT_MODEL_SPEC", units=max(1, int(row["units_sold"] or 1)),
+            weight=2 ** (-age / 60.0))
     return list(best.values())
-
 
 def weighted_percentile(candidates, p):
     if not candidates:
@@ -3745,83 +3834,25 @@ def weighted_percentile(candidates, p):
 
 
 def calculate_sold_valuation(conn, target):
-    candidates = sold_candidates(conn, target)
-
-    exact_strong = [c for c in candidates if c["tier"] == "EXACT_MODEL" and c["similarity"] >= 80]
-    exact_model = [c for c in candidates if c["tier"] == "EXACT_MODEL"]
-    brand_cpu = [c for c in candidates if c["tier"] == "BRAND_CPU_SPEC"]
-    cpu_spec = [c for c in candidates if c["tier"] == "CPU_SPEC"]
-
-    if sum(c["units"] for c in exact_strong) >= 3:
-        selected, basis = exact_strong, "SOLD_EXACT_MODEL_SPEC"
-    elif sum(c["units"] for c in exact_model) >= 3:
-        selected, basis = exact_model, "SOLD_EXACT_MODEL"
-    elif sum(c["units"] for c in brand_cpu) >= 3:
-        selected, basis = brand_cpu, "SOLD_BRAND_CPU_SPEC"
-    elif sum(c["units"] for c in cpu_spec) >= 3:
-        selected, basis = cpu_spec, "SOLD_CPU_SPEC"
-    else:
+    selected = select_sold_evidence(conn, target)
+    if not selected:
         return None
-
-    # Basic weighted IQR trimming.
-    q1 = weighted_percentile(selected, 0.25)
-    q3 = weighted_percentile(selected, 0.75)
-    if q1 is not None and q3 is not None and q3 > q1 and len(selected) >= 4:
-        iqr = q3 - q1
-        low, high = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-        trimmed = [c for c in selected if low <= c["total"] <= high]
-        if trimmed:
-            selected = trimmed
-
-    estimate = weighted_percentile(selected, 0.50)
-    q1 = weighted_percentile(selected, 0.25)
-    q3 = weighted_percentile(selected, 0.75)
-    units = sum(c["units"] for c in selected)
-    unique = len(selected)
-
-    if basis == "SOLD_EXACT_MODEL_SPEC" and units >= 8:
-        confidence = "HIGH"
-    elif basis.startswith("SOLD_EXACT_MODEL") and units >= 5:
-        confidence = "MEDIUM"
-    else:
-        confidence = "LOW"
-
-    asking = float(target["total"] or 0)
-    under_gbp = estimate - asking if estimate is not None else None
-    under_pct = (under_gbp / estimate * 100) if estimate and under_gbp is not None else None
-
-    score = None
-    if estimate and asking > 0:
-        pct_component = max(0, min(60, (under_pct or 0) * 1.2))
-        gbp_component = max(0, min(25, max(0, under_gbp or 0) / 4))
-        conf_component = {"HIGH": 15, "MEDIUM": 10, "LOW": 5}.get(confidence, 0)
-        score = max(0, min(100, pct_component + gbp_component + conf_component))
-        if basis == "SOLD_CPU_SPEC":
-            score = min(score, 45)
-        elif basis == "SOLD_BRAND_CPU_SPEC":
-            score = min(score, 60)
-
-        if target["status"] == "HIGH_RISK":
-            score = min(score, 45)
-        elif target["status"] == "MODERATE":
-            score = min(score, 70)
-
-    return {
-        "estimated_value": estimate,
-        "q1": q1,
-        "q3": q3,
-        "count": units,
-        "confidence": confidence,
-        "undervaluation_gbp": under_gbp,
-        "undervaluation_pct": under_pct,
-        "deal_score": score,
-        "basis": basis + f":{unique}_ROWS/{units}_SALES",
-    }
-
-
-# ============================================================
-# VALUATION
-# ============================================================
+    estimate = weighted_percentile(selected, .5)
+    q1, q3 = weighted_percentile(selected, .25), weighted_percentile(selected, .75)
+    weights = [c["weight"] for c in selected]
+    effective_n = sum(weights) ** 2 / sum(w * w for w in weights)
+    # Title-only condition/display evidence and unknown seller diversity cannot
+    # justify HIGH confidence, even when many units have sold.
+    confidence = "MEDIUM" if effective_n >= MEDIUM_CONFIDENCE_COMPARABLES and (q3-q1)/estimate <= .3 else "LOW"
+    under = estimate - target["total"]
+    pct = under / estimate * 100
+    score = deal_score(target, q1, q1-target["total"],
+                       (q1-target["total"])/q1*100, confidence)
+    return dict(estimated_value=round(estimate, 2), q1=q1, q3=q3,
+        count=len(selected), confidence=confidence, undervaluation_gbp=round(under, 2),
+        undervaluation_pct=round(pct, 1), deal_score=score,
+        basis=f"SOLD_EXACT_MODEL_SPEC:{len(selected)}_ROWS/"
+              f"{sum(c['units'] for c in selected)}_SALES/NEFF={effective_n:.1f}")
 
 def fixed_price_listing(row):
     try:
@@ -3838,504 +3869,86 @@ def fixed_price_listing(row):
     )
 
 
-def comparable_candidates(
-    conn,
-    target
-):
-    if (
-        not target["brand"]
-        or not target["model"]
-    ):
+def comparable_candidates(conn, target):
+    if target_valuation_problem(target):
         return []
-
-    rows = conn.execute("""
-        SELECT *
-        FROM listings
-        WHERE item_id != ?
-          AND brand = ?
-          AND LOWER(model) = LOWER(?)
-          AND total IS NOT NULL
-          AND total > 0
-          AND status = 'NORMAL'
-    """, (
-        target["item_id"],
-        target["brand"],
-        target["model"]
-    )).fetchall()
-
-    candidates = []
-
+    rows = conn.execute("""SELECT * FROM listings
+        WHERE item_id != ? AND brand = ? AND LOWER(model) = LOWER(?)
+          AND total > 0 AND postage IS NOT NULL AND active=1
+          AND status='NORMAL' AND classifier_version=?""",
+        (target["item_id"], target["brand"], target["model"], VERSION)).fetchall()
+    candidates, seen = [], set()
     for row in rows:
-
-        if not fixed_price_listing(
-            row
-        ):
+        age = evidence_age_days(row["last_seen"])
+        end_age = evidence_age_days(row["end_date"]) if row["end_date"] else None
+        if age is None or age > COMPARABLE_MAX_AGE_DAYS or end_age is not None:
             continue
-
-        similarity = 0
-
-        # Exact model is already mandatory.
-        similarity += 50
-
-        # CPU matching.
-        if (
-            target["cpu"]
-            and row["cpu"]
-            and target["cpu"].lower()
-            == row["cpu"].lower()
-        ):
-            similarity += 25
-
-        elif (
-            target["cpu_generation"]
-            and row["cpu_generation"]
-            and target["cpu_generation"]
-            == row["cpu_generation"]
-        ):
-            similarity += 12
-
-        # RAM
-        if (
-            target["ram_gb"]
-            and row["ram_gb"]
-        ):
-
-            if (
-                target["ram_gb"]
-                == row["ram_gb"]
-            ):
-                similarity += 12
-
-            elif abs(
-                target["ram_gb"]
-                - row["ram_gb"]
-            ) <= 8:
-                similarity += 5
-
-        # Storage
-        if (
-            target["storage_gb"]
-            and row["storage_gb"]
-        ):
-
-            if (
-                target["storage_gb"]
-                == row["storage_gb"]
-            ):
-                similarity += 10
-
-            elif (
-                max(
-                    target[
-                        "storage_gb"
-                    ],
-                    row[
-                        "storage_gb"
-                    ]
-                )
-                /
-                min(
-                    target[
-                        "storage_gb"
-                    ],
-                    row[
-                        "storage_gb"
-                    ]
-                )
-                <= 2
-            ):
-                similarity += 4
-
-        candidates.append({
-            "row":
-                row,
-
-            "similarity":
-                similarity,
-
-            "total":
-                float(
-                    row["total"]
-                )
-        })
-
+        if not fixed_price_listing(row) or not same_spec(target, row):
+            continue
+        if not ordinary_laptop(row["title"], row["condition"]):
+            continue
+        fingerprint = normalise(row["title"]).lower()
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        candidates.append(dict(row=row, similarity=100, total=float(row["total"]), weight=1))
     return candidates
 
-
-def remove_price_outliers(
-    candidates
-):
+def remove_price_outliers(candidates):
     if len(candidates) < 4:
         return candidates
+    logs = [math.log(c["total"]) for c in candidates]
+    centre = statistics.median(logs)
+    mad = statistics.median(abs(x-centre) for x in logs)
+    # A zero-MAD pool still rejects a grossly different price; do not let an
+    # aggregate's units determine the centre or silently restore rejected rows.
+    tolerance = max(math.log(1.5), 3 * 1.4826 * mad)
+    return [c for c in candidates if abs(math.log(c["total"])-centre) <= tolerance]
 
-    prices = [
-        c["total"]
-        for c in candidates
-    ]
+def calculate_active_valuation(conn, target):
+    selected = remove_price_outliers(comparable_candidates(conn, target))
+    if len(selected) < MIN_COMPARABLES:
+        return insufficient_valuation("ACTIVE_ASKING_REFERENCE", len(selected))
+    prices = [c["total"] for c in selected]
+    return dict(estimated_value=round(statistics.median(prices), 2),
+        q1=percentile(prices, .25), q3=percentile(prices, .75), count=len(selected),
+        confidence="ASKING_PRICES_ONLY", undervaluation_gbp=None,
+        undervaluation_pct=None, deal_score=None, basis="ACTIVE_ASKING_REFERENCE")
 
-    q1 = percentile(
-        prices,
-        0.25
-    )
-
-    q3 = percentile(
-        prices,
-        0.75
-    )
-
-    iqr = q3 - q1
-
-    if iqr <= 0:
-        return candidates
-
-    low = q1 - 1.5 * iqr
-    high = q3 + 1.5 * iqr
-
-    filtered = [
-        c
-        for c in candidates
-        if low <= c["total"] <= high
-    ]
-
-    if len(filtered) < 3:
-        return candidates
-
-    return filtered
-
-
-def calculate_active_valuation(
-    conn,
-    target
-):
-    candidates = comparable_candidates(
-        conn,
-        target
-    )
-
-    # Prefer closer matches if enough exist.
-    strong = [
-        c
-        for c in candidates
-        if c["similarity"] >= 75
-    ]
-
-    medium = [
-        c
-        for c in candidates
-        if c["similarity"] >= 62
-    ]
-
-    if len(strong) >= 3:
-        selected = strong
-        basis = "EXACT_MODEL_STRONG_SPEC"
-
-    elif len(medium) >= 3:
-        selected = medium
-        basis = "EXACT_MODEL_SIMILAR_SPEC"
-
-    else:
-        selected = candidates
-        basis = "EXACT_MODEL"
-
-    selected = remove_price_outliers(
-        selected
-    )
-
-    count = len(
-        selected
-    )
-
-    if count < MIN_COMPARABLES:
-
-        return {
-            "estimated_value":
-                None,
-
-            "q1":
-                None,
-
-            "q3":
-                None,
-
-            "count":
-                count,
-
-            "confidence":
-                "INSUFFICIENT_DATA",
-
-            "undervaluation_gbp":
-                None,
-
-            "undervaluation_pct":
-                None,
-
-            "deal_score":
-                None,
-
-            "basis":
-                basis
-        }
-
-    prices = [
-        c["total"]
-        for c in selected
-    ]
-
-    median = statistics.median(
-        prices
-    )
-
-    q1 = percentile(
-        prices,
-        0.25
-    )
-
-    q3 = percentile(
-        prices,
-        0.75
-    )
-
-    average_similarity = (
-        sum(
-            c["similarity"]
-            for c in selected
-        )
-        / count
-    )
-
-    if (
-        count
-        >= HIGH_CONFIDENCE_COMPARABLES
-        and average_similarity >= 70
-    ):
-        confidence = "HIGH"
-
-    elif (
-        count
-        >= MEDIUM_CONFIDENCE_COMPARABLES
-        and average_similarity >= 60
-    ):
-        confidence = "MEDIUM"
-
-    else:
-        confidence = "LOW"
-
-    delivered = float(
-        target["total"]
-        or 0
-    )
-
-    undervalue = (
-        median
-        - delivered
-    )
-
-    undervalue_pct = (
-        undervalue
-        / median
-        * 100
-        if median > 0
-        else None
-    )
-
-    score = deal_score(
-        target,
-        median,
-        undervalue,
-        undervalue_pct,
-        confidence
-    )
-
-    return {
-        "estimated_value":
-            round(
-                median,
-                2
-            ),
-
-        "q1":
-            round(
-                q1,
-                2
-            ),
-
-        "q3":
-            round(
-                q3,
-                2
-            ),
-
-        "count":
-            count,
-
-        "confidence":
-            confidence,
-
-        "undervaluation_gbp":
-            round(
-                undervalue,
-                2
-            ),
-
-        "undervaluation_pct":
-            round(
-                undervalue_pct,
-                1
-            ),
-
-        "deal_score":
-            score,
-
-        "basis":
-            basis
-    }
-
-
-def deal_score(
-    target,
-    value,
-    undervalue,
-    undervalue_pct,
-    confidence
-):
-    if (
-        value is None
-        or undervalue is None
-        or undervalue_pct is None
-    ):
+def deal_score(target, value, undervalue, undervalue_pct, confidence):
+    if target_valuation_problem(target) or not fixed_price_listing(target):
         return None
-
-    # £ opportunity: maximum 35 points.
-    pounds_score = min(
-        35,
-        max(
-            0,
-            undervalue / 3
-        )
-    )
-
-    # Percentage opportunity: maximum 40 points.
-    percentage_score = min(
-        40,
-        max(
-            0,
-            undervalue_pct * 0.8
-        )
-    )
-
-    confidence_points = {
-        "HIGH": 20,
-        "MEDIUM": 14,
-        "LOW": 7
-    }.get(
-        confidence,
-        0
-    )
-
-    # Small bonus for a completely normal listing.
-    condition_points = {
-        "NORMAL": 5,
-        "LOW_COST": 2,
-        "MODERATE": 0,
-        "HIGH_RISK": 0
-    }.get(
-        target["status"],
-        0
-    )
-
-    score = (
-        pounds_score
-        + percentage_score
-        + confidence_points
-        + condition_points
-    )
-
-    # Risk caps prevent broken machines receiving the same
-    # headline score as a straightforward working bargain.
-    if target["status"] == "HIGH_RISK":
-        score = min(
-            score,
-            69
-        )
-
-    elif target["status"] == "MODERATE":
-        score = min(
-            score,
-            84
-        )
-
-    return round(
-        min(
-            100,
-            max(
-                0,
-                score
-            )
-        ),
-        1
-    )
-
-
+    if value is None or undervalue is None or undervalue_pct is None:
+        return None
+    if undervalue <= 0:
+        return 0
+    score = min(60, undervalue_pct * 1.2) + min(25, undervalue / 4)
+    # LOW means review evidence, not a high-priority buying recommendation.
+    return round(min(45 if confidence == "LOW" else 75, score), 1)
 
 def sold_evidence_for_basis(conn, target, basis):
-    """Return the sold rows actually eligible for the displayed sold valuation."""
     if not basis or not basis.startswith("SOLD_"):
         return []
+    return sorted(select_sold_evidence(conn, target), key=lambda c: c["total"])
 
-    candidates = sold_candidates(conn, target)
 
-    if basis.startswith("SOLD_EXACT_MODEL_SPEC"):
-        selected = [
-            c for c in candidates
-            if c["tier"] == "EXACT_MODEL"
-            and c["similarity"] >= 80
-        ]
-    elif basis.startswith("SOLD_EXACT_MODEL"):
-        selected = [
-            c for c in candidates
-            if c["tier"] == "EXACT_MODEL"
-        ]
-    elif basis.startswith("SOLD_BRAND_CPU_SPEC"):
-        selected = [
-            c for c in candidates
-            if c["tier"] == "BRAND_CPU_SPEC"
-        ]
-    elif basis.startswith("SOLD_CPU_SPEC"):
-        selected = [
-            c for c in candidates
-            if c["tier"] == "CPU_SPEC"
-        ]
-    else:
-        return []
+def valuation_label(basis):
+    if basis.startswith("SOLD_"):
+        return "Sold prices: matching model, CPU, RAM and storage"
+    if basis.startswith("ACTIVE_FALLBACK"):
+        return "Active asking prices only"
+    return {
+        "REANALYSIS_REQUIRED": "Waiting for refreshed listing details",
+        "INCOMPLETE_IDENTITY_OR_SPEC": "Model or specification needs confirmation",
+        "CONDITION_REQUIRES_REVIEW": "Condition or completeness needs review",
+        "UNKNOWN_DELIVERED_COST": "Delivery cost or GBP price is unconfirmed",
+    }.get(basis, "Not enough comparable evidence")
 
-    q1 = weighted_percentile(selected, 0.25)
-    q3 = weighted_percentile(selected, 0.75)
-
-    if (
-        q1 is not None
-        and q3 is not None
-        and q3 > q1
-        and len(selected) >= 4
-    ):
-        iqr = q3 - q1
-        low = q1 - 1.5 * iqr
-        high = q3 + 1.5 * iqr
-        trimmed = [
-            c for c in selected
-            if low <= c["total"] <= high
-        ]
-        if trimmed:
-            selected = trimmed
-
-    return sorted(
-        selected,
-        key=lambda c: (
-            -c["similarity"],
-            c["total"]
-        )
-    )
 
 def calculate_valuation(conn, target):
+    problem = target_valuation_problem(target)
+    if problem:
+        return insufficient_valuation(problem)
     sold = calculate_sold_valuation(conn, target)
     if sold is not None:
         return sold
@@ -4494,8 +4107,8 @@ def display_listing(item):
     )
 
     print(
-        f"Delivered: "
-        f"£{item['total']:.2f}"
+        "Delivered: " +
+        money(item["total"])
     )
 
     print(
@@ -4825,8 +4438,9 @@ def dashboard_html():
         else:
             under = (
                 "<span class='unknown'>"
-                "Insufficient data"
-                "</span>"
+                + ("Asking-price reference" if (row["valuation_basis"] or "").startswith("ACTIVE_FALLBACK")
+                 else "Not scored")
+                + "</span>"
             )
 
         score = (
@@ -4928,6 +4542,7 @@ def dashboard_html():
                         ]
                     )}
                     <div class="small">
+                    Comparable middle 50% (not a confidence interval)<br>
                     {
                         (
                             money(
@@ -4974,8 +4589,7 @@ def dashboard_html():
                     <br>
                     {
                         html.escape(
-                            row["valuation_basis"]
-                            or ""
+                            valuation_label(row["valuation_basis"] or "")
                         )
                     }
                     </div>
@@ -5124,7 +4738,7 @@ def dashboard_html():
         <th>Listing age</th>
         <th>Model</th>
         <th>Delivered</th>
-        <th>Est. sold value</th>
+        <th>Value / asking reference</th>
         <th>Apparent undervalue</th>
         <th>Score</th>
         <th>Confidence</th>
@@ -5234,12 +4848,14 @@ def ebay_get_item(token, item_id):
             "Authorization": f"Bearer {token}",
             "X-EBAY-C-MARKETPLACE-ID": MARKETPLACE,
             "Accept": "application/json",
+            **({"X-EBAY-C-ENDUSERCTX": "contextualLocation=" + urllib.parse.quote(
+                "country=GB,zip=" + os.environ["BUYER_POSTCODE"], safe="")}
+               if os.environ.get("BUYER_POSTCODE") else {}),
         },
         method="GET",
     )
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
-            record_api_call(conn=None, endpoint="getItem") if False else None
             return "ACTIVE", json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
@@ -5311,11 +4927,12 @@ def recheck_active_bin_listings(conn, token, maximum=ACTIVE_BIN_RECHECKS_PER_CYC
     inactivated = 0
 
     for row in rows:
-        if checked >= maximum:
+        if checked >= maximum or not can_detail(conn):
             break
         if not is_fixed_price_listing(row):
             continue
 
+        record_api_call(conn, "BROWSE", "GET_ITEM")
         state, detail = ebay_get_item(token, row["item_id"])
         checked += 1
         now = iso_now()
@@ -5338,6 +4955,13 @@ def recheck_active_bin_listings(conn, token, maximum=ACTIVE_BIN_RECHECKS_PER_CYC
                 "Listing housekeeping: BIN no longer available -> "
                 f"{row['item_id']} {row['title'] or ''}"
             )
+        elif state == "ACTIVE" and detail:
+            # Reuse the detail already fetched, including its shipping quote.
+            # This also brings older active listings through version migrations
+            # even when they no longer appear among the newest search results.
+            item = analyse_listing(conn, token, detail, fetch_detail=False, supplied_detail=detail)
+            if item:
+                save_listing(conn, item)
         elif state == "ERROR":
             print(
                 "Listing housekeeping: availability check error -> "
@@ -5537,6 +5161,7 @@ def run_cycle(
     )
 
     repair_v078_model_and_sold_cache(conn)
+    repair_v080_valuation_cache(conn)
 
     print()
     print("Collecting sold-market evidence...")
@@ -5670,6 +5295,10 @@ def start_persistent_logging():
 def main():
     start_persistent_logging()
     init_db()
+    with connect_db() as migration_conn:
+        repair_v078_model_and_sold_cache(migration_conn)
+        repair_v080_valuation_cache(migration_conn)
+    migration_conn.close()
 
     print(
         f"eBay Laptop Hunter "

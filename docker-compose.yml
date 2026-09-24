@@ -3,13 +3,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ebay-laptop-hunter:0.7.9
+    image: ebay-laptop-hunter:0.8.0
     restart: unless-stopped
     environment:
       TZ: ${TZ:-Europe/London}
       DASHBOARD_PORT: "8080"
       EBAY_CLIENT_ID: ${EBAY_CLIENT_ID}
       EBAY_CLIENT_SECRET: ${EBAY_CLIENT_SECRET}
+      BUYER_POSTCODE: ${BUYER_POSTCODE:-}
     volumes:
       - ${HUNTER_DATA_PATH:-./data}:/data
     ports:

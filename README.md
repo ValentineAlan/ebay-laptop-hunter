@@ -13,8 +13,78 @@ Self-hosted eBay UK laptop deal hunter with:
 
 Current bundled versions:
 
-- Hunter: `0.7.9`
+- Hunter: `0.8.0`
 - SID helper: `0.1.1`
+
+## Valuation changes in 0.8.0
+
+This release favours fewer, better-supported valuations over optimistic bargain
+scores. At least three distinct, recent sold listing IDs/titles must match an
+identified model, exact CPU, RAM and storage capacity. Multi-sale rows no longer
+gain extra price influence or count as independent listings. Identical titles are
+conservatively deduplicated, which can also exclude legitimate repeated sales.
+
+Known faults, missing parts, bundles, options listings and explicit refurbished/
+warranty offerings are excluded from the ordinary-used valuation pool. Faulty or
+incomplete targets are marked for review instead of being assigned working-laptop
+values. Generation-less modern ThinkPads and unrecognised model codes are not
+valued. Detachable and Surface Pro 7+ variants retain their identities. Explicit
+display, dedicated-GPU, refresh-rate and HDD/eMMC title markers must also match;
+an advertised OLED or RTX configuration cannot price an unspecified target.
+
+Sold evidence must have a parseable last-sale date within 90 days and have been
+collected within seven days. Queries refresh after 24 hours even when an estimate
+already exists. Recency weights have a 60-day half-life; these weights use a row's
+last sale, not individual transaction dates. Log-price median absolute deviation
+filtering rejects gross outliers, including when most prices are identical.
+
+Confidence uses effective listing count and price spread, and is capped at MEDIUM
+because sold titles do not establish seller diversity, battery health, display
+configuration or complete condition. LOW scores are capped at 45 and MEDIUM at 75.
+The score uses the comparable lower quartile, while the displayed apparent saving
+uses the median. Quartiles describe comparable spread, not a confidence interval.
+
+Only current, recently observed fixed-price listings contribute to the active
+asking-price reference. That reference never generates a bargain score or an
+apparent saving. Auction targets do not receive a buy-now score.
+
+Unknown postage is no longer free shipping. Browse prices must explicitly be GBP;
+Product Research prices must carry GBP currency evidence (a GBP code or £ symbol).
+Unrecognised Product Research price/date structures are excluded, so changes to
+eBay's response format may reduce coverage until the parser is updated. Optionally
+set `BUYER_POSTCODE` in `.env` for location-aware Browse shipping estimates.
+
+This is a conservative matching release, not a calibrated specification or repair
+cost model. It does not estimate display/GPU premiums, battery replacement costs,
+seller warranty premiums, resale fees or net profit. Do not interpret the apparent
+saving as resale profit. Buyer Protection is not added automatically: the current
+data sources still need live verification of their respective fee bases.
+
+### Upgrade
+
+1. Stop the hunter and back up its persistent `hunter.db`.
+2. Replace the application files and rebuild/start the hunter:
+
+   ```bash
+   docker compose up -d --build hunter
+   ```
+
+3. Keep the existing data/browser volumes and Product Research login. The one-time
+   migration clears old estimates and expires research searches, preserving raw
+   history. Existing active listings are reanalysed as they are rediscovered or
+   checked for availability; research is then recollected under the API budgets.
+   Expect temporarily fewer valuations and permanently fewer unsupported scores.
+
+To roll back, stop the hunter and restore both the previous application version
+and the database backup.
+
+Run the regression tests without eBay credentials:
+
+```bash
+python -B -m unittest discover -s tests -v
+```
+
+The tests cover synthetic cases and mocked responses, not live eBay transactions.
 
 ## Architecture
 
