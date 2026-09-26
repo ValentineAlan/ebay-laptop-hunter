@@ -3907,12 +3907,18 @@ def _title_capacity_to_gb(number, unit="GB"):
     return int(round(value))
 
 
+
 def title_spec_overrides(title):
     """
-    Conservatively extract clearly advertised RAM/storage from a title.
+    Conservatively derive advertised RAM and storage from a listing title.
 
-    Explicit RAM/storage labels win.  A simple '16GB 512GB' pair is accepted
-    only when it looks like the conventional RAM-then-storage laptop format.
+    Rules:
+      * Explicit RAM labels always win.
+      * DDR-labelled capacity is RAM.
+      * Explicit SSD/NVMe/HDD/eMMC/storage labels identify storage.
+      * Unlabelled '16GB 512GB' style titles are accepted only when exactly
+        two capacity tokens exist and they form a plausible RAM/storage pair.
+      * A storage value must never be reinterpreted as RAM.
     """
     text = normalise(title)
 
@@ -3924,76 +3930,114 @@ def title_spec_overrides(title):
     if not text:
         return result
 
+    plausible_ram = {
+        1, 2, 3, 4, 6, 8, 12, 16,
+        20, 24, 32, 40, 48, 64,
+        96, 128, 192, 256
+    }
+
     # --------------------------------------------------------
-    # Explicit RAM
+    # RAM: only strongly labelled evidence.
     # --------------------------------------------------------
 
     ram_patterns = [
-        r"\b(\d{1,3})\s*GB\s*(?:DDR[345](?:-\d+)?\s*)?(?:RAM|MEMORY)\b",
-        r"\b(?:RAM|MEMORY)\s*[:\-]?\s*(\d{1,3})\s*GB\b",
+        # 16GB RAM / 16 GB Memory
+        r"\b(\d{1,3})\s*GB\s*(?:RAM|MEMORY)\b",
+
+        # 16GB DDR4 RAM, 16GB DDR5
+        r"\b(\d{1,3})\s*GB\s*"
+        r"(?:DDR[345](?:L)?(?:-\d+)?)"
+        r"(?:\s*(?:RAM|MEMORY))?\b",
+
+        # RAM 16GB / Memory: 16 GB
+        r"\b(?:RAM|MEMORY)\s*[:=\-]?\s*"
+        r"(\d{1,3})\s*GB\b",
     ]
 
     for pattern in ram_patterns:
-        m = re.search(pattern, text, re.I)
-
-        if m:
-            value = int(m.group(1))
-
-            if 2 <= value <= 256:
-                result["ram_gb"] = value
-                break
-
-    # --------------------------------------------------------
-    # Explicit storage: 512GB SSD, 1TB NVMe, SSD 512GB etc.
-    # --------------------------------------------------------
-
-    storage_patterns = [
-        r"\b(\d+(?:\.\d+)?)\s*(TB|GB)\s*"
-        r"(?:M\.?2\s*)?"
-        r"(?:NVME|SSD|HDD|EMMC|STORAGE|DRIVE)\b",
-
-        r"\b(?:NVME|SSD|HDD|EMMC|STORAGE|DRIVE)\s*"
-        r"[:\-]?\s*(\d+(?:\.\d+)?)\s*(TB|GB)\b",
-
-        # Common shorthand: 256SSD / 512NVMe
-        r"\b(\d{2,4})\s*(GB)?\s*(SSD|NVME|HDD|EMMC)\b",
-    ]
-
-    for pattern in storage_patterns:
-        m = re.search(pattern, text, re.I)
-
-        if not m:
-            continue
-
-        groups = m.groups()
-
-        number = groups[0]
-
-        unit = "GB"
-
-        if len(groups) >= 2 and groups[1]:
-            candidate = str(groups[1]).upper()
-
-            if candidate in ("GB", "TB"):
-                unit = candidate
-
-        value = _title_capacity_to_gb(
-            number,
-            unit
+        match = re.search(
+            pattern,
+            text,
+            re.I
         )
 
-        if value and 32 <= value <= 16384:
-            result["storage_gb"] = normalise_storage_gb(value)
+        if not match:
+            continue
+
+        value = int(
+            match.group(1)
+        )
+
+        if value in plausible_ram:
+            result["ram_gb"] = value
             break
 
     # --------------------------------------------------------
-    # Conservative fallback for titles such as:
+    # Storage: must have an explicit storage device/label.
+    # --------------------------------------------------------
+
+    storage_patterns = [
+        # 512GB SSD / 1TB NVMe / 500GB HDD
+        r"\b(\d+(?:\.\d+)?)\s*(TB|GB)\s*"
+        r"(?:M\.?2\s*)?"
+        r"(?:PCIE\s*)?"
+        r"(?:NVME|SSD|HDD|EMMC|STORAGE|DRIVE)\b",
+
+        # SSD 512GB / NVMe: 1TB
+        r"\b(?:NVME|SSD|HDD|EMMC|STORAGE|DRIVE)\s*"
+        r"[:=\-]?\s*"
+        r"(\d+(?:\.\d+)?)\s*(TB|GB)\b",
+
+        # 256SSD / 512NVMe shorthand
+        r"\b(\d{2,4})\s*"
+        r"(SSD|NVME|HDD|EMMC)\b",
+    ]
+
+    for index, pattern in enumerate(
+        storage_patterns
+    ):
+        match = re.search(
+            pattern,
+            text,
+            re.I
+        )
+
+        if not match:
+            continue
+
+        if index < 2:
+            number = match.group(1)
+            unit = match.group(2)
+        else:
+            number = match.group(1)
+            unit = "GB"
+
+        try:
+            value = float(number)
+        except (TypeError, ValueError):
+            continue
+
+        if str(unit).upper() == "TB":
+            value *= 1024
+
+        value = int(
+            round(value)
+        )
+
+        if 32 <= value <= 16384:
+            result["storage_gb"] = normalise_storage_gb(
+                value
+            )
+            break
+
+    # --------------------------------------------------------
+    # Very conservative unlabelled pair fallback.
     #
+    # Examples:
+    #   MacBook Air M1 8GB 256GB
     #   Latitude 7350 ... 32GB 512GB Win 11
     #
-    # Only infer when the title has exactly two plausible capacity
-    # numbers and the first looks like RAM while the second looks
-    # like storage.
+    # Do NOT use this when RAM/storage were already explicit.
     # --------------------------------------------------------
 
     if (
@@ -4002,42 +4046,49 @@ def title_spec_overrides(title):
     ):
         capacities = []
 
-        for m in re.finditer(
+        for match in re.finditer(
             r"\b(\d+(?:\.\d+)?)\s*(TB|GB)\b",
             text,
             re.I
         ):
-            gb = _title_capacity_to_gb(
-                m.group(1),
-                m.group(2)
+            number = float(
+                match.group(1)
             )
 
-            if gb:
-                capacities.append(gb)
+            unit = match.group(2).upper()
 
+            if unit == "TB":
+                number *= 1024
+
+            capacities.append(
+                int(round(number))
+            )
+
+        # Only infer from the very common:
+        #
+        #   RAM-capacity first, storage-capacity second
+        #
+        # and only when there are exactly two capacity tokens.
         if len(capacities) == 2:
             first, second = capacities
 
-            plausible_ram = {
-                2, 4, 6, 8, 12, 16, 20, 24,
-                32, 40, 48, 64, 96, 128
-            }
+            second_normalised = normalise_storage_gb(
+                second
+            )
 
             if (
                 first in plausible_ram
-                and second >= 64
-                and second > first
+                and second_normalised is not None
+                and second_normalised >= 64
+                and second_normalised > first
             ):
                 if result["ram_gb"] is None:
                     result["ram_gb"] = first
 
                 if result["storage_gb"] is None:
-                    result["storage_gb"] = normalise_storage_gb(
-                        second
-                    )
+                    result["storage_gb"] = second_normalised
 
     return result
-
 
 def effective_ram_storage(row):
     """
