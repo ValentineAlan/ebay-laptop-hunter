@@ -50,7 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # VERSION / CONFIG
 # ============================================================
 
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 
 DB = "/data/hunter.db"
 LOG_FILE = "/data/hunter.log"
@@ -4916,13 +4916,13 @@ def recheck_active_bin_listings(conn, token, maximum=ACTIVE_BIN_RECHECKS_PER_CYC
                 OR availability_checked_at <= ?
               )
         ORDER BY
- CASE
-        WHEN valuation_basis='REANALYSIS_REQUIRED' THEN 0
-        ELSE 1
-    END,
-    CASE WHEN deal_score IS NULL THEN 1 ELSE 0 END,
-    deal_score DESC,
-    COALESCE(availability_checked_at, '1970-01-01') ASC,
+            CASE
+                WHEN valuation_basis='REANALYSIS_REQUIRED' THEN 0
+                ELSE 1
+            END,
+            CASE WHEN deal_score IS NULL THEN 1 ELSE 0 END,
+            deal_score DESC,
+            COALESCE(availability_checked_at, '1970-01-01') ASC,
             first_seen ASC
         LIMIT 100
     """, (cutoff, interval_cutoff)).fetchall()
@@ -4933,11 +4933,11 @@ def recheck_active_bin_listings(conn, token, maximum=ACTIVE_BIN_RECHECKS_PER_CYC
     for row in rows:
         if checked >= maximum or not can_detail(conn):
             break
-       if (
-    not needs_reanalysis(row)
-    and not is_fixed_price_listing(row)
-):
-    continue
+        if (
+            not needs_reanalysis(row)
+            and not is_fixed_price_listing(row)
+        ):
+            continue
 
         record_api_call(conn, "BROWSE", "GET_ITEM")
         state, detail = ebay_get_item(token, row["item_id"])
