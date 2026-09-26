@@ -4966,9 +4966,32 @@ def recheck_active_bin_listings(conn, token, maximum=ACTIVE_BIN_RECHECKS_PER_CYC
             # Reuse the detail already fetched, including its shipping quote.
             # This also brings older active listings through version migrations
             # even when they no longer appear among the newest search results.
+            was_reanalysis = needs_reanalysis(row)
+
             item = analyse_listing(conn, token, detail, fetch_detail=False, supplied_detail=detail)
             if item:
                 save_listing(conn, item)
+
+                if was_reanalysis:
+                    conn.execute(
+                        """
+                        UPDATE listings
+                        SET
+                            estimated_value=NULL,
+                            valuation_q1=NULL,
+                            valuation_q3=NULL,
+                            comparable_count=NULL,
+                            valuation_confidence=NULL,
+                            undervaluation_gbp=NULL,
+                            undervaluation_pct=NULL,
+                            deal_score=NULL,
+                            valuation_basis=NULL,
+                            valuation_research_at=NULL
+                        WHERE item_id=?
+                        """,
+                        (row["item_id"],),
+                    )
+                    conn.commit()
         elif state == "ERROR":
             print(
                 "Listing housekeeping: availability check error -> "
