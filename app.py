@@ -4360,12 +4360,13 @@ def dashboard_html():
         SELECT *
         FROM listings
         WHERE COALESCE(active, 1) = 1
+          AND estimated_value IS NOT NULL
+          AND deal_score IS NOT NULL
+          AND undervaluation_gbp IS NOT NULL
+          AND undervaluation_gbp > 0
+          AND undervaluation_pct IS NOT NULL
+          AND undervaluation_pct > 0
         ORDER BY
-            CASE
-                WHEN deal_score IS NULL
-                THEN 1
-                ELSE 0
-            END,
             deal_score DESC,
             undervaluation_gbp DESC,
             first_seen DESC
@@ -4388,8 +4389,13 @@ def dashboard_html():
     candidates = conn.execute("""
         SELECT COUNT(*) AS n
         FROM listings
-        WHERE undervaluation_gbp > 0
-          AND COALESCE(active, 1) = 1
+        WHERE COALESCE(active, 1) = 1
+          AND estimated_value IS NOT NULL
+          AND deal_score IS NOT NULL
+          AND undervaluation_gbp IS NOT NULL
+          AND undervaluation_gbp > 0
+          AND undervaluation_pct IS NOT NULL
+          AND undervaluation_pct > 0
     """).fetchone()["n"]
 
     api_calls = browse_usage_today(
