@@ -3458,13 +3458,93 @@ def repair_v080_valuation_cache(conn):
 
 
 def sold_search_queries(row):
-    """Use exact model only when it is a real model identity, not a family."""
+    """
+    Search Product Research from most specific to broadest.
+
+    Broad model-only searches can fill the Product Research result limit with
+    unrelated configurations. Prefer exact model + CPU + RAM + storage first,
+    then progressively relax the query.
+
+    The valuation matcher remains strict; these queries only improve retrieval
+    of potentially relevant sold evidence.
+    """
     if target_valuation_problem(row):
         return []
-    brand = normalise(row["brand"])
-    model = valuation_model(brand, row["model"])
-    return [f"{brand} {model}"] if brand and model else []
 
+    brand = normalise(
+        row["brand"]
+    )
+
+    model = valuation_model(
+        brand,
+        row["model"]
+    )
+
+    cpu = normalise(
+        row["cpu"]
+    )
+
+    ram = row_value(
+        row,
+        "ram_gb"
+    )
+
+    storage = row_value(
+        row,
+        "storage_gb"
+    )
+
+    if not brand or not model:
+        return []
+
+    base = f"{brand} {model}"
+
+    queries = []
+
+    if cpu and ram and storage:
+        queries.append(
+            f"{base} {cpu} {int(ram)}GB {int(storage)}GB"
+        )
+
+    if cpu and ram:
+        queries.append(
+            f"{base} {cpu} {int(ram)}GB"
+        )
+
+    if cpu:
+        queries.append(
+            f"{base} {cpu}"
+        )
+
+    queries.append(
+        base
+    )
+
+    # Preserve order while removing accidental duplicates.
+    unique = []
+    seen = set()
+
+    for query in queries:
+        query = re.sub(
+            r"\s+",
+            " ",
+            normalise(query)
+        ).strip()
+
+        key = query.lower()
+
+        if not query or key in seen:
+            continue
+
+        seen.add(
+            key
+        )
+
+        unique.append(
+            query
+        )
+
+    return unique
 
 def sold_search_is_fresh(conn, key):
     row = conn.execute(
