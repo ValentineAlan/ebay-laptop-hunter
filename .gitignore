@@ -2,6 +2,9 @@ __pycache__/
 *.py[cod]
 tests/.tmp-*/
 .env
+.env.*
+!.env.example
+*.env
 data/
 browser-config/
 *.db
@@ -11,3 +14,8 @@ browser-config/
 product-research.curl
 ebaysid.current
 ebaysid.refresh-request
+ebaysid-helper-status.json
+product-research-session.json
+*.har
+cookies.txt
+cookies.json

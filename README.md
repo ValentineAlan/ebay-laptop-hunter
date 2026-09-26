@@ -152,6 +152,9 @@ credentials because they can contain authenticated session information.
 
 ## TrueNAS SCALE
 
+For GitHub-based rebuilds that retain existing app secrets and persistent data,
+see [TrueNAS update instructions](docs/truenas-updates.md).
+
 For the current setup, use host paths such as:
 
 ```text

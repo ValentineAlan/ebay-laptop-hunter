@@ -1,0 +1,7 @@
+# Only application sources and Dockerfiles belong in an image build context.
+# Keep local credentials, databases and browser profiles out of Docker builds.
+**
+!Dockerfile
+!Dockerfile.ebaysid-helper
+!app.py
+!ebaysid-helper.py
