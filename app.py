@@ -105,7 +105,7 @@ POLL_85_PERCENT = 300
 POLL_90_PERCENT = 600
 
 # Valuation
-MIN_COMPARABLES = 3
+MIN_COMPARABLES = 2
 MEDIUM_CONFIDENCE_COMPARABLES = 6
 
 # Don't use ancient active observations indefinitely.
@@ -3927,6 +3927,62 @@ def select_sold_evidence(conn, target):
     return selected if len(selected) >= MIN_COMPARABLES else []
 
 
+
+def canonical_sold_item_id(value):
+    """
+    Return a stable eBay item ID from Product Research evidence.
+
+    Product Research may expose an item ID as a normal string, a mapping-like
+    textual-display object, or its string representation. Prefer a plausible
+    9-15 digit eBay ID. Preserve a non-empty original string only when no
+    numeric ID can safely be recovered.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, dict):
+        for key in ("value", "text", "itemId", "item_id"):
+            candidate = value.get(key)
+            if candidate is not None:
+                result = canonical_sold_item_id(candidate)
+                if result:
+                    return result
+
+    text = normalise(value)
+
+    if not text:
+        return None
+
+    # Normal Browse IDs sometimes look like:
+    # v1|298374124379|0
+    browse_match = re.search(
+        r"(?:^|\|)(\d{9,15})(?:\||$)",
+        text
+    )
+    if browse_match:
+        return browse_match.group(1)
+
+    # Product Research TextualDisplayValue representations contain the
+    # numeric item ID in their 'value' field.
+    value_match = re.search(
+        r"""['"]value['"]\s*:\s*['"](\d{9,15})['"]""",
+        text
+    )
+    if value_match:
+        return value_match.group(1)
+
+    # Plain eBay item ID.
+    if re.fullmatch(r"\d{9,15}", text):
+        return text
+
+    # Conservative final recovery: accept exactly one plausible numeric ID.
+    numbers = re.findall(r"(?<!\d)(\d{9,15})(?!\d)", text)
+
+    if len(set(numbers)) == 1:
+        return numbers[0]
+
+    return text
+
 def sold_candidates(conn, target):
     if target_valuation_problem(target):
         return []
@@ -3937,11 +3993,20 @@ def sold_candidates(conn, target):
     ).fetchall()
     best = {}
     fingerprints = set()
+    target_item_id = canonical_sold_item_id(
+        row_value(target, "item_id")
+    )
+
     for row in sorted(rows, key=lambda r: r["collected_at"], reverse=True):
-        if not row["item_id"] or row["item_id"].startswith("title:"):
+        sold_item_id = canonical_sold_item_id(
+            row["item_id"]
+        )
+
+        if not sold_item_id or sold_item_id.startswith("title:"):
             continue
-        # Browse IDs contain the legacy item ID between vertical bars.
-        if row["item_id"] in str(target["item_id"]).split("|"):
+
+        # Never use the target listing itself as sold evidence.
+        if target_item_id and sold_item_id == target_item_id:
             continue
         age = evidence_age_days(row["last_sold"])
         cache_age = evidence_age_days(row["collected_at"])
@@ -3957,10 +4022,10 @@ def sold_candidates(conn, target):
             continue
         # Repeated identical adverts must not manufacture independent evidence.
         fingerprint = normalise(row["title"]).lower()
-        if row["item_id"] in best or fingerprint in fingerprints:
+        if sold_item_id in best or fingerprint in fingerprints:
             continue
         fingerprints.add(fingerprint)
-        best[row["item_id"]] = dict(row=row, total=price, similarity=100,
+        best[sold_item_id] = dict(row=row, total=price, similarity=100,
             tier="EXACT_MODEL_SPEC", units=max(1, int(row["units_sold"] or 1)),
             weight=2 ** (-age / 60.0))
     return list(best.values())
