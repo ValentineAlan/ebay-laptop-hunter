@@ -4094,6 +4094,7 @@ def reconcile_item_specs_from_title(item):
 
 
 
+
 def exact_spec_identity(row):
     cpu = parse_cpu(
         row_value(row, "cpu"),
@@ -4213,6 +4214,7 @@ def advertised_variants_compatible(left, right):
         return False
 
     return True
+
 
 
 
