@@ -68,7 +68,7 @@ PRODUCT_RESEARCH_DAY_RANGE = 90
 PRODUCT_RESEARCH_LIMIT = 50
 PRODUCT_RESEARCH_MAX_PAGES = 2
 PRODUCT_RESEARCH_SEARCHES_PER_CYCLE = 12
-ACTIVE_BIN_RECHECKS_PER_CYCLE = 40
+ACTIVE_BIN_RECHECKS_PER_CYCLE = 100
 ACTIVE_BIN_RECHECK_MIN_AGE_MINUTES = 10
 ACTIVE_BIN_RECHECK_INTERVAL_MINUTES = 15
 
@@ -96,8 +96,7 @@ SEARCH_RESERVE = 1000
 EMERGENCY_RESERVE = 250
 
 MAX_DETAIL_CALLS_PER_CYCLE = 40
-MAX_BACKFILL_DETAILS_PER_CYCLE = 20
-
+MAX_BACKFILL_DETAILS_PER_CYCLE = 50
 POLL_NORMAL = 90
 POLL_60_PERCENT = 120
 POLL_75_PERCENT = 180
@@ -3790,7 +3789,7 @@ def collect_needed_sold_data(conn, maximum=PRODUCT_RESEARCH_SEARCHES_PER_CYCLE):
     """).fetchone()["n"]
 
     print(
-        f"Valuation backlog: attempted {attempted_listings} listings this cycle; "
+        f"Awaiting reanalysis: attempted {attempted_listings} listings this cycle; "
         f"{remaining} identifiable listings currently unvalued"
     )
     return done
@@ -5036,17 +5035,48 @@ def dashboard_html():
           AND capability='WIN11_APPROVED'
     """).fetchone()["n"]
 
-    valuation_backlog = conn.execute("""
-        SELECT COUNT(*) AS n
+
+    # Exact pipeline state using the same eligibility rules as valuation.
+    # This avoids calling thousands of merely identifiable listings
+    # "awaiting valuation".
+    pipeline_rows = conn.execute("""
+        SELECT *
         FROM listings
-        WHERE estimated_value IS NULL
-          AND cpu IS NOT NULL AND trim(cpu) <> ''
-          AND (
-                (brand IS NOT NULL AND trim(brand) <> '')
-                OR
-                (model IS NOT NULL AND trim(model) <> '')
-              )
-    """).fetchone()["n"]
+        WHERE COALESCE(active, 1) = 1
+    """).fetchall()
+
+    ready_unvalued = 0
+    reanalysis_backlog = 0
+    incomplete_spec = 0
+    condition_review = 0
+    unknown_cost = 0
+
+    for pipeline_row in pipeline_rows:
+
+        if pipeline_row["estimated_value"] is not None:
+            continue
+
+        problem = target_valuation_problem(
+            pipeline_row
+        )
+
+        if problem is None:
+            ready_unvalued += 1
+
+        elif problem == "REANALYSIS_REQUIRED":
+            reanalysis_backlog += 1
+
+        elif problem == "INCOMPLETE_IDENTITY_OR_SPEC":
+            incomplete_spec += 1
+
+        elif problem == "CONDITION_REQUIRES_REVIEW":
+            condition_review += 1
+
+        elif problem == "UNKNOWN_DELIVERED_COST":
+            unknown_cost += 1
+
+    # Backward-compatible name for the existing dashboard card.
+    valuation_backlog = reanalysis_backlog
 
     session_state = _read_json_file(PRODUCT_RESEARCH_SESSION_STATE)
     helper_state = _read_json_file(PRODUCT_RESEARCH_HELPER_STATE)
@@ -5393,6 +5423,12 @@ def dashboard_html():
 
         <div class="card">
             <div class="big">{valuation_backlog}</div>
+            <div class="small">
+            Ready but insufficient sales: <strong>{ready_unvalued}</strong>
+             &nbsp;·&nbsp; Incomplete identity/spec: <strong>{incomplete_spec}</strong>
+             &nbsp;·&nbsp; Condition/review: <strong>{condition_review}</strong>
+             &nbsp;·&nbsp; Unknown delivered cost: <strong>{unknown_cost}</strong>
+            </div>
             Identifiable laptops awaiting valuation
         </div>
 
@@ -5499,7 +5535,6 @@ class DashboardHandler(
         *args
     ):
         pass
-
 
 def start_dashboard():
     server = ThreadingHTTPServer(
