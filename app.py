@@ -1679,6 +1679,8 @@ def identify_cpu(
         detail
     )
 
+    candidates = []
+
     processor_values = []
 
     for name, values in (
@@ -1693,6 +1695,7 @@ def identify_cpu(
                 values
             )
 
+    # eBay processor aspects.
     for value in processor_values:
 
         result = parse_cpu(
@@ -1701,8 +1704,11 @@ def identify_cpu(
         )
 
         if result:
-            return result
+            candidates.append(
+                result
+            )
 
+    # Listing title.
     title = summary.get(
         "title",
         ""
@@ -1714,8 +1720,11 @@ def identify_cpu(
     )
 
     if result:
-        return result
+        candidates.append(
+            result
+        )
 
+    # Full item details.
     text = all_text(
         summary,
         detail
@@ -1727,7 +1736,64 @@ def identify_cpu(
     )
 
     if result:
-        return result
+        candidates.append(
+            result
+        )
+
+    # An exact processor identity must beat a generic generation-only
+    # description, regardless of which source supplied the generic value.
+    #
+    # Within equal confidence, prefer structured eBay processor aspects,
+    # followed by the title, then general item details.
+    source_priority = {
+        "EBAY_PROCESSOR_ASPECT": 0,
+        "TITLE": 1,
+        "ITEM_DETAILS": 2,
+    }
+
+    exact = [
+        cpu
+        for cpu in candidates
+        if cpu.get(
+            "confidence"
+        ) == "EXACT"
+    ]
+
+    if exact:
+
+        exact.sort(
+            key=lambda cpu:
+                source_priority.get(
+                    cpu.get(
+                        "source"
+                    ),
+                    99
+                )
+        )
+
+        return exact[0]
+
+    generation = [
+        cpu
+        for cpu in candidates
+        if cpu.get(
+            "confidence"
+        ) == "GENERATION"
+    ]
+
+    if generation:
+
+        generation.sort(
+            key=lambda cpu:
+                source_priority.get(
+                    cpu.get(
+                        "source"
+                    ),
+                    99
+                )
+        )
+
+        return generation[0]
 
     # Safe platform-level inference.
     if re.search(
