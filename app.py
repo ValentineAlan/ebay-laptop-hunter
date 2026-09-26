@@ -2715,6 +2715,8 @@ def save_listing(
     conn,
     item
 ):
+    reconcile_item_specs_from_title(item)
+
     now = iso_now()
 
     existing = conn.execute("""
@@ -3857,15 +3859,268 @@ def ordinary_laptop(title, condition=""):
     ) and not is_genuinely_new(condition)
 
 
-def exact_spec_identity(row):
-    cpu = parse_cpu(row_value(row, "cpu"), "VALUATION")
-    confidence = row_value(row, "cpu_confidence", "EXACT")
-    return bool(
-        precise_model_for_valuation(row_value(row, "brand"), row_value(row, "model"))
-        and cpu and cpu["confidence"] == "EXACT" and confidence == "EXACT"
-        and row_value(row, "ram_gb") and row_value(row, "storage_gb")
+
+def normalise_storage_gb(value):
+    """Normalise equivalent advertised/usable capacities for valuation."""
+    if value is None:
+        return None
+
+    try:
+        value = int(round(float(value)))
+    except (TypeError, ValueError):
+        return None
+
+    # Common 256 GB class representations.
+    if 230 <= value <= 256:
+        return 256
+
+    # Common 512 GB class representations.
+    if 460 <= value <= 512:
+        return 512
+
+    # Common 1 TB class representations.
+    if 900 <= value <= 1024:
+        return 1024
+
+    # Common 2 TB class representations.
+    if 1800 <= value <= 2048:
+        return 2048
+
+    # Common 4 TB class representations.
+    if 3600 <= value <= 4096:
+        return 4096
+
+    return value
+
+
+def _title_capacity_to_gb(number, unit="GB"):
+    try:
+        value = float(number)
+    except (TypeError, ValueError):
+        return None
+
+    unit = normalise(unit).upper()
+
+    if unit in ("TB", "T"):
+        value *= 1024
+
+    return int(round(value))
+
+
+def title_spec_overrides(title):
+    """
+    Conservatively extract clearly advertised RAM/storage from a title.
+
+    Explicit RAM/storage labels win.  A simple '16GB 512GB' pair is accepted
+    only when it looks like the conventional RAM-then-storage laptop format.
+    """
+    text = normalise(title)
+
+    result = {
+        "ram_gb": None,
+        "storage_gb": None,
+    }
+
+    if not text:
+        return result
+
+    # --------------------------------------------------------
+    # Explicit RAM
+    # --------------------------------------------------------
+
+    ram_patterns = [
+        r"\b(\d{1,3})\s*GB\s*(?:DDR[345](?:-\d+)?\s*)?(?:RAM|MEMORY)\b",
+        r"\b(?:RAM|MEMORY)\s*[:\-]?\s*(\d{1,3})\s*GB\b",
+    ]
+
+    for pattern in ram_patterns:
+        m = re.search(pattern, text, re.I)
+
+        if m:
+            value = int(m.group(1))
+
+            if 2 <= value <= 256:
+                result["ram_gb"] = value
+                break
+
+    # --------------------------------------------------------
+    # Explicit storage: 512GB SSD, 1TB NVMe, SSD 512GB etc.
+    # --------------------------------------------------------
+
+    storage_patterns = [
+        r"\b(\d+(?:\.\d+)?)\s*(TB|GB)\s*"
+        r"(?:M\.?2\s*)?"
+        r"(?:NVME|SSD|HDD|EMMC|STORAGE|DRIVE)\b",
+
+        r"\b(?:NVME|SSD|HDD|EMMC|STORAGE|DRIVE)\s*"
+        r"[:\-]?\s*(\d+(?:\.\d+)?)\s*(TB|GB)\b",
+
+        # Common shorthand: 256SSD / 512NVMe
+        r"\b(\d{2,4})\s*(GB)?\s*(SSD|NVME|HDD|EMMC)\b",
+    ]
+
+    for pattern in storage_patterns:
+        m = re.search(pattern, text, re.I)
+
+        if not m:
+            continue
+
+        groups = m.groups()
+
+        number = groups[0]
+
+        unit = "GB"
+
+        if len(groups) >= 2 and groups[1]:
+            candidate = str(groups[1]).upper()
+
+            if candidate in ("GB", "TB"):
+                unit = candidate
+
+        value = _title_capacity_to_gb(
+            number,
+            unit
+        )
+
+        if value and 32 <= value <= 16384:
+            result["storage_gb"] = normalise_storage_gb(value)
+            break
+
+    # --------------------------------------------------------
+    # Conservative fallback for titles such as:
+    #
+    #   Latitude 7350 ... 32GB 512GB Win 11
+    #
+    # Only infer when the title has exactly two plausible capacity
+    # numbers and the first looks like RAM while the second looks
+    # like storage.
+    # --------------------------------------------------------
+
+    if (
+        result["ram_gb"] is None
+        or result["storage_gb"] is None
+    ):
+        capacities = []
+
+        for m in re.finditer(
+            r"\b(\d+(?:\.\d+)?)\s*(TB|GB)\b",
+            text,
+            re.I
+        ):
+            gb = _title_capacity_to_gb(
+                m.group(1),
+                m.group(2)
+            )
+
+            if gb:
+                capacities.append(gb)
+
+        if len(capacities) == 2:
+            first, second = capacities
+
+            plausible_ram = {
+                2, 4, 6, 8, 12, 16, 20, 24,
+                32, 40, 48, 64, 96, 128
+            }
+
+            if (
+                first in plausible_ram
+                and second >= 64
+                and second > first
+            ):
+                if result["ram_gb"] is None:
+                    result["ram_gb"] = first
+
+                if result["storage_gb"] is None:
+                    result["storage_gb"] = normalise_storage_gb(
+                        second
+                    )
+
+    return result
+
+
+def effective_ram_storage(row):
+    """
+    Prefer unambiguous title-advertised specifications over stored parser
+    values, then normalise storage capacity for comparable matching.
+    """
+    inferred = title_spec_overrides(
+        row_value(row, "title")
     )
 
+    ram = inferred["ram_gb"]
+
+    if ram is None:
+        ram = row_value(
+            row,
+            "ram_gb"
+        )
+
+    storage = inferred["storage_gb"]
+
+    if storage is None:
+        storage = row_value(
+            row,
+            "storage_gb"
+        )
+
+    storage = normalise_storage_gb(
+        storage
+    )
+
+    return ram, storage
+
+
+def reconcile_item_specs_from_title(item):
+    """Correct a newly analysed listing when its title is unambiguous."""
+    if not item:
+        return item
+
+    inferred = title_spec_overrides(
+        item.get("title")
+    )
+
+    if inferred["ram_gb"] is not None:
+        item["ram_gb"] = inferred["ram_gb"]
+
+    if inferred["storage_gb"] is not None:
+        item["storage_gb"] = inferred["storage_gb"]
+    elif item.get("storage_gb") is not None:
+        item["storage_gb"] = normalise_storage_gb(
+            item["storage_gb"]
+        )
+
+    return item
+
+
+
+def exact_spec_identity(row):
+    cpu = parse_cpu(
+        row_value(row, "cpu"),
+        "VALUATION"
+    )
+
+    confidence = row_value(
+        row,
+        "cpu_confidence",
+        "EXACT"
+    )
+
+    ram, storage = effective_ram_storage(
+        row
+    )
+
+    return bool(
+        precise_model_for_valuation(
+            row_value(row, "brand"),
+            row_value(row, "model")
+        )
+        and cpu
+        and cpu["confidence"] == "EXACT"
+        and confidence == "EXACT"
+        and ram
+        and storage
+    )
 
 def target_valuation_problem(target):
     if row_value(target, "classifier_version") != VERSION:
@@ -3887,40 +4142,207 @@ def insufficient_valuation(reason, count=0):
                 undervaluation_pct=None, deal_score=None, basis=reason)
 
 
-def same_spec(target, comp):
-    return (exact_spec_identity(comp)
-            and normalise(target["brand"]).lower() == normalise(comp["brand"]).lower()
-            and normalise(valuation_model(target["brand"], target["model"])).lower()
-                == normalise(valuation_model(comp["brand"], comp["model"])).lower()
-            and normalise(target["cpu"]).lower() == normalise(comp["cpu"]).lower()
-            and target["ram_gb"] == comp["ram_gb"]
-            and target["storage_gb"] == comp["storage_gb"]
-            and advertised_variants(target) == advertised_variants(comp))
 
+def advertised_variants_compatible(left, right):
+    """
+    Reject explicit contradictions, but do not interpret omission as the
+    opposite specification.
+    """
+    a = advertised_variants(left)
+    b = advertised_variants(right)
+
+    exclusive_groups = (
+        {"touch", "non_touch"},
+        {"fhd", "uhd"},
+        {"oled", "ips"},
+        {"hdd", "emmc"},
+    )
+
+    for group in exclusive_groups:
+        left_values = a & group
+        right_values = b & group
+
+        if (
+            left_values
+            and right_values
+            and left_values != right_values
+        ):
+            return False
+
+    def gpu_markers(values):
+        return {
+            value
+            for value in values
+            if re.match(
+                r"^(?:rtx|gtx|rx|quadro)",
+                value
+            )
+        }
+
+    gpu_a = gpu_markers(a)
+    gpu_b = gpu_markers(b)
+
+    if (
+        gpu_a
+        and gpu_b
+        and gpu_a != gpu_b
+    ):
+        return False
+
+    refresh_a = {
+        x for x in a
+        if re.fullmatch(
+            r"\d{2,3}hz",
+            x
+        )
+    }
+
+    refresh_b = {
+        x for x in b
+        if re.fullmatch(
+            r"\d{2,3}hz",
+            x
+        )
+    }
+
+    if (
+        refresh_a
+        and refresh_b
+        and refresh_a != refresh_b
+    ):
+        return False
+
+    return True
+
+
+
+def same_spec(target, comp):
+    if not exact_spec_identity(comp):
+        return False
+
+    target_ram, target_storage = effective_ram_storage(
+        target
+    )
+
+    comp_ram, comp_storage = effective_ram_storage(
+        comp
+    )
+
+    return (
+        normalise(
+            row_value(target, "brand")
+        ).lower()
+        ==
+        normalise(
+            row_value(comp, "brand")
+        ).lower()
+
+        and normalise(
+            valuation_model(
+                row_value(target, "brand"),
+                row_value(target, "model")
+            )
+        ).lower()
+        ==
+        normalise(
+            valuation_model(
+                row_value(comp, "brand"),
+                row_value(comp, "model")
+            )
+        ).lower()
+
+        and normalise(
+            row_value(target, "cpu")
+        ).lower()
+        ==
+        normalise(
+            row_value(comp, "cpu")
+        ).lower()
+
+        and target_ram == comp_ram
+
+        and target_storage == comp_storage
+
+        and advertised_variants_compatible(
+            target,
+            comp
+        )
+    )
 
 def advertised_variants(row):
-    """Do not transfer an advertised premium to an unspecified target.
-
-    This is a conservative title check, not a complete display/GPU parser.
-    Missing and advertised features intentionally do not match.
     """
-    text = normalise(row_value(row, "title")).lower()
-    patterns = {
-        "fhd": r"\b(?:fhd|1080p|1920\s*[x×]\s*1080)\b",
-        "uhd": r"\b(?:uhd|4k|3840\s*[x×]\s*2160)\b",
-        "oled": r"\boled\b",
-        "ips": r"\bips\b",
-        "hdd": r"\b(?:hdd|hard disk)\b",
-        "emmc": r"\bemmc\b",
-    }
-    markers = {key for key, pattern in patterns.items() if re.search(pattern, text)}
-    if re.search(r"\b(?:touch|touchscreen)\b", text) and not re.search(r"\bnon[- ]?touch", text):
-        markers.add("touch")
-    markers.update(re.sub(r"\s+", "", m) for m in re.findall(
-        r"\b(?:rtx\s*\d{4}(?:\s*ti)?|gtx\s*\d{3,4}(?:\s*ti)?|"
-        r"rx\s*\d{3,4}[a-z]*|quadro\s*[a-z]?\d{3,4}|\d{2,3}\s*hz)\b", text))
-    return markers
+    Return explicitly advertised display/storage/GPU characteristics.
 
+    Absence of a characteristic means UNKNOWN, not the opposite.
+    """
+    text = normalise(
+        row_value(row, "title")
+    ).lower()
+
+    markers = set()
+
+    patterns = {
+        "fhd":
+            r"\b(?:fhd|full\s*hd|1080p|1920\s*[x×]\s*1080)\b",
+
+        "uhd":
+            r"\b(?:uhd|4k|3840\s*[x×]\s*2160)\b",
+
+        "oled":
+            r"\boled\b",
+
+        "ips":
+            r"\bips\b",
+
+        "hdd":
+            r"\b(?:hdd|hard\s+disk)\b",
+
+        "emmc":
+            r"\bemmc\b",
+    }
+
+    for key, pattern in patterns.items():
+        if re.search(
+            pattern,
+            text,
+            re.I
+        ):
+            markers.add(key)
+
+    if re.search(
+        r"\bnon[- ]?touch(?:screen)?\b",
+        text,
+        re.I
+    ):
+        markers.add("non_touch")
+
+    elif re.search(
+        r"\b(?:touch|touchscreen)\b",
+        text,
+        re.I
+    ):
+        markers.add("touch")
+
+    markers.update(
+        re.sub(
+            r"\s+",
+            "",
+            m.lower()
+        )
+        for m in re.findall(
+            r"\b(?:"
+            r"rtx\s*\d{4}(?:\s*ti)?|"
+            r"gtx\s*\d{3,4}(?:\s*ti)?|"
+            r"rx\s*\d{3,4}[a-z]*|"
+            r"quadro\s*[a-z]?\d{3,4}|"
+            r"\d{2,3}\s*hz"
+            r")\b",
+            text,
+            re.I
+        )
+    )
+
+    return markers
 
 def select_sold_evidence(conn, target):
     selected = remove_price_outliers(sold_candidates(conn, target))
