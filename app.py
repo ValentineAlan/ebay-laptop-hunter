@@ -7815,6 +7815,8 @@ def _dashboard_html_base():
         hero_cards
     )
 
+    hero_card_count = len(hero_cards)
+
     return f"""
     <!doctype html>
     <html>
@@ -7832,15 +7834,10 @@ def _dashboard_html_base():
         <a href="/"
            class="public-logo"
            aria-label="Laptop Lander home">
-            <svg viewBox="0 0 64 64"
-                 aria-hidden="true">
-                <rect x="9" y="13"
-                      width="39" height="28"
-                      rx="4"></rect>
-                <path d="M5 47h48"></path>
-                <path d="M40 15l13 3 3 13-14 14-13-13z"></path>
-                <circle cx="47" cy="23" r="2.2"></circle>
-            </svg>
+            <img
+                src="data:image/webp;base64,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"
+                alt=""
+                class="public-logo-image">
         </a>
     </header>
 
@@ -7848,40 +7845,19 @@ def _dashboard_html_base():
 
         <div class="hero-copy">
 
-            <div class="hero-wordmark">
-                <div class="hero-wordmark-icon"
-                     aria-hidden="true">
-                    <svg viewBox="0 0 64 64">
-                        <rect x="9" y="13"
-                              width="39" height="28"
-                              rx="4"></rect>
-                        <path d="M5 47h48"></path>
-                        <path d="M40 15l13 3 3 13-14 14-13-13z"></path>
-                        <circle cx="47" cy="23" r="2.2"></circle>
-                    </svg>
-                </div>
-
-                <h1>Laptop Lander</h1>
-            </div>
+            <h1>Laptop Lander</h1>
 
             <p class="hero-subtitle">
                 Find great eBay UK laptop deals.
             </p>
 
-            <div class="hero-benefits"
-                 id="how-it-works">
+            <div class="hero-benefits">
 
                 <div class="hero-benefit">
-                    <span class="benefit-icon">
-                        <svg viewBox="0 0 32 32"
-                             aria-hidden="true">
-                            <circle cx="13"
-                                    cy="13"
-                                    r="7"></circle>
-                            <path d="M18 18l7 7"></path>
-                            <path d="M13 2v3M2 13h3M21 13h3"></path>
-                        </svg>
-                    </span>
+                    <img
+                        src="data:image/webp;base64,UklGRtoDAABXRUJQVlA4IM4DAADQFgCdASpaAFoAPlUmkUYjoiGhKBcYmHAKiWIAyFSdVIGS+H/AHROW/zsvEM/y+6A/Xr9cuxb6AH7IdYZ+wHsAfsB6ZPsf/tH+4ftUUflL/JnPkt+nx1IIC5+E9heaFpwunDoPu6pjn5/FKfgTU0WfCWaoEqCryRTHas+JmU9MWISt5EvxsR/5a/YByh30g/aDp1rOhhX4mQp437ruccGY7f68KwcBlb7W9otUpihthvRI7CtbLwpqBRZMy0CQAAD+/JYc5RtkB+qW1bDBQCN2KIet/CUIgTBBoP7pqrGTM4ocei/IaJZR10s6eZUYOol1pnFoqkCsPCNMkBt35Gtk8xXeuNrf5T2KGA29DJSYQlPIYbRCbyeosiSaDIEcCwRj/7u/GvMV79LUWE05nOw+90pZUqeJy4Dgtmk3PtRXVm78VkywDre0oIW3cH/KJ1i+d/cfQAZFAdPQxIVdJ7SxUN6uqoDfGc/3HElfEsNOJqP3vx9KQTLmPTD2qK9yo20nE4aNeCPEnd4PUHufjToqBJboM9dtF8dpnmAfDv6bn5XjyT5n6kD9VBeY9MPz53Y2YhxRQn7wfW8+8ps55m0EIT8Eo6QqDQpNO4MRwvYIdeiAjmWW96fbjTVUX999KG+jc7AXlBxCMWTWp+jgB/qqHFM9hReE5Q5LnowS+aAHLsbWZw9RC9QUmp+CEMV6ayz8Gx0jTpTGkz2ucNfrTRnaWqph6SFt2dr/7qg+2avxCUI6aXN1E7Ym65yb08O/MC35unUMsxYF/egrIUSgb0Ha+9sfp7TzmHkMMk6GtKbklJdHptSqcqSy/sT3dKf47RdcOp5zw24hOZiHnLLQ8XDKMuwsmg/YTzPWJ+6/wsmpoD9B0nI/rpoI+B85dk+PNSUV9tOL2ttbWr53nzt52JKWpWCyQIC+PYF+nn7gtkz55JOzy2Vxktk/vZGc7PbxogaGBGVb4YHk59/1Voycn0XcC+yQbq/XLDfl4z0XrBgItbU+3lZB60g0DFch3sC59lIwqSIRZyi79ZY/smLXZrH/71F5aseiBxkI8XkBTfYgg2izcTn5XiE4hj+XBzPrymu7uWKJyfL4h+ACcPEAv6qU8Om+kL7JXpJpXlX76Ko8UkgrVITTAO6BepF9JOkUJuIx4UY7L3GoHKX6lVYMhp2kMl+wrifLDZn6uamC3f9+H/eyvHv7IZglNLJWfM5Bv2bdOUsf0r5vGW77rszMjL+/vUbAUklGjxpkC8PJXKSWZJ6nObWsZsOyyQLKz6NazdG0IdisLWFphXSBMQAAAA=="
+                        alt=""
+                        class="hero-benefit-image">
 
                     <span>
                         Scours all new listings
@@ -7889,21 +7865,10 @@ def _dashboard_html_base():
                 </div>
 
                 <div class="hero-benefit">
-                    <span class="benefit-icon">
-                        <svg viewBox="0 0 32 32"
-                             aria-hidden="true">
-                            <path d="M5 25h22"></path>
-                            <rect x="7" y="16"
-                                  width="4" height="7"
-                                  rx="1"></rect>
-                            <rect x="14" y="11"
-                                  width="4" height="12"
-                                  rx="1"></rect>
-                            <rect x="21" y="6"
-                                  width="4" height="17"
-                                  rx="1"></rect>
-                        </svg>
-                    </span>
+                    <img
+                        src="data:image/webp;base64,UklGRoACAABXRUJQVlA4IHQCAABQEACdASpaAFoAPlUqkUajoqGhJlbYSHAKiWMAxUKgfhzVAfMB9s+3euQP8R/QPUA/t3qAcAB+vfWqESMKs3ICMejzEn+rvRLr7zKBzjoTpfTiDkqochRQNGz72xW2g5we7g83jb+pJtqH3DgoEfmNuBm85xWs065/0pdXmpQ3lK5ioZZ21q9H4FgAAP78/Vhk2OiPH0wJRiMMIkgG98ojsbkZgiDlwYV6pCNWJG+6HxGKEBXwRw6zAapkXXO5MnJMJLW9eEaqrgZEF35QKkzac2BubnhtImYNiPBfCFd8MPHF3fmv9w/9cu/aS84+L/S3fX5A2PQgYQlQvBf5pdsyYztea1e/Wz6zvffyKpuG7o1jkbu62DceAFSRnJTAIMH0JMtWNW3G4giXmIi6HQe0ccUoCHozX/GaPbvw+z7+VodTFQa3WKirYT/89pDn/3cP/L56Uj8qZSf/HmysVP7u/w1Xrr5PuMojbGXnK+/eJrTVh5Oag2rof4cLUt8/Rpfz924gGXUYIh6/EMvaWUK+Cu4E7/Uvm8pGQkP6taiiE8kCR8FFA9ZA4iFu7eYobfg93q31dvqvDp20GBDOXGzlgBdSDJC+U5yduCbLOBCJAc7GYBaLowKhIECiNaEK0tAe/tWMZxzT+WffS86U+8e3W8PaOX7VmKkLHPoLYebBJqv3hh/QK5/slb9Czkyoe9HYC52zjrdDp1m+AOpxN3GF5hbcELrWzyGOgMXYXAgtUK742JYOFTISXEO//yqscy/pzB72bHtWn66EhHPpAG/q53Vf//6bslxTykKRlX8FFMIGN+mo0iHvTXfV5imAFz9vwAAA"
+                        alt=""
+                        class="hero-benefit-image">
 
                     <span>
                         Compares previous sold prices
@@ -7911,16 +7876,10 @@ def _dashboard_html_base():
                 </div>
 
                 <div class="hero-benefit">
-                    <span class="benefit-icon">
-                        <svg viewBox="0 0 32 32"
-                             aria-hidden="true">
-                            <path d="M5 7h12l10 10-10 10L5 15z"></path>
-                            <circle cx="10"
-                                    cy="12"
-                                    r="1.7"></circle>
-                            <path d="M14 18l3 3 6-7"></path>
-                        </svg>
-                    </span>
+                    <img
+                        src="data:image/webp;base64,UklGRhYDAABXRUJQVlA4IAoDAACwEgCdASpaAFoAPlUqkkYjoqGhJXqo0HAKiWMAxRJPXzJGdor/u/Ve8wH6wdTn0AP2M6zf0AP1A9Lz9mfg9/cj0izABTIvIggkw3uOCmBRZfDgMHMdYACjowBeitR5kccqfM4H1opIYPP4QsROgX7T+nIYuwtfE7EnZlk4M/WH6od52YTmqEZBfntHXrocm5S+5j4hSzUcWH7NXGCQwAD+/IeKtGoNJolzpwPjpdeU4H6BsllBcGUSXowLRq+ZrZ+AHOh6525DybajOH6G740G+7Ve/D6/Wx/63wZXUxz4fL0q74jsEzZJ5k1YsRvAZ5dX/8VT1Zo1+ENAfpCTv8xXKoIlrQTg08uolQoAl8JPcsk8yAqXB11E9Xz73PVPQW8LPlJWw4ScoO/OvyrSDqI5A73h26h1efv90VMmQR0EVmslLvW2MaBH1152amrl9y9/0lsaV3gwexlLHQ5Z/SkGifZOudDwGWpZEn6RN24bq+LdXc3u6hB/7szfcJcn385YKzvJTjDNCq4grypvhaAFDGR8oVLC5TLDqP+h+ecE/iIxVSQD+Jey+3/mnhTh9w+c5PZ/LcQqtZTwls7GN9noSxcykT+EtUg4wIar6i8IFvqtXooe7BALtvvTL8kqyiNnCc43NKVHkN41FskUOtwsuJ8xwptRmx9MRQ+rFzgBO/SnZX+vf8hcPrJp/EuWZAXylTDuI/1Oq/r5q/D5TV7yVzq90qprYD42TTIM1P+Pvd7bNTtt2v/9I3rcDbO35u/4mR960r64g6YFZ/XLkkGF2djGhA1FYRMLwQV03r0QvLghLHkJan3nn4vMdVHRsmAZy45Z3QLN+OH15dDs7xp8ZZy+WRmXrUrO2FqzBHyF27Unw59Exxz0+gi+A0zPP6JLM5tPxOmR97uG3ZmH/7YrBU5SQAL8IWFyfBw9bI55de/D0lySYceMjsKreyOc5VARAJx3FmRxRQ2WAiMwixTMT3GC3Ubu1vReTNRTBfvn3X8HS9E19lvj85WI3+/XraKMcbQtvsGg8AAA"
+                        alt=""
+                        class="hero-benefit-image">
 
                     <span>
                         Spots the bargains
@@ -7930,7 +7889,7 @@ def _dashboard_html_base():
             </div>
         </div>
 
-        <div class="hero-deals"
+        <div class="hero-deals hero-deals-{hero_card_count}"
              aria-label="Current laptop deals">
             {hero_cards_html}
         </div>
@@ -7941,120 +7900,103 @@ def _dashboard_html_base():
         .public-topbar {{
             display: flex;
             align-items: center;
-            min-height: 58px;
-            margin-bottom: 18px;
+            min-height: 64px;
+            margin-bottom: 16px;
         }}
 
         .public-logo {{
-            width: 43px;
-            height: 43px;
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            border-radius: 12px;
-            background:
-                linear-gradient(
-                    145deg,
-                    #315ae8,
-                    #2446c7
-                );
+            width: 86px;
+            height: 56px;
+            overflow: hidden;
+            border-radius: 14px;
+            background: #fff;
             box-shadow:
-                0 7px 18px
-                rgba(37, 76, 210, .20);
+                0 8px 22px
+                rgba(30, 48, 90, .08);
         }}
 
-        .public-logo svg {{
-            width: 30px;
-            height: 30px;
-            fill: none;
-            stroke: #fff;
-            stroke-width: 3;
-            stroke-linecap: round;
-            stroke-linejoin: round;
+        .public-logo-image {{
+            display: block;
+            width: 78px;
+            height: auto;
         }}
 
         .home-hero {{
+            position: relative;
             display: grid;
             grid-template-columns:
-                minmax(0, 1.05fr)
-                minmax(340px, .95fr);
+                minmax(0, 1.02fr)
+                minmax(360px, .98fr);
             align-items: center;
-            gap: 54px;
-            padding: 46px 50px;
-            margin-bottom: 30px;
+            gap: 48px;
+            min-height: 360px;
+            padding: 42px 48px;
+            margin-bottom: 28px;
             overflow: hidden;
             border:
                 1px solid
-                rgba(69, 91, 160, .12);
-            border-radius: 24px;
+                rgba(73, 103, 175, .12);
+            border-radius: 28px;
             background:
                 radial-gradient(
-                    circle at 92% 8%,
-                    rgba(128, 157, 255, .24),
-                    transparent 36%
+                    circle at 88% 14%,
+                    rgba(112, 143, 255, .20),
+                    transparent 34%
+                ),
+                radial-gradient(
+                    circle at 70% 100%,
+                    rgba(170, 199, 255, .17),
+                    transparent 33%
                 ),
                 linear-gradient(
                     135deg,
                     #f9fbff 0%,
-                    #f0f5ff 55%,
-                    #eef1ff 100%
+                    #f1f5fc 56%,
+                    #e9f0fe 100%
                 );
             box-shadow:
-                0 18px 48px
-                rgba(29, 53, 107, .09);
+                0 22px 56px
+                rgba(28, 48, 90, .09);
         }}
 
-        .hero-wordmark {{
-            display: flex;
-            align-items: center;
-            gap: 17px;
+        .home-hero::before {{
+            content: "";
+            position: absolute;
+            width: 520px;
+            height: 520px;
+            right: -140px;
+            bottom: -330px;
+            border-radius: 50%;
+            border:
+                72px solid
+                rgba(108, 151, 255, .06);
+            pointer-events: none;
         }}
 
-        .hero-wordmark-icon {{
-            width: 61px;
-            height: 61px;
-            flex: 0 0 61px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            border-radius: 16px;
-            background:
-                linear-gradient(
-                    145deg,
-                    #315ae8,
-                    #2446c7
-                );
-            box-shadow:
-                0 10px 24px
-                rgba(37, 76, 210, .22);
+        .hero-copy {{
+            position: relative;
+            z-index: 2;
         }}
 
-        .hero-wordmark-icon svg {{
-            width: 43px;
-            height: 43px;
-            fill: none;
-            stroke: #fff;
-            stroke-width: 3;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-        }}
-
-        .hero-wordmark h1 {{
+        .hero-copy h1 {{
             margin: 0;
-            color: #16213d;
+            color: #15213f;
             font-size:
-                clamp(38px, 5vw, 62px);
-            line-height: .98;
+                clamp(48px, 5.2vw, 76px);
+            line-height: .97;
             letter-spacing: -.045em;
-            font-weight: 800;
+            font-weight: 850;
         }}
 
         .hero-subtitle {{
-            margin: 21px 0 0;
-            color: #536078;
+            margin: 20px 0 0;
+            color: #53698d;
             font-size:
-                clamp(18px, 2vw, 23px);
-            line-height: 1.4;
+                clamp(19px, 2vw, 27px);
+            line-height: 1.35;
             font-weight: 500;
         }}
 
@@ -8062,103 +8004,69 @@ def _dashboard_html_base():
             display: grid;
             grid-template-columns:
                 repeat(3, minmax(0, 1fr));
-            gap: 18px;
-            margin-top: 35px;
+            gap: 24px;
+            margin-top: 34px;
+            max-width: 680px;
         }}
 
         .hero-benefit {{
             min-width: 0;
-            color: #354158;
-            font-size: 13px;
-            line-height: 1.35;
-            font-weight: 650;
+            color: #20345f;
+            font-size: 14px;
+            line-height: 1.32;
+            font-weight: 750;
         }}
 
-        .benefit-icon {{
-            width: 42px;
-            height: 42px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin-bottom: 10px;
-            border-radius: 12px;
-            background: #fff;
+        .hero-benefit-image {{
+            display: block;
+            width: 64px;
+            height: 64px;
+            margin-bottom: 11px;
+            border-radius: 18px;
+            object-fit: cover;
             box-shadow:
-                0 5px 16px
-                rgba(33, 57, 111, .09);
-        }}
-
-        .benefit-icon svg {{
-            width: 24px;
-            height: 24px;
-            fill: none;
-            stroke: #365bd7;
-            stroke-width: 2;
-            stroke-linecap: round;
-            stroke-linejoin: round;
+                0 8px 20px
+                rgba(31, 57, 116, .10);
         }}
 
         .hero-deals {{
             position: relative;
-            min-height: 284px;
+            z-index: 2;
+            width: 100%;
+            min-height: 286px;
         }}
 
         .hero-deal-card {{
-            position: relative;
-            display: grid;
-            grid-template-columns: 82px 1fr;
-            gap: 14px;
-            align-items: center;
-            width: min(100%, 410px);
-            min-height: 92px;
-            padding: 14px 17px;
-            margin-left: auto;
+            position: absolute;
+            width: min(92%, 500px);
+            border-radius: 22px;
+            background:
+                rgba(255, 255, 255, .97);
             border:
                 1px solid
-                rgba(45, 64, 115, .10);
-            border-radius: 15px;
-            background:
-                rgba(255, 255, 255, .96);
+                rgba(59, 83, 145, .08);
             box-shadow:
-                0 12px 30px
-                rgba(31, 48, 89, .12);
+                0 18px 38px
+                rgba(28, 48, 90, .12);
         }}
 
-        .hero-deal-card
-        + .hero-deal-card {{
-            margin-top: -2px;
-        }}
-
-        .hero-deal-card:nth-child(1) {{
-            transform:
-                translateX(-22px)
-                rotate(-1.4deg);
-            z-index: 3;
-        }}
-
-        .hero-deal-card:nth-child(2) {{
-            transform:
-                translateX(8px)
-                rotate(.8deg);
-            z-index: 2;
-        }}
-
-        .hero-deal-card:nth-child(3) {{
-            transform:
-                translateX(-8px)
-                rotate(-.4deg);
-            z-index: 1;
+        .hero-deal-card-inner {{
+            display: grid;
+            grid-template-columns: 110px 1fr;
+            gap: 17px;
+            align-items: center;
+            padding: 18px 20px;
         }}
 
         .hero-deal-image {{
-            width: 82px;
-            height: 62px;
+            width: 110px;
+            height: 82px;
             display: flex;
             align-items: center;
             justify-content: center;
             overflow: hidden;
-            border-radius: 9px;
-            background: #f5f7fb;
+            border-radius: 14px;
+            background: #f4f6fa;
         }}
 
         .hero-deal-image img {{
@@ -8168,11 +8076,11 @@ def _dashboard_html_base():
         }}
 
         .hero-deal-image svg {{
-            width: 52px;
-            height: 40px;
+            width: 62px;
+            height: 46px;
             fill: none;
-            stroke: #8b96aa;
-            stroke-width: 2.3;
+            stroke: #8997b1;
+            stroke-width: 2.2;
             stroke-linecap: round;
         }}
 
@@ -8182,108 +8090,230 @@ def _dashboard_html_base():
 
         .hero-deal-title {{
             overflow: hidden;
-            color: #202b43;
-            font-size: 13px;
-            line-height: 1.3;
-            font-weight: 700;
+            color: #172343;
+            font-size: 14px;
+            line-height: 1.32;
+            font-weight: 800;
             white-space: nowrap;
             text-overflow: ellipsis;
         }}
 
         .hero-deal-price {{
-            margin-top: 5px;
-            color: #16213d;
-            font-size: 19px;
-            font-weight: 800;
+            margin-top: 7px;
+            color: #14203d;
+            font-size: 24px;
+            line-height: 1.05;
+            font-weight: 850;
             font-variant-numeric:
                 tabular-nums;
         }}
 
         .hero-deal-saving {{
-            margin-top: 2px;
-            color: #14804a;
-            font-size: 12px;
-            font-weight: 750;
+            margin-top: 5px;
+            color: #15803d;
+            font-size: 13px;
+            font-weight: 800;
         }}
 
-        @media (max-width: 900px) {{
+        /* One live deal: make it a proper featured card. */
+        .hero-deals-1 {{
+            display: flex;
+            align-items: center;
+            min-height: 270px;
+        }}
+
+        .hero-deals-1
+        .hero-deal-card {{
+            position: relative;
+            width: 100%;
+            max-width: 540px;
+            margin-left: auto;
+        }}
+
+        .hero-deals-1
+        .hero-deal-card-inner {{
+            grid-template-columns: 135px 1fr;
+            min-height: 150px;
+            padding: 24px 26px;
+        }}
+
+        .hero-deals-1
+        .hero-deal-image {{
+            width: 135px;
+            height: 105px;
+        }}
+
+        .hero-deals-1
+        .hero-deal-title {{
+            font-size: 16px;
+        }}
+
+        .hero-deals-1
+        .hero-deal-price {{
+            font-size: 28px;
+        }}
+
+        /* Two live deals: staggered pair. */
+        .hero-deals-2
+        .hero-deal-card:nth-child(1) {{
+            top: 20px;
+            left: 0;
+            z-index: 1;
+            transform: rotate(-.7deg);
+        }}
+
+        .hero-deals-2
+        .hero-deal-card:nth-child(2) {{
+            top: 122px;
+            right: 0;
+            z-index: 2;
+            transform: rotate(.6deg);
+        }}
+
+        /* Three live deals: compact layered stack. */
+        .hero-deals-3
+        .hero-deal-card:nth-child(1) {{
+            top: 3px;
+            left: 0;
+            z-index: 1;
+            transform: rotate(-.8deg);
+        }}
+
+        .hero-deals-3
+        .hero-deal-card:nth-child(2) {{
+            top: 88px;
+            right: 0;
+            z-index: 2;
+            transform: rotate(.5deg);
+        }}
+
+        .hero-deals-3
+        .hero-deal-card:nth-child(3) {{
+            top: 173px;
+            left: 28px;
+            z-index: 3;
+            transform: rotate(-.3deg);
+        }}
+
+        @media (max-width: 1000px) {{
             .home-hero {{
                 grid-template-columns: 1fr;
-                gap: 35px;
-                padding: 36px 30px;
+                gap: 34px;
+                padding: 34px 30px;
             }}
 
             .hero-deals {{
+                min-height: 300px;
+            }}
+
+            .hero-deals-1 {{
                 min-height: auto;
             }}
 
+            .hero-deals-1
             .hero-deal-card {{
                 margin-left: 0;
             }}
         }}
 
-        @media (max-width: 620px) {{
+        @media (max-width: 680px) {{
             .public-topbar {{
-                min-height: 48px;
-                margin-bottom: 12px;
+                min-height: 54px;
+                margin-bottom: 10px;
             }}
 
             .public-logo {{
-                width: 39px;
-                height: 39px;
+                width: 76px;
+                height: 50px;
+            }}
+
+            .public-logo-image {{
+                width: 68px;
             }}
 
             .home-hero {{
+                min-height: auto;
                 padding: 28px 21px;
-                border-radius: 18px;
+                border-radius: 20px;
             }}
 
-            .hero-wordmark {{
-                gap: 12px;
+            .hero-copy h1 {{
+                font-size: 44px;
             }}
 
-            .hero-wordmark-icon {{
-                width: 49px;
-                height: 49px;
-                flex-basis: 49px;
-            }}
-
-            .hero-wordmark-icon svg {{
-                width: 35px;
-                height: 35px;
+            .hero-subtitle {{
+                margin-top: 14px;
+                font-size: 18px;
             }}
 
             .hero-benefits {{
                 grid-template-columns: 1fr;
                 gap: 13px;
-                margin-top: 27px;
+                margin-top: 25px;
             }}
 
             .hero-benefit {{
                 display: flex;
                 align-items: center;
-                gap: 11px;
+                gap: 12px;
             }}
 
-            .benefit-icon {{
-                flex: 0 0 38px;
-                width: 38px;
-                height: 38px;
+            .hero-benefit-image {{
+                flex: 0 0 52px;
+                width: 52px;
+                height: 52px;
                 margin: 0;
+                border-radius: 14px;
             }}
 
-            .hero-deal-card {{
-                grid-template-columns: 68px 1fr;
-                min-height: 82px;
+            .hero-deals,
+            .hero-deals-1,
+            .hero-deals-2,
+            .hero-deals-3 {{
+                display: block;
+                min-height: auto;
             }}
 
+            .hero-deal-card,
+            .hero-deals-1
+            .hero-deal-card,
+            .hero-deals-2
+            .hero-deal-card:nth-child(n),
+            .hero-deals-3
             .hero-deal-card:nth-child(n) {{
+                position: relative;
+                top: auto;
+                left: auto;
+                right: auto;
+                width: 100%;
+                max-width: none;
+                margin: 0 0 13px;
                 transform: none;
             }}
 
+            .hero-deal-card-inner,
+            .hero-deals-1
+            .hero-deal-card-inner {{
+                grid-template-columns: 86px 1fr;
+                min-height: auto;
+                padding: 14px 15px;
+            }}
+
+            .hero-deal-image,
+            .hero-deals-1
             .hero-deal-image {{
-                width: 68px;
-                height: 54px;
+                width: 86px;
+                height: 66px;
+            }}
+
+            .hero-deals-1
+            .hero-deal-title {{
+                font-size: 14px;
+            }}
+
+            .hero-deals-1
+            .hero-deal-price {{
+                font-size: 24px;
             }}
         }}
 
