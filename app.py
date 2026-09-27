@@ -50,7 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.8"
+APP_VERSION = "0.9.9"
 CLASSIFIER_VERSION = "0.8.1"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -4884,6 +4884,19 @@ def calculate_sold_valuation(conn, target):
     )
 
 
+
+def auction_listing(row):
+    try:
+        options = json.loads(
+            row["buying_options"]
+            or "[]"
+        )
+    except Exception:
+        options = []
+
+    return "AUCTION" in options
+
+
 def fixed_price_listing(row):
     try:
         options = json.loads(
@@ -5382,17 +5395,30 @@ def _dashboard_html_base():
         FROM listings
         WHERE COALESCE(active, 1) = 1
           AND estimated_value IS NOT NULL
-          AND deal_score IS NOT NULL
           AND undervaluation_gbp IS NOT NULL
-          AND undervaluation_gbp >= 20.0
+          AND undervaluation_gbp >= ?
           AND undervaluation_pct IS NOT NULL
-          AND undervaluation_pct > 0
+          AND undervaluation_pct >= ?
+          AND (
+                deal_score > 0
+                OR (
+                    deal_score IS NULL
+                    AND buying_options LIKE '%"AUCTION"%'
+                )
+              )
         ORDER BY
+            CASE
+                WHEN deal_score IS NULL THEN 1
+                ELSE 0
+            END,
             deal_score DESC,
             undervaluation_gbp DESC,
             first_seen DESC
         LIMIT 500
-    """).fetchall()
+    """, (
+        MIN_UNDERVALUE_GBP,
+        MIN_UNDERVALUE_PCT,
+    )).fetchall()
 
     total = conn.execute("""
         SELECT COUNT(*) AS n
@@ -5412,12 +5438,21 @@ def _dashboard_html_base():
         FROM listings
         WHERE COALESCE(active, 1) = 1
           AND estimated_value IS NOT NULL
-          AND deal_score IS NOT NULL
           AND undervaluation_gbp IS NOT NULL
-          AND undervaluation_gbp >= 20.0
+          AND undervaluation_gbp >= ?
           AND undervaluation_pct IS NOT NULL
-          AND undervaluation_pct > 0
-    """).fetchone()["n"]
+          AND undervaluation_pct >= ?
+          AND (
+                deal_score > 0
+                OR (
+                    deal_score IS NULL
+                    AND buying_options LIKE '%"AUCTION"%'
+                )
+              )
+    """, (
+        MIN_UNDERVALUE_GBP,
+        MIN_UNDERVALUE_PCT,
+    )).fetchone()["n"]
 
     api_calls = browse_usage_today(
         conn
@@ -5578,6 +5613,29 @@ def _dashboard_html_base():
                 + "</span>"
             )
 
+        is_auction = auction_listing(
+            row
+        )
+
+        auction_badge = (
+            "<br>"
+            "<span style='"
+            "display:inline-block;"
+            "margin-top:4px;"
+            "padding:2px 7px;"
+            "border-radius:999px;"
+            "background:#fff3cd;"
+            "color:#8a5a00;"
+            "font-size:11px;"
+            "font-weight:700;"
+            "letter-spacing:.02em;"
+            "'>"
+            "AUCTION · current bid"
+            "</span>"
+            if is_auction
+            else ""
+        )
+
         score = (
             f"{row['deal_score']:.0f}"
             if row["deal_score"]
@@ -5709,6 +5767,7 @@ def _dashboard_html_base():
                 <td class="money"
                     data-sort="{row['total'] if row['total'] is not None else -1}">
                     {money(row["total"])}
+                    {auction_badge}
                 </td>
 
                 <td class="money good"
@@ -7197,19 +7256,31 @@ def backfill_dashboard_images(
         FROM listings
         WHERE COALESCE(active, 1)=1
           AND estimated_value IS NOT NULL
-          AND deal_score > 0
           AND undervaluation_gbp >= ?
+          AND undervaluation_pct >= ?
+          AND (
+                deal_score > 0
+                OR (
+                    deal_score IS NULL
+                    AND buying_options LIKE '%"AUCTION"%'
+                )
+              )
           AND (
                 image_url IS NULL
                 OR trim(image_url)=''
               )
         ORDER BY
+            CASE
+                WHEN deal_score IS NULL THEN 1
+                ELSE 0
+            END,
             deal_score DESC,
             undervaluation_gbp DESC,
             first_seen DESC
         LIMIT ?
     """, (
         MIN_UNDERVALUE_GBP,
+        MIN_UNDERVALUE_PCT,
         maximum
     )).fetchall()
 
