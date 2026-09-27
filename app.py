@@ -50,8 +50,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.11"
-CLASSIFIER_VERSION = "0.8.1"
+APP_VERSION = "0.9.12"
+CLASSIFIER_VERSION = "0.8.2"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
 IMAGE_BACKFILL_PER_CYCLE = 100
@@ -1683,6 +1683,246 @@ def parse_cpu(
             "EXACT",
             source
         )
+
+    # Intel Core 3 N-series, e.g. Core 3 N355
+    match = re.search(
+        r"\b(?:Intel\s+)?Core\s+3\s+"
+        r"(N\d{3})\b",
+        text,
+        re.I
+    )
+
+    if match:
+        model = match.group(1).upper()
+
+        return cpu_result(
+            f"Intel Core 3 {model}",
+            "Intel",
+            "Core 3 N-series",
+            None,
+            "EXACT",
+            source
+        )
+
+    # Intel Celeron mobile processors, e.g. N4000, N4120, N4500
+    match = re.search(
+        r"\b(?:Intel\s+)?Celeron"
+        r"(?:\s+Processor)?\s+"
+        r"([NJ]\d{4})\b",
+        text,
+        re.I
+    )
+
+    if match:
+        model = match.group(1).upper()
+
+        return cpu_result(
+            f"Intel Celeron {model}",
+            "Intel",
+            "Celeron",
+            None,
+            "EXACT",
+            source
+        )
+
+    # Intel Pentium processors where an exact mobile SKU is stated,
+    # e.g. Pentium 4417U / 4415Y / 6405U.
+    # Do not accept a bare numeric model such as "4415" as exact.
+    match = re.search(
+        r"\b(?:Intel\s+)?Pentium"
+        r"(?:\s+(?:Silver|Gold))?\s+"
+        r"(\d{4}[A-Z]{1,2})\b",
+        text,
+        re.I
+    )
+
+    if match:
+        model = match.group(1).upper()
+
+        return cpu_result(
+            f"Intel Pentium {model}",
+            "Intel",
+            "Pentium",
+            None,
+            "EXACT",
+            source
+        )
+
+    # Intel Atom processors, e.g. Atom Z520.
+    match = re.search(
+        r"\b(?:Intel\s+)?Atom\s+"
+        r"([A-Z]\d{3,4})\b",
+        text,
+        re.I
+    )
+
+    if match:
+        model = match.group(1).upper()
+
+        return cpu_result(
+            f"Intel Atom {model}",
+            "Intel",
+            "Atom",
+            None,
+            "EXACT",
+            source
+        )
+
+    # Intel Core 2 Duo, e.g. T5800 / T7400.
+    match = re.search(
+        r"\b(?:Intel\s+)?Core\s*2\s*Duo\s+"
+        r"([A-Z]\d{4})\b",
+        text,
+        re.I
+    )
+
+    if match:
+        model = match.group(1).upper()
+
+        return cpu_result(
+            f"Intel Core 2 Duo {model}",
+            "Intel",
+            "Core 2 Duo",
+            None,
+            "EXACT",
+            source
+        )
+
+    # AMD A-series APUs, e.g. A6-6310.
+    match = re.search(
+        r"\b(?:AMD\s+)?"
+        r"(A(?:4|6|8|10|12))"
+        r"[\s-]*"
+        r"(\d{4})"
+        r"([A-Z]{0,2})\b",
+        text,
+        re.I
+    )
+
+    if match:
+        tier = match.group(1).upper()
+        model = match.group(2)
+        suffix = match.group(3).upper()
+
+        return cpu_result(
+            f"AMD {tier}-{model}{suffix}",
+            "AMD",
+            tier,
+            None,
+            "EXACT",
+            source
+        )
+
+    # AMD Ryzen AI, e.g. Ryzen AI 9 HX 370 / Ryzen AI 7 350.
+    # Reject numbers immediately followed by GB, which are usually RAM/SSD
+    # capacities rather than a CPU model.
+    match = re.search(
+        r"\b(?:AMD\s+)?Ryzen\s+AI\s+"
+        r"([579])\s+"
+        r"(HX|PRO)?\s*"
+        r"(\d{3})\b"
+        r"(?!\s*GB\b)",
+        text,
+        re.I
+    )
+
+    if match:
+        tier = match.group(1)
+        modifier = (match.group(2) or "").upper()
+        model = match.group(3)
+
+        modifier_text = (
+            f" {modifier}"
+            if modifier
+            else ""
+        )
+
+        return cpu_result(
+            f"AMD Ryzen AI {tier}{modifier_text} {model}",
+            "AMD",
+            f"Ryzen AI {tier}",
+            None,
+            "EXACT",
+            source
+        )
+
+    # MediaTek Chromebook processors, e.g. Kompanio 838.
+    match = re.search(
+        r"\b(?:MediaTek\s+)?Kompanio\s+"
+        r"(\d{3,4})\b",
+        text,
+        re.I
+    )
+
+    if match:
+        model = match.group(1)
+
+        return cpu_result(
+            f"MediaTek Kompanio {model}",
+            "MediaTek",
+            "Kompanio",
+            None,
+            "EXACT",
+            source
+        )
+
+    # VIA C7 family, e.g. VIA C7-M.
+    match = re.search(
+        r"\bVIA\s+"
+        r"(C7(?:-M)?)\b",
+        text,
+        re.I
+    )
+
+    if match:
+        model = match.group(1).upper()
+
+        return cpu_result(
+            f"VIA {model}",
+            "VIA",
+            "C7",
+            None,
+            "EXACT",
+            source
+        )
+
+    # Apple Silicon. Only accept M1-M4 when the text also clearly
+    # identifies an Apple Mac product. This avoids false positives such as
+    # Intel Core m3 and Panasonic FZ-M1.
+    if re.search(
+        r"\b(?:Apple|MacBook|Mac\s+Mini|Mac\s+Studio|iMac)\b",
+        text,
+        re.I
+    ):
+        match = re.search(
+            r"\b(M[1-4])"
+            r"(?:\s+(Pro|Max|Ultra))?\b",
+            text,
+            re.I
+        )
+
+        if match:
+            generation = match.group(1).upper()
+            variant = (
+                match.group(2).title()
+                if match.group(2)
+                else None
+            )
+
+            name = (
+                f"Apple {generation} {variant}"
+                if variant
+                else f"Apple {generation}"
+            )
+
+            return cpu_result(
+                name,
+                "Apple",
+                generation,
+                int(generation[1:]),
+                "EXACT",
+                source
+            )
 
     # Generation description
     match = re.search(
