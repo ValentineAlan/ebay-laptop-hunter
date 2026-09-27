@@ -6817,29 +6817,6 @@ def _dashboard_html_base():
     </div>
 </div>
 
-    <div class="sub">
-        
-    </div>
-
-    <div class="cards">
-
-        <div class="card">
-            <div class="big">{total}</div>
-            Listings collected
-        </div>
-
-        <div class="card">
-            <div class="big">{valued}</div>
-            Valued
-        </div>
-
-        <div class="card">
-            <div class="big">{candidates}</div>
-            Below estimated value
-        </div>
-
-    </div>
-
     <style>
         .deal-section {{
             margin-top: 28px;
@@ -10219,23 +10196,6 @@ def dashboard_html():
             _DASHBOARD_UI_ENHANCEMENT
             + valuation_tooltip_script
         )
-
-    nav = _site_nav("deals")
-
-    body_pos = page.lower().find("<body")
-
-    if body_pos >= 0:
-        close = page.find(
-            ">",
-            body_pos
-        )
-
-        if close >= 0:
-            page = (
-                page[:close + 1]
-                + nav
-                + page[close + 1:]
-            )
 
     return page
 
