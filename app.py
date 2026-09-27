@@ -41,6 +41,10 @@ import urllib.request
 import urllib.error
 import shlex
 import sys
+import hashlib
+import hmac
+import secrets
+from http.cookies import SimpleCookie
 
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -50,7 +54,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.21"
+APP_VERSION = "0.9.22"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -161,6 +165,157 @@ MEDIUM_CONFIDENCE_COMPARABLES = 6
 COMPARABLE_MAX_AGE_DAYS = 30
 SOLD_CACHE_MAX_AGE_DAYS = 7
 SOLD_EVIDENCE_VERSION = "2"
+
+# ============================================================
+# RUNTIME SETTINGS / ADMIN UI
+# ============================================================
+
+SETTINGS_PASSWORD_ENV = "SETTINGS_PASSWORD"
+SETTINGS_SESSION_SECONDS = 8 * 60 * 60
+SETTINGS_PBKDF2_ITERATIONS = 310000
+
+# Only application behaviour belongs here. TrueNAS remains responsible for
+# ports, bind addresses, volumes, networking, secrets and container wiring.
+SETTINGS_SCHEMA = [
+    {"key": "DAILY_SAFETY_LIMIT", "label": "Daily Browse API safety limit", "group": "API & polling", "type": "int", "min": 1000, "max": 5000, "step": 1, "apply": "Applies live"},
+    {"key": "SEARCH_RESERVE", "label": "Search reserve", "group": "API & polling", "type": "int", "min": 0, "max": 2000, "step": 1, "apply": "Applies live"},
+    {"key": "MIN_SEARCH_RESERVE", "label": "Minimum search reserve", "group": "API & polling", "type": "int", "min": 0, "max": 1000, "step": 1, "apply": "Applies live"},
+    {"key": "SEARCH_RESERVE_TAPER_START_HOUR", "label": "Reserve taper start (UTC hour)", "group": "API & polling", "type": "int", "min": 0, "max": 23, "step": 1, "apply": "Applies live"},
+    {"key": "EMERGENCY_RESERVE", "label": "Emergency reserve", "group": "API & polling", "type": "int", "min": 0, "max": 1000, "step": 1, "apply": "Applies live"},
+    {"key": "MAX_DETAIL_CALLS_PER_CYCLE", "label": "Maximum detail calls per cycle", "group": "API & polling", "type": "int", "min": 1, "max": 500, "step": 1, "apply": "Next polling cycle"},
+    {"key": "MAX_BACKFILL_DETAILS_PER_CYCLE", "label": "Maximum reanalysis details per cycle", "group": "API & polling", "type": "int", "min": 1, "max": 500, "step": 1, "apply": "Next polling cycle"},
+    {"key": "POLL_NORMAL", "label": "Polling interval (seconds)", "group": "API & polling", "type": "int", "min": 60, "max": 86400, "step": 1, "apply": "Next polling cycle"},
+    {"key": "SEARCH_WINDOW_OVERLAP_SECONDS", "label": "Timestamp overlap (seconds)", "group": "API & polling", "type": "int", "min": 0, "max": 3600, "step": 1, "apply": "Next polling cycle"},
+    {"key": "SEARCH_INITIAL_LOOKBACK_SECONDS", "label": "Initial lookback (seconds)", "group": "API & polling", "type": "int", "min": 60, "max": 86400, "step": 1, "apply": "Next polling cycle"},
+    {"key": "SEARCH_MAX_CATCHUP_WINDOW_SECONDS", "label": "Maximum catch-up window (seconds)", "group": "API & polling", "type": "int", "min": 60, "max": 86400, "step": 1, "apply": "Next polling cycle"},
+    {"key": "SEARCH_LIMIT", "label": "Browse page size", "group": "API & polling", "type": "int", "min": 1, "max": 200, "step": 1, "apply": "Next polling cycle"},
+
+    {"key": "MIN_UNDERVALUE_GBP", "label": "Minimum saving (£)", "group": "Deals", "type": "float", "min": 0, "max": 5000, "step": 0.01, "apply": "Applies live"},
+    {"key": "MIN_UNDERVALUE_PCT", "label": "Minimum saving (%)", "group": "Deals", "type": "float", "min": 0, "max": 100, "step": 0.1, "apply": "Applies live"},
+    {"key": "MIN_COMPARABLES", "label": "Minimum sold comparables", "group": "Valuation", "type": "int", "min": 1, "max": 100, "step": 1, "apply": "Applies live"},
+    {"key": "MEDIUM_CONFIDENCE_COMPARABLES", "label": "Medium confidence comparables", "group": "Valuation", "type": "int", "min": 1, "max": 100, "step": 1, "apply": "Applies live"},
+    {"key": "COMPARABLE_MAX_AGE_DAYS", "label": "Maximum active-comparable age (days)", "group": "Valuation", "type": "int", "min": 1, "max": 3650, "step": 1, "apply": "Applies live"},
+    {"key": "SOLD_CACHE_MAX_AGE_DAYS", "label": "Sold cache maximum age (days)", "group": "Valuation", "type": "int", "min": 1, "max": 365, "step": 1, "apply": "Applies live"},
+    {"key": "PRODUCT_RESEARCH_CACHE_HOURS", "label": "Product Research cache (hours)", "group": "Valuation", "type": "int", "min": 1, "max": 720, "step": 1, "apply": "Applies live"},
+    {"key": "PRODUCT_RESEARCH_DAY_RANGE", "label": "Product Research sold range (days)", "group": "Valuation", "type": "int", "min": 1, "max": 365, "step": 1, "apply": "Applies live"},
+    {"key": "PRODUCT_RESEARCH_LIMIT", "label": "Product Research results per page", "group": "Valuation", "type": "int", "min": 1, "max": 200, "step": 1, "apply": "Applies live"},
+    {"key": "PRODUCT_RESEARCH_MAX_PAGES", "label": "Product Research maximum pages", "group": "Valuation", "type": "int", "min": 1, "max": 20, "step": 1, "apply": "Applies live"},
+    {"key": "PRODUCT_RESEARCH_SEARCHES_PER_CYCLE", "label": "Product Research searches per cycle", "group": "Valuation", "type": "int", "min": 1, "max": 100, "step": 1, "apply": "Next polling cycle"},
+
+    {"key": "ACTIVE_BIN_RECHECKS_PER_CYCLE", "label": "Active BIN rechecks per cycle", "group": "Maintenance", "type": "int", "min": 0, "max": 500, "step": 1, "apply": "Next polling cycle"},
+    {"key": "ACTIVE_BIN_RECHECKS_DURING_REANALYSIS", "label": "BIN rechecks during reanalysis", "group": "Maintenance", "type": "int", "min": 0, "max": 500, "step": 1, "apply": "Next polling cycle"},
+    {"key": "ACTIVE_BIN_RECHECK_MIN_AGE_MINUTES", "label": "Minimum age before BIN recheck (minutes)", "group": "Maintenance", "type": "int", "min": 1, "max": 10080, "step": 1, "apply": "Next polling cycle"},
+    {"key": "ACTIVE_BIN_RECHECK_INTERVAL_MINUTES", "label": "BIN recheck interval (minutes)", "group": "Maintenance", "type": "int", "min": 1, "max": 10080, "step": 1, "apply": "Next polling cycle"},
+    {"key": "IMAGE_BACKFILL_PER_CYCLE", "label": "Image backfill per cycle", "group": "Maintenance", "type": "int", "min": 0, "max": 1000, "step": 1, "apply": "Next polling cycle"},
+    {"key": "IMAGE_BACKFILL_DAILY_ALLOWANCE", "label": "Image backfill daily allowance", "group": "Maintenance", "type": "int", "min": 0, "max": 5000, "step": 1, "apply": "Applies live"},
+]
+
+SETTINGS_SCHEMA_BY_KEY = {
+    item["key"]: item
+    for item in SETTINGS_SCHEMA
+}
+
+DEFAULT_RULE_GROUPS = {'fault_high': ['liquid damage',
+                'water damage',
+                'motherboard',
+                'mainboard',
+                'no power',
+                "doesn't power",
+                'does not power',
+                "doesn't post",
+                'does not post',
+                'bios locked',
+                'bios password',
+                'faulty screen',
+                'screen faulty',
+                'faulty lcd',
+                'lcd faulty',
+                'screen damage',
+                'damaged screen',
+                'cracked screen',
+                'broken screen',
+                'broken display',
+                'no display',
+                'nf screen',
+                'unknown fault',
+                'untested',
+                'spare parts',
+                'spares',
+                'faulty',
+                'not working',
+                'mdm locked',
+                'activation locked',
+                'autopilot locked',
+                'for parts',
+                'parts or not working',
+                'parts only',
+                'spares or repair',
+                'spares or repairs'],
+ 'fault_moderate': ['keyboard faulty',
+                    'faulty keyboard',
+                    'kb faulty',
+                    'trackpad faulty',
+                    'faulty trackpad',
+                    'faulty tp',
+                    'missing key',
+                    'missing keys',
+                    'keycap',
+                    'hinge',
+                    'case damage',
+                    'case dmg',
+                    'damaged case',
+                    'cracked case',
+                    'cracks',
+                    'dented',
+                    'dents',
+                    'dent',
+                    'scratch',
+                    'scratches',
+                    'scratched',
+                    'grade b',
+                    'grade c'],
+ 'fault_low': ['no hdd',
+               'no ssd',
+               'no storage',
+               'missing ssd',
+               'no battery',
+               'no batt',
+               'missing battery',
+               'dead battery',
+               'low battery',
+               "doesn't hold charge",
+               'doesnt hold charge',
+               'does not hold charge',
+               'no charger',
+               'missing charger',
+               'no os'],
+ 'model_patterns': ['\\bLatitude\\s+\\d{4}\\s+Detachable\\b',
+                    '\\bLatitude\\s+(?:E)?\\d{4}\\b',
+                    '\\bVostro\\s+\\d{4}\\b',
+                    '\\bInspiron\\s+\\d{4}\\b',
+                    '\\bPrecision\\s+\\d{4}\\b',
+                    '\\bXPS\\s+(?:13|15|17)\\s+(?:L\\d{3,4}X|\\d{4})\\b',
+                    '\\bXPS\\s+(?:13|15|17)\\b',
+                    '\\b(?:HP\\s+)?(?:Laptop\\s+)?(?:240|245|250|255|340|348|430|440|450|455|470)\\s+G\\d{1,2}\\b',
+                    '\\bEliteBook\\s+\\d{3}\\s+G\\d{1,2}\\b',
+                    '\\bProBook\\s+\\d{3}\\s+G\\d{1,2}\\b',
+                    '\\bZBook\\s+[A-Za-z0-9 ]+G\\d{1,2}\\b',
+                    '\\bHP\\s+\\d{2,3}s-[A-Za-z0-9-]+\\b',
+                    '\\bHP\\s+\\d{3}\\s+G\\d{1,2}\\b',
+                    '\\bThinkPad\\s+(?:T|X|E|L|P)\\d{2,3}[A-Za-z]?(?:\\s+Gen\\s+\\d+)?\\b',
+                    '\\bThinkPad\\s+X1\\s+Carbon(?:\\s+Gen\\s+\\d+)?\\b',
+                    '\\bThinkPad\\s+X1\\s+Yoga(?:\\s+Gen\\s+\\d+)?\\b',
+                    '\\bIdeaPad\\s+(?:Slim\\s+)?[A-Za-z0-9-]+(?:\\s+[A-Za-z0-9-]+)?\\b',
+                    '\\bSurface\\s+Pro\\s+\\d{1,2}(?:\\+|\\s+Plus)?(?!\\w)',
+                    '\\bSurface\\s+Laptop\\s+\\d{1,2}\\b',
+                    '\\bGalaxy\\s+Book(?:\\d)?(?:\\s+Pro)?(?:\\s+360)?\\b',
+                    '\\bLG\\s+Gram\\s+\\d{2,4}[A-Za-z0-9-]*\\b']}
+
+_RUNTIME_RULES = {
+    key: list(values)
+    for key, values in DEFAULT_RULE_GROUPS.items()
+}
+_SETTINGS_SESSIONS = {}
 
 
 # ============================================================
@@ -302,6 +457,212 @@ def ensure_column(
         )
 
 
+
+def _setting_default(key):
+    if key not in SETTINGS_SCHEMA_BY_KEY:
+        raise KeyError(key)
+    return globals()[key]
+
+
+def _coerce_setting(meta, value):
+    kind = meta["type"]
+    if kind == "int":
+        parsed = int(str(value).strip())
+    elif kind == "float":
+        parsed = float(str(value).strip())
+    elif kind == "bool":
+        parsed = str(value).strip().lower() in ("1", "true", "yes", "on")
+    else:
+        parsed = str(value)
+
+    if isinstance(parsed, (int, float)):
+        if "min" in meta and parsed < meta["min"]:
+            raise ValueError(f'{meta["label"]} must be at least {meta["min"]}')
+        if "max" in meta and parsed > meta["max"]:
+            raise ValueError(f'{meta["label"]} must be no more than {meta["max"]}')
+    return parsed
+
+
+def _setting_text(value):
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    return str(value)
+
+
+def app_setting(conn, key):
+    meta = SETTINGS_SCHEMA_BY_KEY[key]
+    row = conn.execute(
+        "SELECT value FROM app_settings WHERE key=?",
+        (key,),
+    ).fetchone()
+    if not row:
+        return _setting_default(key)
+    try:
+        return _coerce_setting(meta, row["value"])
+    except Exception:
+        return _setting_default(key)
+
+
+def refresh_runtime_settings(conn=None):
+    own = conn is None
+    if own:
+        conn = connect_db()
+    try:
+        for meta in SETTINGS_SCHEMA:
+            globals()[meta["key"]] = app_setting(conn, meta["key"])
+        # All adaptive poll bands deliberately follow the single editable
+        # polling interval used by timestamp-window discovery.
+        globals()["POLL_60_PERCENT"] = globals()["POLL_NORMAL"]
+        globals()["POLL_75_PERCENT"] = globals()["POLL_NORMAL"]
+        globals()["POLL_85_PERCENT"] = globals()["POLL_NORMAL"]
+        globals()["POLL_90_PERCENT"] = globals()["POLL_NORMAL"]
+    finally:
+        if own:
+            conn.close()
+
+
+def _password_hash(password):
+    if not password:
+        raise ValueError("Password cannot be empty")
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        SETTINGS_PBKDF2_ITERATIONS,
+    )
+    return (
+        f"pbkdf2_sha256${SETTINGS_PBKDF2_ITERATIONS}$"
+        f"{salt.hex()}${digest.hex()}"
+    )
+
+
+def _password_matches(password, encoded):
+    try:
+        algorithm, rounds, salt_hex, digest_hex = str(encoded).split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        candidate = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            bytes.fromhex(salt_hex),
+            int(rounds),
+        )
+        return hmac.compare_digest(candidate.hex(), digest_hex)
+    except Exception:
+        return False
+
+
+def _ensure_settings_password(conn):
+    row = conn.execute(
+        "SELECT value FROM settings_auth WHERE key='password_hash'"
+    ).fetchone()
+    if row:
+        return
+    initial = os.environ.get(SETTINGS_PASSWORD_ENV, "")
+    if initial:
+        conn.execute(
+            "INSERT INTO settings_auth(key,value,updated_at) VALUES ('password_hash',?,?)",
+            (_password_hash(initial), iso_now()),
+        )
+
+
+def current_rules_revision(conn=None):
+    own = conn is None
+    if own:
+        conn = connect_db()
+    try:
+        row = conn.execute(
+            "SELECT value FROM app_meta WHERE key='rules_revision'"
+        ).fetchone()
+        return int(row["value"]) if row else 1
+    finally:
+        if own:
+            conn.close()
+
+
+def refresh_classifier_rules(conn=None):
+    global _RUNTIME_RULES
+    own = conn is None
+    if own:
+        conn = connect_db()
+    try:
+        result = {}
+        for category, fallback in DEFAULT_RULE_GROUPS.items():
+            rows = conn.execute(
+                """
+                SELECT value
+                FROM classifier_rules
+                WHERE category=? AND enabled=1
+                ORDER BY position,id
+                """,
+                (category,),
+            ).fetchall()
+            result[category] = [r["value"] for r in rows] if rows else list(fallback)
+        _RUNTIME_RULES = result
+    finally:
+        if own:
+            conn.close()
+
+
+def classifier_rule_values(category, fallback=None):
+    values = _RUNTIME_RULES.get(category)
+    if values is not None:
+        return values
+    return list(fallback or [])
+
+
+def _seed_classifier_rules(conn):
+    for category, values in DEFAULT_RULE_GROUPS.items():
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM classifier_rules WHERE category=?",
+            (category,),
+        ).fetchone()["n"]
+        if count:
+            continue
+        for position, value in enumerate(values):
+            conn.execute(
+                """
+                INSERT INTO classifier_rules(category,position,value,enabled,updated_at)
+                VALUES (?,?,?,?,?)
+                """,
+                (category, position, value, 1, iso_now()),
+            )
+
+
+def _bump_rules_revision(conn):
+    revision = current_rules_revision(conn) + 1
+    conn.execute(
+        """
+        INSERT INTO app_meta(key,value)
+        VALUES ('rules_revision',?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """,
+        (str(revision),),
+    )
+    # Existing rows are now stale for the rule set. The reanalysis worker
+    # understands rules_revision separately from the Python classifier version.
+    conn.execute(
+        """
+        UPDATE listings
+        SET valuation_basis='REANALYSIS_REQUIRED'
+        WHERE COALESCE(active,1)=1
+        """
+    )
+    return revision
+
+
+def _audit_setting(conn, kind, key, old_value, new_value):
+    conn.execute(
+        """
+        INSERT INTO settings_audit(changed_at,kind,setting_key,old_value,new_value)
+        VALUES (?,?,?,?,?)
+        """,
+        (iso_now(), kind, key, None if old_value is None else str(old_value),
+         None if new_value is None else str(new_value)),
+    )
+
+
 def init_db():
     conn = connect_db()
 
@@ -353,6 +714,7 @@ def init_db():
         "valuation_basis": "TEXT",
 
         "classifier_version": "TEXT",
+        "rules_revision": "INTEGER DEFAULT 0",
 
         "usbc_pd_confidence": "TEXT",
         "usbc_pd_source": "TEXT",
@@ -526,7 +888,68 @@ def init_db():
           )
     """)
 
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS settings_auth (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS app_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+
+    conn.execute("""
+        INSERT INTO app_meta(key,value)
+        VALUES ('rules_revision','1')
+        ON CONFLICT(key) DO NOTHING
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS classifier_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0,
+            value TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_classifier_rules_category
+        ON classifier_rules(category,position)
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS settings_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            changed_at TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            setting_key TEXT NOT NULL,
+            old_value TEXT,
+            new_value TEXT
+        )
+    """)
+
+    _seed_classifier_rules(conn)
+    _ensure_settings_password(conn)
+
     conn.commit()
+    refresh_runtime_settings(conn)
+    refresh_classifier_rules(conn)
     conn.close()
 
 
@@ -1490,7 +1913,7 @@ def identify_model(
 
     # Prefer a recognizable model in title because seller
     # "Model" aspects can sometimes contain generic garbage.
-    for pattern in MODEL_PATTERNS:
+    for pattern in classifier_rule_values("model_patterns", MODEL_PATTERNS):
 
         match = re.search(
             pattern,
@@ -1507,7 +1930,7 @@ def identify_model(
 
         # Item specifics often contain a better generation-qualified model
         # than the title. Run the same recognizers over the aspect first.
-        for pattern in MODEL_PATTERNS:
+        for pattern in classifier_rule_values("model_patterns", MODEL_PATTERNS):
             match = re.search(
                 pattern,
                 aspect_model,
@@ -2813,6 +3236,10 @@ def classify_faults(
         "no os"
     ]
 
+    high = list(classifier_rule_values("fault_high", high))
+    moderate = list(classifier_rule_values("fault_moderate", moderate))
+    low = list(classifier_rule_values("fault_low", low))
+
     # Extra condition wording worth surfacing prominently
     # in Laptop Lander's Notes column.
     for phrase in (
@@ -3354,7 +3781,10 @@ def save_listing(
             item["detail_status"],
 
         "classifier_version":
-            CLASSIFIER_VERSION
+            CLASSIFIER_VERSION,
+
+        "rules_revision":
+            current_rules_revision(conn)
     }
 
     if existing:
@@ -4210,7 +4640,9 @@ def collect_sold_search(conn, keywords):
         return 0
 
 
-def collect_needed_sold_data(conn, maximum=PRODUCT_RESEARCH_SEARCHES_PER_CYCLE):
+def collect_needed_sold_data(conn, maximum=None):
+    if maximum is None:
+        maximum = PRODUCT_RESEARCH_SEARCHES_PER_CYCLE
     """
     Work progressively through the valuation backlog.
 
@@ -4232,6 +4664,7 @@ def collect_needed_sold_data(conn, maximum=PRODUCT_RESEARCH_SEARCHES_PER_CYCLE):
         WHERE cpu IS NOT NULL
           AND active=1
           AND classifier_version=?
+          AND COALESCE(rules_revision,0)=?
           AND trim(cpu) <> ''
           AND (
                 (brand IS NOT NULL AND trim(brand) <> '')
@@ -4242,7 +4675,7 @@ def collect_needed_sold_data(conn, maximum=PRODUCT_RESEARCH_SEARCHES_PER_CYCLE):
             CASE WHEN estimated_value IS NULL THEN 0 ELSE 1 END,
             COALESCE(valuation_research_at, '1970-01-01') ASC,
             first_seen ASC
-    """, (CLASSIFIER_VERSION,)).fetchall()
+    """, (CLASSIFIER_VERSION, current_rules_revision(conn))).fetchall()
 
     done = 0
     attempted_listings = 0
@@ -4688,6 +5121,8 @@ def exact_spec_identity(row):
 
 def target_valuation_problem(target):
     if row_value(target, "classifier_version") != CLASSIFIER_VERSION:
+        return "REANALYSIS_REQUIRED"
+    if int(row_value(target, "rules_revision") or 0) != current_rules_revision():
         return "REANALYSIS_REQUIRED"
     if not exact_spec_identity(target):
         return "INCOMPLETE_IDENTITY_OR_SPEC"
@@ -6502,22 +6937,28 @@ def _dashboard_html_base():
 
 
 def _site_nav(active="deals"):
-    if active == "diagnostics":
-        href = "/"
-        label = "Deals"
-    else:
-        href = "/diagnostics"
-        label = "Diagnostics"
-
-    return f"""
-    <nav class="site-nav">
-        <a href="{href}">{label}</a>
-    </nav>
-    """
+    links = (
+        ("deals", "/", "Deals"),
+        ("diagnostics", "/diagnostics", "Diagnostics"),
+        ("settings", "/settings", "Settings"),
+    )
+    items = []
+    for name, href, label in links:
+        cls = " active" if name == active else ""
+        items.append(
+            f'<a class="nav-link{cls}" href="{href}">{label}</a>'
+        )
+    return (
+        '<nav class="site-nav">'
+        + "".join(items)
+        + '</nav>'
+    )
 
 
 def diagnostics_html():
     conn = connect_db()
+    refresh_runtime_settings(conn)
+    refresh_classifier_rules(conn)
 
     def scalar(sql, params=()):
         row = conn.execute(sql, params).fetchone()
@@ -6872,9 +7313,11 @@ def diagnostics_html():
         FROM listings
         WHERE COALESCE(active,1)=1
           AND classifier_version=?
+          AND COALESCE(rules_revision,0)=?
         """,
         (
             CLASSIFIER_VERSION,
+            current_rules_revision(conn),
         )
     )
 
@@ -6886,10 +7329,12 @@ def diagnostics_html():
           AND (
                 classifier_version IS NULL
                 OR classifier_version<>?
+                OR COALESCE(rules_revision,0)<>?
               )
         """,
         (
             CLASSIFIER_VERSION,
+            current_rules_revision(conn),
         )
     )
 
@@ -7894,60 +8339,624 @@ def diagnostics_html():
     return html_page
 
 
+
+def _settings_cookie_token(handler):
+    raw = handler.headers.get("Cookie", "")
+    cookie = SimpleCookie()
+    try:
+        cookie.load(raw)
+    except Exception:
+        return ""
+    morsel = cookie.get("ll_settings_session")
+    return morsel.value if morsel else ""
+
+
+def _settings_session(handler):
+    token = _settings_cookie_token(handler)
+    session = _SETTINGS_SESSIONS.get(token)
+    if not session:
+        return None
+    if session["expires_at"] < time.time():
+        _SETTINGS_SESSIONS.pop(token, None)
+        return None
+    return session
+
+
+def _new_settings_session():
+    token = secrets.token_urlsafe(32)
+    csrf = secrets.token_urlsafe(24)
+    _SETTINGS_SESSIONS[token] = {
+        "csrf": csrf,
+        "expires_at": time.time() + SETTINGS_SESSION_SECONDS,
+    }
+    return token, csrf
+
+
+def _csrf_ok(handler, form):
+    session = _settings_session(handler)
+    return bool(
+        session
+        and form.get("csrf", [""])[0]
+        and hmac.compare_digest(
+            session["csrf"],
+            form.get("csrf", [""])[0],
+        )
+    )
+
+
+def _settings_password_configured(conn):
+    return bool(conn.execute(
+        "SELECT 1 FROM settings_auth WHERE key='password_hash'"
+    ).fetchone())
+
+
+def _settings_login_html(message=""):
+    message_html = (
+        f'<div class="message">{html.escape(message)}</div>'
+        if message else ""
+    )
+    return f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Laptop Lander Settings Login</title>
+<style>
+body{{font-family:Inter,system-ui,sans-serif;background:#f4f7fb;color:#172033;margin:0}}
+.box{{max-width:430px;margin:10vh auto;background:white;padding:28px;border-radius:16px;box-shadow:0 8px 28px rgba(16,24,40,.10)}}
+h1{{margin-top:0}} label{{display:block;font-weight:700;margin:14px 0 6px}}
+input{{width:100%;box-sizing:border-box;padding:11px;border:1px solid #d0d5dd;border-radius:8px}}
+button{{margin-top:18px;background:#2563eb;color:white;border:0;border-radius:8px;padding:10px 16px;font-weight:700;cursor:pointer}}
+.message{{padding:10px 12px;background:#fff7ed;color:#9a3412;border-radius:8px;margin:12px 0}}
+.small{{font-size:13px;color:#667085}}
+</style>
+</head>
+<body>
+<div class="box">
+<h1>Laptop Lander Settings</h1>
+{message_html}
+<form method="post" action="/settings/login">
+<label for="password">Admin password</label>
+<input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+<button type="submit">Sign in</button>
+</form>
+<p class="small">The initial password is read once from the TrueNAS environment variable <code>{SETTINGS_PASSWORD_ENV}</code> and stored only as a PBKDF2 hash.</p>
+</div>
+</body>
+</html>"""
+
+
+def _settings_value(conn, key):
+    row = conn.execute(
+        "SELECT value FROM app_settings WHERE key=?",
+        (key,),
+    ).fetchone()
+    if row:
+        return row["value"]
+    return _setting_text(_setting_default(key))
+
+
+def settings_html(csrf, message="", regex_result=""):
+    conn = connect_db()
+    refresh_runtime_settings(conn)
+    refresh_classifier_rules(conn)
+
+    grouped = {}
+    for meta in SETTINGS_SCHEMA:
+        grouped.setdefault(meta["group"], []).append(meta)
+
+    sections = []
+    for group, items in grouped.items():
+        rows = []
+        for meta in items:
+            value = _settings_value(conn, meta["key"])
+            rows.append(
+                "<tr>"
+                f"<td><strong>{html.escape(meta['label'])}</strong>"
+                f"<div class='muted'>{html.escape(meta['key'])}</div></td>"
+                "<td>"
+                f"<input name='setting__{html.escape(meta['key'])}' "
+                f"type='number' value='{html.escape(str(value), quote=True)}' "
+                f"min='{meta.get('min','')}' max='{meta.get('max','')}' "
+                f"step='{meta.get('step',1)}'>"
+                "</td>"
+                f"<td><span class='apply'>{html.escape(meta['apply'])}</span></td>"
+                "</tr>"
+            )
+        sections.append(
+            f"<section class='panel'><h2>{html.escape(group)}</h2>"
+            "<table><thead><tr><th>Setting</th><th>Value</th><th>Effect</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table></section>"
+        )
+
+    rule_titles = {
+        "fault_high": ("High-risk condition phrases", "Triggers reanalysis"),
+        "fault_moderate": ("Moderate condition phrases", "Triggers reanalysis"),
+        "fault_low": ("Low-cost condition phrases", "Triggers reanalysis"),
+        "model_patterns": ("Model recognition regexes", "Triggers reanalysis"),
+    }
+    rule_blocks = []
+    for category, (title, effect) in rule_titles.items():
+        values = classifier_rule_values(category, DEFAULT_RULE_GROUPS[category])
+        rule_blocks.append(
+            "<div class='rule-block'>"
+            f"<label>{html.escape(title)} <span class='apply'>{effect}</span></label>"
+            f"<textarea name='rules__{category}' rows='10'>"
+            + html.escape("\n".join(values))
+            + "</textarea></div>"
+        )
+
+    history = conn.execute(
+        """
+        SELECT id,changed_at,kind,setting_key,old_value,new_value
+        FROM settings_audit
+        ORDER BY id DESC
+        LIMIT 30
+        """
+    ).fetchall()
+    history_rows = []
+    for row in history:
+        restore = ""
+        if row["kind"] == "SETTING" and row["setting_key"] in SETTINGS_SCHEMA_BY_KEY:
+            restore = (
+                "<form method='post' action='/settings/restore' class='inline'>"
+                f"<input type='hidden' name='csrf' value='{html.escape(csrf, quote=True)}'>"
+                f"<input type='hidden' name='audit_id' value='{row['id']}'>"
+                "<button class='small-button' type='submit'>Restore</button></form>"
+            )
+        history_rows.append(
+            "<tr>"
+            f"<td>{html.escape(relative_age(row['changed_at']))}</td>"
+            f"<td>{html.escape(row['kind'])}</td>"
+            f"<td>{html.escape(row['setting_key'])}</td>"
+            f"<td>{html.escape(str(row['old_value'] or '—'))}</td>"
+            f"<td>{html.escape(str(row['new_value'] or '—'))}</td>"
+            f"<td>{restore}</td>"
+            "</tr>"
+        )
+
+    revision = current_rules_revision(conn)
+    configured = _settings_password_configured(conn)
+    conn.close()
+
+    notice = ""
+    if message:
+        notice += f"<div class='message'>{html.escape(message)}</div>"
+    if regex_result:
+        notice += f"<div class='message'>{html.escape(regex_result)}</div>"
+
+    return f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Laptop Lander Settings</title>
+<style>
+*{{box-sizing:border-box}} body{{margin:0;background:#f4f7fb;color:#172033;font-family:Inter,system-ui,sans-serif}}
+.page{{max-width:1450px;margin:0 auto;padding:22px}} .top{{display:flex;justify-content:space-between;gap:20px;align-items:flex-start}}
+h1{{margin:0}} h2{{margin-top:0;font-size:19px}} .muted{{color:#667085;font-size:12px;margin-top:3px}}
+.panel{{background:white;border:1px solid #e3e8ef;border-radius:14px;padding:18px;margin:16px 0;box-shadow:0 4px 18px rgba(16,24,40,.04)}}
+table{{width:100%;border-collapse:collapse}} th,td{{text-align:left;padding:9px;border-bottom:1px solid #eaecf0;vertical-align:top}}
+input[type=number],input[type=password],input[type=text],textarea{{width:100%;padding:9px;border:1px solid #d0d5dd;border-radius:8px;font:inherit}}
+textarea{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;min-height:160px}}
+button{{background:#2563eb;color:white;border:0;border-radius:8px;padding:9px 14px;font-weight:700;cursor:pointer}}
+button.secondary{{background:#475467}} .small-button{{font-size:12px;padding:5px 8px}} .inline{{display:inline}}
+.apply{{display:inline-block;padding:2px 7px;border-radius:999px;background:#eff6ff;color:#1d4ed8;font-size:11px;font-weight:700}}
+.message{{padding:11px 13px;background:#ecfdf3;color:#166534;border-radius:8px;margin:12px 0}}
+.rule-grid{{display:grid;grid-template-columns:1fr 1fr;gap:16px}} .rule-block label{{display:block;font-weight:700;margin-bottom:7px}}
+.actions{{display:flex;gap:10px;flex-wrap:wrap}} code{{background:#f2f4f7;padding:2px 5px;border-radius:4px}}
+.site-nav{{display:flex;gap:8px;margin-bottom:18px}} .nav-link{{text-decoration:none;padding:8px 12px;border-radius:8px;background:white;border:1px solid #d0d5dd;color:#344054;font-weight:700}}
+.nav-link.active{{background:#2563eb;color:white;border-color:#2563eb}}
+@media(max-width:850px){{.rule-grid{{grid-template-columns:1fr}} .top{{display:block}}}}
+</style>
+</head>
+<body>
+<div class="page">
+{_site_nav("settings")}
+<div class="top">
+<div>
+<h1>Settings</h1>
+<div class="muted">App {html.escape(APP_VERSION)} · classifier {html.escape(CLASSIFIER_VERSION)} · rules revision {revision}</div>
+</div>
+<form method="post" action="/settings/logout">
+<input type="hidden" name="csrf" value="{html.escape(csrf, quote=True)}">
+<button class="secondary" type="submit">Sign out</button>
+</form>
+</div>
+{notice}
+
+<form method="post" action="/settings/save">
+<input type="hidden" name="csrf" value="{html.escape(csrf, quote=True)}">
+{''.join(sections)}
+<div class="actions"><button type="submit">Save application settings</button></div>
+</form>
+
+<section class="panel">
+<h2>Classifier and recognition rules</h2>
+<p class="muted">One phrase or regular expression per line. Invalid model regexes are rejected before saving. Any change increments the rules revision and automatically puts existing active listings back into the reanalysis queue.</p>
+<form method="post" action="/settings/rules">
+<input type="hidden" name="csrf" value="{html.escape(csrf, quote=True)}">
+<div class="rule-grid">{''.join(rule_blocks)}</div>
+<div class="actions" style="margin-top:14px"><button type="submit">Save rules &amp; trigger reanalysis</button></div>
+</form>
+</section>
+
+<section class="panel">
+<h2>Test a regular expression</h2>
+<form method="post" action="/settings/test-regex">
+<input type="hidden" name="csrf" value="{html.escape(csrf, quote=True)}">
+<label><strong>Pattern</strong></label>
+<input type="text" name="pattern" required>
+<label><strong>Sample listing text</strong></label>
+<input type="text" name="sample" required>
+<div class="actions" style="margin-top:12px"><button type="submit">Test regex</button></div>
+</form>
+</section>
+
+<section class="panel">
+<h2>Change Settings password</h2>
+<form method="post" action="/settings/password">
+<input type="hidden" name="csrf" value="{html.escape(csrf, quote=True)}">
+<label><strong>New password</strong></label>
+<input type="password" name="new_password" minlength="10" required>
+<label><strong>Confirm password</strong></label>
+<input type="password" name="confirm_password" minlength="10" required>
+<div class="actions" style="margin-top:12px"><button type="submit">Change password</button></div>
+</form>
+</section>
+
+<section class="panel">
+<h2>Change history</h2>
+<table>
+<thead><tr><th>When</th><th>Type</th><th>Setting/rules</th><th>Old</th><th>New</th><th></th></tr></thead>
+<tbody>{''.join(history_rows) or "<tr><td colspan='6' class='muted'>No changes yet</td></tr>"}</tbody>
+</table>
+</section>
+</div>
+</body>
+</html>"""
+
+
+def _save_settings_form(form):
+    conn = connect_db()
+    try:
+        pending = {}
+        for key, meta in SETTINGS_SCHEMA_BY_KEY.items():
+            field = "setting__" + key
+            if field not in form:
+                continue
+            value = _coerce_setting(meta, form[field][0])
+            pending[key] = value
+
+        # Cross-field safety checks.
+        safety = int(pending.get("DAILY_SAFETY_LIMIT", app_setting(conn, "DAILY_SAFETY_LIMIT")))
+        emergency = int(pending.get("EMERGENCY_RESERVE", app_setting(conn, "EMERGENCY_RESERVE")))
+        reserve = int(pending.get("SEARCH_RESERVE", app_setting(conn, "SEARCH_RESERVE")))
+        min_reserve = int(pending.get("MIN_SEARCH_RESERVE", app_setting(conn, "MIN_SEARCH_RESERVE")))
+        if safety > EBAY_DAILY_LIMIT:
+            raise ValueError(f"Daily safety limit cannot exceed eBay limit ({EBAY_DAILY_LIMIT})")
+        if min_reserve > reserve:
+            raise ValueError("Minimum search reserve cannot exceed search reserve")
+        if emergency + min_reserve >= safety:
+            raise ValueError("Emergency + minimum search reserve must stay below daily safety limit")
+
+        for key, value in pending.items():
+            old = _settings_value(conn, key)
+            new = _setting_text(value)
+            if old == new:
+                continue
+            conn.execute(
+                """
+                INSERT INTO app_settings(key,value,updated_at)
+                VALUES (?,?,?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at
+                """,
+                (key, new, iso_now()),
+            )
+            _audit_setting(conn, "SETTING", key, old, new)
+        conn.commit()
+        refresh_runtime_settings(conn)
+    finally:
+        conn.close()
+
+
+def _save_rules_form(form):
+    conn = connect_db()
+    try:
+        changed = []
+        for category in DEFAULT_RULE_GROUPS:
+            field = "rules__" + category
+            if field not in form:
+                continue
+            values = []
+            for raw in form[field][0].splitlines():
+                value = raw.strip()
+                if value and value not in values:
+                    values.append(value)
+            if not values:
+                raise ValueError(f"{category} cannot be empty")
+            if category == "model_patterns":
+                for pattern in values:
+                    re.compile(pattern, re.I)
+
+            old_rows = conn.execute(
+                "SELECT value FROM classifier_rules WHERE category=? AND enabled=1 ORDER BY position,id",
+                (category,),
+            ).fetchall()
+            old = [r["value"] for r in old_rows]
+            if old == values:
+                continue
+
+            conn.execute("DELETE FROM classifier_rules WHERE category=?", (category,))
+            for position, value in enumerate(values):
+                conn.execute(
+                    """
+                    INSERT INTO classifier_rules(category,position,value,enabled,updated_at)
+                    VALUES (?,?,?,?,?)
+                    """,
+                    (category, position, value, 1, iso_now()),
+                )
+            _audit_setting(
+                conn,
+                "RULES",
+                category,
+                json.dumps(old, ensure_ascii=False),
+                json.dumps(values, ensure_ascii=False),
+            )
+            changed.append(category)
+
+        if changed:
+            revision = _bump_rules_revision(conn)
+            conn.commit()
+            refresh_classifier_rules(conn)
+            return revision, changed
+        conn.commit()
+        return current_rules_revision(conn), []
+    finally:
+        conn.close()
+
+
+def _change_settings_password(new_password):
+    if len(new_password) < 10:
+        raise ValueError("Password must be at least 10 characters")
+    conn = connect_db()
+    try:
+        old = conn.execute(
+            "SELECT value FROM settings_auth WHERE key='password_hash'"
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO settings_auth(key,value,updated_at)
+            VALUES ('password_hash',?,?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at
+            """,
+            (_password_hash(new_password), iso_now()),
+        )
+        _audit_setting(conn, "AUTH", "settings_password", "configured" if old else "unset", "changed")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 class DashboardHandler(
     BaseHTTPRequestHandler
 ):
 
-    def do_GET(self):
+    def _send_html(self, page, status=200, headers=None):
+        content = page.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(content)))
+        for key, value in (headers or []):
+            self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(content)
 
-        path = urllib.parse.urlparse(
-            self.path
-        ).path
-
-        if path in (
-            "/",
-            "/index.html"
-        ):
-            page = dashboard_html()
-
-        elif path in (
-            "/diagnostics",
-            "/diagnostics/"
-        ):
-            page = diagnostics_html()
-
-        else:
-            self.send_response(
-                404
-            )
-
-            self.end_headers()
-
-            return
-
-        content = page.encode(
-            "utf-8"
-        )
-
-        self.send_response(
-            200
-        )
-
-        self.send_header(
-            "Content-Type",
-            "text/html; charset=utf-8"
-        )
-
-        self.send_header(
-            "Content-Length",
-            str(len(content))
-        )
-
+    def _redirect(self, location, headers=None):
+        self.send_response(303)
+        self.send_header("Location", location)
+        for key, value in (headers or []):
+            self.send_header(key, value)
         self.end_headers()
 
-        self.wfile.write(
-            content
-        )
+    def _read_form(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length < 0 or length > 1024 * 1024:
+            raise ValueError("Invalid form size")
+        body = self.rfile.read(length).decode("utf-8", errors="replace")
+        return urllib.parse.parse_qs(body, keep_blank_values=True)
+
+    def _require_settings_auth(self):
+        session = _settings_session(self)
+        if not session:
+            self._redirect("/settings/login")
+            return None
+        return session
+
+    def do_GET(self):
+        path = urllib.parse.urlparse(self.path).path
+
+        if path in ("/", "/index.html"):
+            page = dashboard_html()
+            self._send_html(page)
+            return
+
+        if path in ("/diagnostics", "/diagnostics/"):
+            page = diagnostics_html()
+            self._send_html(page)
+            return
+
+        if path in ("/settings/login", "/settings/login/"):
+            if _settings_session(self):
+                self._redirect("/settings")
+                return
+            conn = connect_db()
+            configured = _settings_password_configured(conn)
+            conn.close()
+            message = "" if configured else (
+                f"Settings password is not configured. Add {SETTINGS_PASSWORD_ENV} "
+                "to the TrueNAS app environment and restart the app once."
+            )
+            self._send_html(_settings_login_html(message))
+            return
+
+        if path in ("/settings", "/settings/"):
+            session = self._require_settings_auth()
+            if not session:
+                return
+            self._send_html(settings_html(session["csrf"]))
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
+    def do_POST(self):
+        path = urllib.parse.urlparse(self.path).path
+
+        try:
+            form = self._read_form()
+        except Exception as exc:
+            self._send_html(
+                _settings_login_html(f"Invalid request: {exc}"),
+                status=400,
+            )
+            return
+
+        if path == "/settings/login":
+            password = form.get("password", [""])[0]
+            conn = connect_db()
+            row = conn.execute(
+                "SELECT value FROM settings_auth WHERE key='password_hash'"
+            ).fetchone()
+            conn.close()
+
+            if not row or not _password_matches(password, row["value"]):
+                self._send_html(
+                    _settings_login_html("Incorrect password or password not configured."),
+                    status=401,
+                )
+                return
+
+            token, _ = _new_settings_session()
+            cookie = (
+                f"ll_settings_session={token}; Path=/settings; "
+                f"Max-Age={SETTINGS_SESSION_SECONDS}; HttpOnly; SameSite=Strict"
+            )
+            self._redirect("/settings", [("Set-Cookie", cookie)])
+            return
+
+        session = self._require_settings_auth()
+        if not session:
+            return
+
+        if not _csrf_ok(self, form):
+            self._send_html(
+                settings_html(session["csrf"], "CSRF validation failed."),
+                status=403,
+            )
+            return
+
+        try:
+            if path == "/settings/logout":
+                token = _settings_cookie_token(self)
+                _SETTINGS_SESSIONS.pop(token, None)
+                cookie = (
+                    "ll_settings_session=; Path=/settings; "
+                    "Max-Age=0; HttpOnly; SameSite=Strict"
+                )
+                self._redirect("/settings/login", [("Set-Cookie", cookie)])
+                return
+
+            if path == "/settings/save":
+                _save_settings_form(form)
+                self._send_html(
+                    settings_html(session["csrf"], "Settings saved. Changes are active now or on the next cycle as labelled.")
+                )
+                return
+
+            if path == "/settings/rules":
+                revision, changed = _save_rules_form(form)
+                message = (
+                    f"Rules saved. Rules revision is now {revision}; "
+                    f"reanalysis queued for active listings. Changed: {', '.join(changed)}"
+                    if changed else
+                    "No classifier rule changes detected."
+                )
+                self._send_html(settings_html(session["csrf"], message))
+                return
+
+            if path == "/settings/test-regex":
+                pattern = form.get("pattern", [""])[0]
+                sample = form.get("sample", [""])[0]
+                compiled = re.compile(pattern, re.I)
+                match = compiled.search(sample)
+                result = (
+                    f"MATCH: {match.group(0)!r} at {match.span()}"
+                    if match else "No match"
+                )
+                self._send_html(settings_html(session["csrf"], regex_result=result))
+                return
+
+            if path == "/settings/password":
+                new_password = form.get("new_password", [""])[0]
+                confirm = form.get("confirm_password", [""])[0]
+                if new_password != confirm:
+                    raise ValueError("Password confirmation does not match")
+                _change_settings_password(new_password)
+                self._send_html(settings_html(session["csrf"], "Settings password changed."))
+                return
+
+            if path == "/settings/restore":
+                audit_id = int(form.get("audit_id", ["0"])[0])
+                conn = connect_db()
+                try:
+                    row = conn.execute(
+                        """
+                        SELECT * FROM settings_audit
+                        WHERE id=? AND kind='SETTING'
+                        """,
+                        (audit_id,),
+                    ).fetchone()
+                    if not row or row["setting_key"] not in SETTINGS_SCHEMA_BY_KEY:
+                        raise ValueError("Change cannot be restored")
+                    meta = SETTINGS_SCHEMA_BY_KEY[row["setting_key"]]
+                    restored = _coerce_setting(meta, row["old_value"])
+                    current = _settings_value(conn, row["setting_key"])
+                    text_value = _setting_text(restored)
+                    conn.execute(
+                        """
+                        INSERT INTO app_settings(key,value,updated_at)
+                        VALUES (?,?,?)
+                        ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at
+                        """,
+                        (row["setting_key"], text_value, iso_now()),
+                    )
+                    _audit_setting(
+                        conn, "SETTING", row["setting_key"], current, text_value
+                    )
+                    conn.commit()
+                    refresh_runtime_settings(conn)
+                finally:
+                    conn.close()
+                self._send_html(settings_html(session["csrf"], "Setting restored."))
+                return
+
+            self.send_response(404)
+            self.end_headers()
+
+        except re.error as exc:
+            self._send_html(
+                settings_html(session["csrf"], f"Invalid regular expression: {exc}"),
+                status=400,
+            )
+        except Exception as exc:
+            self._send_html(
+                settings_html(session["csrf"], f"Could not save: {exc}"),
+                status=400,
+            )
 
     def log_message(
         self,
@@ -9020,6 +10029,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
 
 def dashboard_html():
+    refresh_runtime_settings()
+    refresh_classifier_rules()
     page = _dashboard_html_base()
 
     health = _dashboard_health_alert()
@@ -9310,8 +10321,10 @@ def is_fixed_price_listing(row):
 def drain_reanalysis_queue(
     conn,
     token,
-    maximum=MAX_BACKFILL_DETAILS_PER_CYCLE
+    maximum=None
 ):
+    if maximum is None:
+        maximum = MAX_BACKFILL_DETAILS_PER_CYCLE
     """
     Explicitly drain active listings created by older classifier versions.
 
@@ -9327,10 +10340,12 @@ def drain_reanalysis_queue(
           AND (
                 classifier_version IS NULL
                 OR classifier_version<>?
+                OR COALESCE(rules_revision,0)<>?
               )
         """,
         (
             CLASSIFIER_VERSION,
+            current_rules_revision(conn),
         )
     ).fetchone()["n"]
 
@@ -9360,6 +10375,7 @@ def drain_reanalysis_queue(
           AND (
                 classifier_version IS NULL
                 OR classifier_version<>?
+                OR COALESCE(rules_revision,0)<>?
               )
         ORDER BY
             CASE
@@ -9376,6 +10392,7 @@ def drain_reanalysis_queue(
         """,
         (
             CLASSIFIER_VERSION,
+            current_rules_revision(conn),
             maximum,
         )
     ).fetchall()
@@ -9517,10 +10534,12 @@ def drain_reanalysis_queue(
           AND (
                 classifier_version IS NULL
                 OR classifier_version<>?
+                OR COALESCE(rules_revision,0)<>?
               )
         """,
         (
             CLASSIFIER_VERSION,
+            current_rules_revision(conn),
         )
     ).fetchone()["n"]
 
@@ -9551,8 +10570,12 @@ def active_bin_rechecks_for_cycle(conn):
           AND (
                 classifier_version IS NULL
                 OR classifier_version<>?
+                OR COALESCE(rules_revision,0)<>?
               )
-    """, (CLASSIFIER_VERSION,)).fetchone()["n"]
+    """, (
+        CLASSIFIER_VERSION,
+        current_rules_revision(conn),
+    )).fetchone()["n"]
 
     if remaining:
         return ACTIVE_BIN_RECHECKS_DURING_REANALYSIS
@@ -9560,7 +10583,9 @@ def active_bin_rechecks_for_cycle(conn):
     return ACTIVE_BIN_RECHECKS_PER_CYCLE
 
 
-def recheck_active_bin_listings(conn, token, maximum=ACTIVE_BIN_RECHECKS_PER_CYCLE):
+def recheck_active_bin_listings(conn, token, maximum=None):
+    if maximum is None:
+        maximum = ACTIVE_BIN_RECHECKS_PER_CYCLE
     """
     Recheck a rotating set of active BIN/Best Offer listings.
 
@@ -9907,6 +10932,8 @@ def run_cycle(
     conn,
     cycle
 ):
+    refresh_runtime_settings(conn)
+    refresh_classifier_rules(conn)
     print()
     print("#" * 90)
 
