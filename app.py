@@ -8317,6 +8317,246 @@ def _dashboard_html_base():
             }}
         }}
 
+
+        /* ======================================================
+           Homepage hero refinement
+           ====================================================== */
+
+        .public-topbar {{
+            min-height: 46px;
+            margin: 0 0 10px 0;
+        }}
+
+        .public-logo {{
+            width: 66px;
+            height: 46px;
+            border-radius: 12px;
+            box-shadow:
+                0 5px 14px
+                rgba(30, 48, 90, .08);
+        }}
+
+        .public-logo-image {{
+            width: 60px;
+        }}
+
+        .home-hero {{
+            min-height: 0;
+            grid-template-columns:
+                minmax(0, 1.02fr)
+                minmax(380px, .98fr);
+            gap: 54px;
+
+            padding:
+                48px 56px
+                50px;
+
+            margin-bottom: 30px;
+
+            border-radius: 24px;
+
+            background:
+                radial-gradient(
+                    circle at 86% 20%,
+                    rgba(110, 140, 255, .15),
+                    transparent 31%
+                ),
+                linear-gradient(
+                    135deg,
+                    #f8faff 0%,
+                    #f2f6fc 58%,
+                    #edf2fc 100%
+                );
+        }}
+
+        .home-hero::before {{
+            width: 420px;
+            height: 420px;
+            right: -185px;
+            bottom: -305px;
+
+            border-width: 54px;
+            opacity: .65;
+        }}
+
+        .hero-copy h1 {{
+            font-size:
+                clamp(44px, 4.4vw, 66px);
+
+            line-height: 1;
+            letter-spacing: -.04em;
+        }}
+
+        .hero-subtitle {{
+            margin-top: 17px;
+
+            font-size:
+                clamp(19px, 1.7vw, 24px);
+
+            color: #5b6f91;
+        }}
+
+        .hero-benefits {{
+            gap: 30px;
+            margin-top: 32px;
+        }}
+
+        .hero-benefit {{
+            font-size: 14px;
+            line-height: 1.3;
+            max-width: 160px;
+        }}
+
+        .hero-benefit-image {{
+            width: 54px;
+            height: 54px;
+
+            margin-bottom: 10px;
+
+            border-radius: 14px;
+
+            box-shadow:
+                0 5px 14px
+                rgba(31, 57, 116, .07);
+
+            filter:
+                saturate(.92)
+                contrast(.96);
+        }}
+
+        .hero-deals {{
+            min-height: 235px;
+        }}
+
+        /* Single deal should feel featured, not stretched. */
+        .hero-deals-1 {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 235px;
+        }}
+
+        .hero-deals-1
+        .hero-deal-card {{
+            position: relative;
+
+            width: 100%;
+            max-width: 470px;
+
+            margin: 0;
+
+            border-radius: 18px;
+
+            box-shadow:
+                0 16px 34px
+                rgba(28, 48, 90, .11);
+        }}
+
+        .hero-deals-1
+        .hero-deal-card-inner {{
+            grid-template-columns: 105px 1fr;
+            min-height: 128px;
+
+            gap: 18px;
+
+            padding: 19px 21px;
+        }}
+
+        .hero-deals-1
+        .hero-deal-image {{
+            width: 105px;
+            height: 86px;
+
+            border-radius: 12px;
+        }}
+
+        .hero-deals-1
+        .hero-deal-title {{
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+
+            overflow: hidden;
+
+            white-space: normal;
+            text-overflow: clip;
+
+            font-size: 15px;
+            line-height: 1.28;
+        }}
+
+        .hero-deals-1
+        .hero-deal-price {{
+            margin-top: 7px;
+
+            font-size: 25px;
+        }}
+
+        .hero-deals-1
+        .hero-deal-saving {{
+            margin-top: 4px;
+
+            font-size: 13px;
+        }}
+
+        /* Keep multi-deal cards compact too. */
+        .hero-deal-card {{
+            width: min(88%, 450px);
+        }}
+
+        .hero-deal-card-inner {{
+            grid-template-columns: 92px 1fr;
+            gap: 15px;
+
+            padding: 15px 17px;
+        }}
+
+        .hero-deal-image {{
+            width: 92px;
+            height: 72px;
+        }}
+
+        @media (max-width: 1000px) {{
+            .home-hero {{
+                grid-template-columns: 1fr;
+                gap: 30px;
+
+                padding:
+                    36px 32px;
+            }}
+
+            .hero-deals,
+            .hero-deals-1 {{
+                min-height: auto;
+            }}
+
+            .hero-deals-1
+            .hero-deal-card {{
+                margin: 0;
+            }}
+        }}
+
+        @media (max-width: 680px) {{
+            .home-hero {{
+                padding:
+                    26px 20px;
+
+                border-radius: 18px;
+            }}
+
+            .hero-copy h1 {{
+                font-size: 40px;
+            }}
+
+            .hero-benefits {{
+                gap: 12px;
+            }}
+
+            .hero-benefit {{
+                max-width: none;
+            }}
+        }}
+
         .deal-section {{
             margin-top: 28px;
         }}
