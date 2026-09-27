@@ -50,7 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.16"
+APP_VERSION = "0.9.17"
 CLASSIFIER_VERSION = "0.8.2"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -136,11 +136,12 @@ DASHBOARD_PORT = int(
 EBAY_DAILY_LIMIT = 5000
 DAILY_SAFETY_LIMIT = 4500
 
-SEARCH_RESERVE = 1000
-EMERGENCY_RESERVE = 250
-
+SEARCH_RESERVE = 300
+MIN_SEARCH_RESERVE = 100
+SEARCH_RESERVE_TAPER_START_HOUR = 12
+EMERGENCY_RESERVE = 150
 MAX_DETAIL_CALLS_PER_CYCLE = 40
-MAX_BACKFILL_DETAILS_PER_CYCLE = 20
+MAX_BACKFILL_DETAILS_PER_CYCLE = 40
 POLL_NORMAL = 90
 POLL_60_PERCENT = 120
 POLL_75_PERCENT = 180
@@ -606,17 +607,73 @@ def can_search(conn):
     )
 
 
-def can_detail(conn):
-    remaining = (
-        DAILY_SAFETY_LIMIT
-        - browse_usage_today(conn)
+
+def current_search_reserve(now=None):
+    """
+    Preserve more search capacity early in the UTC day, then gradually release
+    unused reserve to detail/reanalysis work during the second half of the day.
+
+    00:00-12:00 UTC: SEARCH_RESERVE
+    12:00-24:00 UTC: linearly tapers to MIN_SEARCH_RESERVE
+    """
+    now = now or utcnow()
+
+    hour = (
+        now.hour
+        + now.minute / 60.0
+        + now.second / 3600.0
     )
 
-    return (
-        remaining
-        >
+    if hour <= SEARCH_RESERVE_TAPER_START_HOUR:
+        return SEARCH_RESERVE
+
+    taper_hours = (
+        24.0
+        - SEARCH_RESERVE_TAPER_START_HOUR
+    )
+
+    progress = min(
+        1.0,
+        max(
+            0.0,
+            (
+                hour
+                - SEARCH_RESERVE_TAPER_START_HOUR
+            )
+            / taper_hours
+        )
+    )
+
+    reserve = round(
         SEARCH_RESERVE
-        + EMERGENCY_RESERVE
+        - (
+            SEARCH_RESERVE
+            - MIN_SEARCH_RESERVE
+        )
+        * progress
+    )
+
+    return max(
+        MIN_SEARCH_RESERVE,
+        min(
+            SEARCH_RESERVE,
+            reserve
+        )
+    )
+
+
+def detail_api_cutoff(now=None):
+    return (
+        DAILY_SAFETY_LIMIT
+        - EMERGENCY_RESERVE
+        - current_search_reserve(now)
+    )
+
+
+def can_detail(conn):
+    return (
+        browse_usage_today(conn)
+        < detail_api_cutoff()
     )
 
 
