@@ -48,6 +48,7 @@ from http.cookies import SimpleCookie
 
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from html.parser import HTMLParser
 
 
 # ============================================================
@@ -165,6 +166,15 @@ MEDIUM_CONFIDENCE_COMPARABLES = 6
 COMPARABLE_MAX_AGE_DAYS = 30
 SOLD_CACHE_MAX_AGE_DAYS = 7
 SOLD_EVIDENCE_VERSION = "2"
+
+
+# PassMark CPU benchmark cache.
+CPU_BENCHMARK_URL = "https://www.cpubenchmark.net/cpu-list/all"
+CPU_BENCHMARK_REFRESH_HOURS = 24
+CPU_BENCHMARK_USER_AGENT = (
+    "Mozilla/5.0 (compatible; LaptopLander/1.0; "
+    "+https://github.com/ValentineAlan/ebay-laptop-hunter)"
+)
 
 # ============================================================
 # RUNTIME SETTINGS / ADMIN UI
@@ -765,6 +775,23 @@ def init_db():
     """)
 
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS cpu_benchmarks (
+            lookup_key TEXT PRIMARY KEY,
+            cpu_name TEXT NOT NULL,
+            cpu_mark INTEGER NOT NULL,
+            cpu_rank INTEGER,
+            source_url TEXT,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_cpu_benchmarks_name
+        ON cpu_benchmarks (cpu_name)
+    """)
+
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS api_usage (
             day TEXT NOT NULL,
             api TEXT NOT NULL,
@@ -1129,6 +1156,374 @@ def polling_interval(conn):
         return POLL_60_PERCENT
 
     return POLL_NORMAL
+
+
+# ============================================================
+# CPU BENCHMARKS
+# ============================================================
+
+def cpu_benchmark_key(value):
+    """
+    Normalise Laptop Lander CPU names and PassMark CPU names
+    to a common lookup key.
+    """
+    value = normalise(value).lower()
+
+    if not value:
+        return ""
+
+    value = (
+        value
+        .replace("®", "")
+        .replace("™", "")
+    )
+
+    value = re.sub(
+        r"\b(?:intel|amd)\b",
+        " ",
+        value,
+        flags=re.I,
+    )
+
+    value = re.sub(
+        r"\bcore\b",
+        " ",
+        value,
+        flags=re.I,
+    )
+
+    value = re.sub(
+        r"\b(?:processor|cpu|apu)\b",
+        " ",
+        value,
+        flags=re.I,
+    )
+
+    value = re.sub(
+        r"\bwith\s+radeon(?:\s+graphics)?\b",
+        " ",
+        value,
+        flags=re.I,
+    )
+
+    # PassMark commonly includes PRO where our CPU parser deliberately
+    # normalises the SKU without it.
+    value = re.sub(
+        r"\bpro\b",
+        " ",
+        value,
+        flags=re.I,
+    )
+
+    value = value.replace("-", " ")
+
+    value = re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        value,
+    )
+
+    return re.sub(
+        r"\s+",
+        " ",
+        value,
+    ).strip()
+
+
+class PassMarkCpuListParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+
+        self.in_row = False
+        self.in_cell = False
+
+        self.cells = []
+        self.cell_text = []
+
+        self.first_cell_cpu_link = None
+
+        self.rows = []
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+
+        if tag == "tr":
+            self.in_row = True
+            self.cells = []
+            self.first_cell_cpu_link = None
+
+        elif tag in ("td", "th") and self.in_row:
+            self.in_cell = True
+            self.cell_text = []
+
+        elif tag == "a" and self.in_row and self.in_cell:
+            # PassMark CPU rows link to cpu_lookup.php?cpu=...
+            if len(self.cells) == 0:
+                attrs = dict(attrs)
+                href = attrs.get("href", "")
+
+                if "cpu_lookup.php?cpu=" in href:
+                    self.first_cell_cpu_link = href
+
+    def handle_data(self, data):
+        if self.in_cell:
+            self.cell_text.append(data)
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+
+        if tag in ("td", "th") and self.in_cell:
+            value = normalise(
+                " ".join(self.cell_text)
+            )
+
+            self.cells.append(value)
+
+            self.in_cell = False
+            self.cell_text = []
+
+        elif tag == "tr" and self.in_row:
+            self.in_row = False
+
+            # The CPU list contains:
+            # CPU name, CPU Mark, rank, CPU value, price.
+            if (
+                self.first_cell_cpu_link
+                and len(self.cells) >= 3
+            ):
+                self.rows.append((
+                    list(self.cells),
+                    self.first_cell_cpu_link,
+                ))
+
+
+def parse_passmark_cpu_list(page):
+    parser = PassMarkCpuListParser()
+
+    parser.feed(page)
+
+    result = []
+
+    for cells, href in parser.rows:
+        name = normalise(cells[0])
+
+        mark_text = (
+            cells[1]
+            .replace(",", "")
+            .strip()
+        )
+
+        rank_text = (
+            cells[2]
+            .replace(",", "")
+            .strip()
+        )
+
+        if not name:
+            continue
+
+        if not mark_text.isdigit():
+            continue
+
+        mark = int(mark_text)
+
+        if mark <= 0:
+            continue
+
+        rank = (
+            int(rank_text)
+            if rank_text.isdigit()
+            else None
+        )
+
+        key = cpu_benchmark_key(name)
+
+        if not key:
+            continue
+
+        source_url = href
+
+        if source_url.startswith("/"):
+            source_url = (
+                "https://www.cpubenchmark.net"
+                + source_url
+            )
+
+        result.append({
+            "lookup_key": key,
+            "cpu_name": name,
+            "cpu_mark": mark,
+            "cpu_rank": rank,
+            "source_url": source_url,
+        })
+
+    return result
+
+
+def cpu_benchmark_cache_age_hours(conn):
+    row = conn.execute("""
+        SELECT MAX(updated_at) AS newest
+        FROM cpu_benchmarks
+    """).fetchone()
+
+    if not row or not row["newest"]:
+        return None
+
+    try:
+        dt = datetime.fromisoformat(
+            str(row["newest"]).replace(
+                "Z",
+                "+00:00"
+            )
+        )
+
+        if dt.tzinfo is None:
+            dt = dt.replace(
+                tzinfo=timezone.utc
+            )
+
+        return (
+            utcnow()
+            - dt.astimezone(timezone.utc)
+        ).total_seconds() / 3600.0
+
+    except Exception:
+        return None
+
+
+def refresh_cpu_benchmarks(conn, force=False):
+    age = cpu_benchmark_cache_age_hours(conn)
+
+    if (
+        not force
+        and age is not None
+        and age < CPU_BENCHMARK_REFRESH_HOURS
+    ):
+        return 0
+
+    request = urllib.request.Request(
+        CPU_BENCHMARK_URL,
+        headers={
+            "User-Agent":
+                CPU_BENCHMARK_USER_AGENT,
+
+            "Accept":
+                "text/html,application/xhtml+xml",
+        },
+        method="GET",
+    )
+
+    with urllib.request.urlopen(
+        request,
+        timeout=30,
+    ) as response:
+        page = response.read().decode(
+            "utf-8",
+            errors="replace",
+        )
+
+    rows = parse_passmark_cpu_list(page)
+
+    if len(rows) < 1000:
+        raise RuntimeError(
+            "PassMark CPU list returned "
+            f"only {len(rows)} usable rows"
+        )
+
+    now = iso_now()
+
+    for row in rows:
+        conn.execute("""
+            INSERT INTO cpu_benchmarks (
+                lookup_key,
+                cpu_name,
+                cpu_mark,
+                cpu_rank,
+                source_url,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+
+            ON CONFLICT (lookup_key)
+            DO UPDATE SET
+                cpu_name=excluded.cpu_name,
+                cpu_mark=excluded.cpu_mark,
+                cpu_rank=excluded.cpu_rank,
+                source_url=excluded.source_url,
+                updated_at=excluded.updated_at
+        """, (
+            row["lookup_key"],
+            row["cpu_name"],
+            row["cpu_mark"],
+            row["cpu_rank"],
+            row["source_url"],
+            now,
+        ))
+
+    conn.commit()
+
+    print(
+        "CPU benchmarks: refreshed "
+        f"{len(rows)} PassMark CPU records"
+    )
+
+    return len(rows)
+
+
+def cpu_benchmark_for_cpu(conn, cpu):
+    key = cpu_benchmark_key(cpu)
+
+    if not key:
+        return None
+
+    return conn.execute("""
+        SELECT
+            cpu_name,
+            cpu_mark,
+            cpu_rank,
+            source_url,
+            updated_at
+        FROM cpu_benchmarks
+        WHERE lookup_key=?
+        LIMIT 1
+    """, (
+        key,
+    )).fetchone()
+
+
+def cpu_benchmark_refresh_worker():
+    while True:
+        try:
+            conn = connect_db()
+
+            try:
+                refresh_cpu_benchmarks(
+                    conn
+                )
+
+            finally:
+                conn.close()
+
+        except Exception as exc:
+            print(
+                "CPU benchmarks: refresh failed:",
+                repr(exc)
+            )
+
+        # Check hourly. The actual web fetch only happens when
+        # the cache is at least 24 hours old.
+        time.sleep(3600)
+
+
+def start_cpu_benchmark_refresh_worker():
+    thread = threading.Thread(
+        target=cpu_benchmark_refresh_worker,
+        name="cpu-benchmark-refresh",
+        daemon=True,
+    )
+
+    thread.start()
+
 
 
 # ============================================================
@@ -6693,6 +7088,28 @@ def _dashboard_html_base():
             else buy_now_body_rows
         )
 
+        cpu_benchmark = cpu_benchmark_for_cpu(
+            conn,
+            row["cpu"]
+        )
+
+        if cpu_benchmark:
+            cpu_rating_value = int(
+                cpu_benchmark["cpu_mark"]
+            )
+
+            cpu_rating_html = (
+                f'<a href="{html.escape(cpu_benchmark["source_url"] or "#", quote=True)}" '
+                f'target="_blank" '
+                f'title="PassMark CPU Mark for {html.escape(cpu_benchmark["cpu_name"])}">'
+                f'{cpu_rating_value:,}'
+                f'</a>'
+            )
+
+        else:
+            cpu_rating_value = -1
+            cpu_rating_html = "—"
+
         target_rows.append(
             f"""
             <tr>
@@ -6707,6 +7124,11 @@ def _dashboard_html_base():
                     <div class="small">
                         {html.escape(spec_text)}
                     </div>
+                </td>
+
+                <td class="cpu-rating"
+                    data-sort="{cpu_rating_value}">
+                    {cpu_rating_html}
                 </td>
 
                 <td>
@@ -6834,8 +7256,8 @@ def _dashboard_html_base():
             font-size: 20px;
         }}
 
-        .auction-table th:nth-child(6),
-        .auction-table td:nth-child(6) {{
+        .auction-table th:nth-child(7),
+        .auction-table td:nth-child(7) {{
             display: none;
         }}
 
@@ -6862,51 +7284,59 @@ def _dashboard_html_base():
         /* Image */
         .deal-section th:nth-child(1),
         .deal-section td:nth-child(1) {{
-            width: 8%;
+            width: 7%;
             text-align: center;
         }}
 
         /* Listing */
         .deal-section th:nth-child(2),
         .deal-section td:nth-child(2) {{
-            width: 40%;
+            width: 35%;
             text-align: left;
         }}
 
-        /* Listing age / time left */
+        /* CPU Rating */
         .deal-section th:nth-child(3),
         .deal-section td:nth-child(3) {{
-            width: 10%;
+            width: 9%;
+            text-align: right;
+            white-space: nowrap;
+        }}
+
+        /* Listing age / time left */
+        .deal-section th:nth-child(4),
+        .deal-section td:nth-child(4) {{
+            width: 9%;
             text-align: left;
             white-space: nowrap;
         }}
 
         /* Price / current bid */
-        .deal-section th:nth-child(4),
-        .deal-section td:nth-child(4) {{
+        .deal-section th:nth-child(5),
+        .deal-section td:nth-child(5) {{
             width: 9%;
             text-align: right;
             white-space: nowrap;
         }}
 
         /* Saving / potential undervaluation */
-        .deal-section th:nth-child(5),
-        .deal-section td:nth-child(5) {{
-            width: 17%;
+        .deal-section th:nth-child(6),
+        .deal-section td:nth-child(6) {{
+            width: 15%;
             text-align: left;
         }}
 
         /* Score */
-        .deal-section th:nth-child(6),
-        .deal-section td:nth-child(6) {{
+        .deal-section th:nth-child(7),
+        .deal-section td:nth-child(7) {{
             width: 7%;
             text-align: center;
             white-space: nowrap;
         }}
 
         /* Notes */
-        .deal-section th:nth-child(7),
-        .deal-section td:nth-child(7) {{
+        .deal-section th:nth-child(8),
+        .deal-section td:nth-child(8) {{
             width: 9%;
             text-align: left;
         }}
@@ -6915,16 +7345,35 @@ def _dashboard_html_base():
         .deal-section th:nth-child(2),
         .deal-section td:nth-child(2),
 
-        .deal-section th:nth-child(4),
-        .deal-section td:nth-child(4),
+        .deal-section th:nth-child(3),
+        .deal-section td:nth-child(3),
 
         .deal-section th:nth-child(5),
         .deal-section td:nth-child(5),
 
         .deal-section th:nth-child(6),
-        .deal-section td:nth-child(6) {{
+        .deal-section td:nth-child(6),
+
+        .deal-section th:nth-child(7),
+        .deal-section td:nth-child(7) {{
             border-right: 1px solid rgba(15, 23, 42, 0.05);
         }}
+
+        .cpu-rating {{
+            font-variant-numeric: tabular-nums;
+            font-weight: 700;
+        }}
+
+        .cpu-rating a {{
+            color: #344054;
+            text-decoration: none;
+        }}
+
+        .cpu-rating a:hover {{
+            color: #2563eb;
+            text-decoration: underline;
+        }}
+
 
         /* Gentle hover makes wide rows easier to track visually. */
         .deal-section tbody tr {{
@@ -6961,7 +7410,7 @@ def _dashboard_html_base():
         <thead>
         <tr>
             <th class="image-header" aria-label="Product image"></th>
-            <th>Listing</th>
+            \1<th>CPU Rating</th>
             <th>Listing age</th>
             <th>Price</th>
             <th>Saving vs usual sold price</th>
@@ -6995,7 +7444,7 @@ def _dashboard_html_base():
         <thead>
         <tr>
             <th class="image-header" aria-label="Product image"></th>
-            <th>Listing</th>
+            \1<th>CPU Rating</th>
             <th>Time Left</th>
             <th>Current Bid</th>
             <th>Potential Undervaluation</th>
@@ -11333,6 +11782,7 @@ def main():
 
     start_dashboard()
     start_product_research_session_monitor()
+    start_cpu_benchmark_refresh_worker()
 
     cycle = 0
 
