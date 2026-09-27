@@ -53,7 +53,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 APP_VERSION = "0.9.7"
 CLASSIFIER_VERSION = "0.8.1"
 MIN_UNDERVALUE_GBP = 20.0
-IMAGE_BACKFILL_PER_CYCLE = 12
+IMAGE_BACKFILL_PER_CYCLE = 100
+IMAGE_BACKFILL_DAILY_ALLOWANCE = 100
 
 # Backward-compatible internal alias.
 # Existing classifier_version DB logic continues to use CLASSIFIER_VERSION.
@@ -6888,22 +6889,43 @@ def backfill_dashboard_images(
     maximum=IMAGE_BACKFILL_PER_CYCLE
 ):
     """
-    Fetch primary eBay images only for listings currently
-    eligible to appear on the deal dashboard.
+    Populate eBay images only for listings currently eligible
+    to appear on Laptop Lander.
 
-    Does not change classifier state or valuation state.
+    Thumbnail calls may use a dedicated allowance beyond the
+    normal detail-call reserve, but never consume the emergency
+    reserve.
     """
+
+    already_used = operation_usage(
+        conn,
+        "IMAGE_BACKFILL"
+    )
+
+    allowance_left = max(
+        0,
+        IMAGE_BACKFILL_DAILY_ALLOWANCE
+        - already_used
+    )
+
+    if allowance_left <= 0:
+        return 0
+
+    maximum = min(
+        maximum,
+        allowance_left
+    )
 
     rows = conn.execute("""
         SELECT item_id
         FROM listings
-        WHERE COALESCE(active, 1) = 1
+        WHERE COALESCE(active, 1)=1
           AND estimated_value IS NOT NULL
           AND deal_score > 0
           AND undervaluation_gbp >= ?
           AND (
                 image_url IS NULL
-                OR trim(image_url) = ''
+                OR trim(image_url)=''
               )
         ORDER BY
             deal_score DESC,
@@ -6919,18 +6941,40 @@ def backfill_dashboard_images(
         return 0
 
     updated = 0
+    attempted = 0
 
     for row in rows:
 
-        if not can_detail(conn):
+        remaining = (
+            DAILY_SAFETY_LIMIT
+            - browse_usage_today(conn)
+        )
+
+        # Thumbnail override is allowed to use the normal search
+        # reserve, but never the emergency reserve.
+        if remaining <= EMERGENCY_RESERVE:
+            print(
+                "Dashboard image backfill: "
+                "stopped at emergency reserve"
+            )
+            break
+
+        if attempted >= allowance_left:
             break
 
         try:
-            detail = get_item(
+            record_api_call(
                 conn,
+                "BROWSE",
+                "IMAGE_BACKFILL"
+            )
+
+            state, detail = ebay_get_item(
                 token,
                 row["item_id"]
             )
+
+            attempted += 1
 
         except Exception as exc:
             print(
@@ -6941,6 +6985,9 @@ def backfill_dashboard_images(
             )
             continue
 
+        if state != "ACTIVE" or not detail:
+            continue
+
         image_url = (
             (detail.get("image") or {})
             .get("imageUrl")
@@ -6948,9 +6995,7 @@ def backfill_dashboard_images(
             (
                 (
                     (
-                        detail.get(
-                            "thumbnailImages"
-                        )
+                        detail.get("thumbnailImages")
                         or [{}]
                     )[0]
                     or {}
@@ -6980,8 +7025,11 @@ def backfill_dashboard_images(
         conn.commit()
 
     print(
-        "Dashboard image backfill: "
-        f"{updated}/{len(rows)} populated"
+        f"Dashboard image backfill: "
+        f"{updated}/{attempted} populated "
+        f"({already_used + attempted}/"
+        f"{IMAGE_BACKFILL_DAILY_ALLOWANCE} "
+        f"thumbnail calls today)"
     )
 
     return updated
