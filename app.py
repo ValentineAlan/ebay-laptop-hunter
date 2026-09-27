@@ -1,4 +1,4 @@
-# eBay Laptop Hunter v0.9.5
+# Laptop Lander v0.9.6
 #
 # Features:
 #   - eBay GB laptop discovery
@@ -50,7 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.5"
+APP_VERSION = "0.9.6"
 CLASSIFIER_VERSION = "0.8.1"
 MIN_UNDERVALUE_GBP = 20.0
 
@@ -326,6 +326,7 @@ def init_db():
         "model": "TEXT",
         "ram_gb": "INTEGER",
         "storage_gb": "INTEGER",
+        "image_url": "TEXT",
 
         "fault_reasons": "TEXT",
         "detail_status": "TEXT",
@@ -2602,6 +2603,19 @@ def analyse_listing(
         detail if detail.get("price") else summary
     )
 
+    image_url = (
+        (detail.get("image") or {}).get("imageUrl")
+        or (summary.get("image") or {}).get("imageUrl")
+        or (
+            ((detail.get("thumbnailImages") or [{}])[0] or {})
+            .get("imageUrl")
+        )
+        or (
+            ((summary.get("thumbnailImages") or [{}])[0] or {})
+            .get("imageUrl")
+        )
+    )
+
     postage = shipping_price(
         detail if detail.get("shippingOptions") else summary
     )
@@ -2636,6 +2650,9 @@ def analyse_listing(
                 "itemWebUrl"
             )
             or "",
+
+        "image_url":
+            image_url,
 
         "end_date":
             summary.get(
@@ -2826,6 +2843,9 @@ def save_listing(
 
         "url":
             item["url"],
+
+        "image_url":
+            item.get("image_url"),
 
         "end_date":
             item["end_date"],
@@ -5367,9 +5387,34 @@ def _dashboard_html_base():
             .replace("</details>", "</div>")
         )
 
+        image_url = row["image_url"] or ""
+
+        if image_url:
+            thumb_html = (
+                f'<a href="{url}" target="_blank" '
+                f'class="product-thumb-link">'
+                f'<img src="{html.escape(image_url, quote=True)}" '
+                f'class="product-thumb" '
+                f'loading="lazy" '
+                f'decoding="async" '
+                f'alt="">'
+                f'</a>'
+            )
+        else:
+            thumb_html = (
+                "<div class='product-thumb-placeholder' "
+                "title='Image will appear after the listing is refreshed'>"
+                "<span>⌁</span>"
+                "</div>"
+            )
+
         body_rows.append(
             f"""
             <tr>
+                <td class="product-thumb-cell">
+                    {thumb_html}
+                </td>
+
                 <td>
                     <a href="{url}" target="_blank">
                         {title}
@@ -5456,17 +5501,35 @@ def _dashboard_html_base():
         <meta charset="utf-8">
         <meta http-equiv="refresh"
               content="60">
-        <title>eBay Laptop Hunter</title>
+        <title>Laptop Lander</title>
         <style>{CSS}</style>
     </head>
 
     <body>
 
-    <h1>eBay Laptop Hunter</h1>
+    <div class="brand-header">
+    <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 64 64" role="img">
+            <rect x="13" y="28" width="31" height="21" rx="3"></rect>
+            <path d="M9 52h39"></path>
+            <path d="M39 27c3-11 9-17 17-20 1 9-2 17-10 23"></path>
+            <path d="M47 17l7 7"></path>
+            <path d="M18 25l-5-7"></path>
+            <path d="M14 30l-8-2"></path>
+        </svg>
+    </div>
+
+    <div>
+        <h1>Laptop Lander</h1>
+        <div class="brand-tagline">
+            Land the right laptop at the right price.
+        </div>
+    </div>
+</div>
 
     <div class="sub">
         v{APP_VERSION} —
-        sold-market bargain dashboard
+        eBay UK deal intelligence
     </div>
 
     <div class="cards">
@@ -5492,6 +5555,7 @@ def _dashboard_html_base():
 
     <thead>
     <tr>
+        <th class="image-header" aria-label="Product image"></th>
         <th>Listing</th>
         <th>Age</th>
         <th>Price</th>
@@ -5767,6 +5831,525 @@ _DASHBOARD_UI_ENHANCEMENT = r"""
 .confidence-meta {
     white-space: nowrap;
     margin-top: 3px;
+}
+
+
+/* ==========================================================
+   LAPTOP LANDER v0.9.6
+   ========================================================== */
+
+:root {
+    --ll-bg: #f4f7fb;
+    --ll-surface: #ffffff;
+    --ll-surface-soft: #f8fafc;
+    --ll-text: #172033;
+    --ll-muted: #667085;
+    --ll-border: #e3e8ef;
+
+    --ll-blue: #2563eb;
+    --ll-blue-dark: #1d4ed8;
+    --ll-blue-soft: #eff6ff;
+
+    --ll-green: #15803d;
+    --ll-green-soft: #ecfdf3;
+
+    --ll-amber: #b45309;
+    --ll-amber-soft: #fff7ed;
+
+    --ll-red: #b42318;
+    --ll-red-soft: #fef3f2;
+
+    --ll-radius: 14px;
+    --ll-shadow:
+        0 1px 2px rgba(16, 24, 40, .04),
+        0 8px 24px rgba(16, 24, 40, .06);
+}
+
+body {
+    background:
+        radial-gradient(
+            circle at 90% -10%,
+            #dbeafe 0,
+            transparent 32rem
+        ),
+        var(--ll-bg);
+
+    color: var(--ll-text);
+    font-family:
+        Inter,
+        ui-sans-serif,
+        system-ui,
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif;
+
+    padding: 28px;
+}
+
+.brand-header {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    margin: 2px 0 2px;
+}
+
+.brand-mark {
+    display: grid;
+    place-items: center;
+
+    width: 52px;
+    height: 52px;
+
+    border-radius: 15px;
+
+    background:
+        linear-gradient(
+            145deg,
+            var(--ll-blue),
+            #60a5fa
+        );
+
+    box-shadow:
+        0 10px 22px rgba(37, 99, 235, .25);
+}
+
+.brand-mark svg {
+    width: 34px;
+    height: 34px;
+
+    fill: none;
+    stroke: white;
+    stroke-width: 3;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.brand-header h1 {
+    margin: 0;
+
+    color: #101828;
+
+    font-size: 30px;
+    line-height: 1.05;
+    letter-spacing: -.6px;
+}
+
+.brand-tagline {
+    margin-top: 4px;
+
+    color: var(--ll-muted);
+
+    font-size: 13px;
+}
+
+.sub {
+    margin:
+        8px
+        0
+        22px
+        67px;
+
+    color: var(--ll-muted);
+}
+
+.cards {
+    display: grid;
+
+    grid-template-columns:
+        repeat(
+            auto-fit,
+            minmax(180px, 1fr)
+        );
+
+    gap: 14px;
+
+    margin:
+        18px
+        0
+        22px;
+}
+
+.card {
+    padding: 17px 18px;
+
+    border:
+        1px solid
+        var(--ll-border);
+
+    border-radius:
+        var(--ll-radius);
+
+    background:
+        rgba(255, 255, 255, .93);
+
+    box-shadow:
+        var(--ll-shadow);
+}
+
+.card .big {
+    color: var(--ll-blue-dark);
+
+    font-size: 28px;
+    font-weight: 760;
+    letter-spacing: -.4px;
+}
+
+table {
+    width: 100%;
+
+    border:
+        1px solid
+        var(--ll-border);
+
+    border-radius:
+        var(--ll-radius);
+
+    border-spacing: 0;
+
+    background:
+        var(--ll-surface);
+
+    box-shadow:
+        var(--ll-shadow);
+
+    overflow: hidden;
+}
+
+thead th {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+
+    padding: 13px 12px;
+
+    border-bottom:
+        1px solid
+        var(--ll-border);
+
+    background:
+        #f8fafc;
+
+    color:
+        #475467;
+
+    font-size: 11px;
+    font-weight: 720;
+
+    letter-spacing:
+        .045em;
+
+    text-transform:
+        uppercase;
+}
+
+tbody td {
+    padding: 13px 12px;
+
+    border-bottom:
+        1px solid
+        #edf1f5;
+
+    vertical-align:
+        middle;
+}
+
+tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+tbody tr:nth-child(even) {
+    background:
+        #fcfdff;
+}
+
+tbody tr {
+    transition:
+        background .12s ease;
+}
+
+tbody tr:hover {
+    background:
+        #f3f7ff;
+}
+
+a {
+    color:
+        var(--ll-blue-dark);
+
+    text-decoration:
+        none;
+}
+
+a:hover {
+    color:
+        var(--ll-blue);
+
+    text-decoration:
+        underline;
+}
+
+td:nth-child(2) > a {
+    color:
+        #172033;
+
+    font-weight:
+        650;
+
+    line-height:
+        1.3;
+}
+
+.small {
+    color:
+        var(--ll-muted);
+
+    font-size:
+        12px;
+}
+
+.money {
+    font-variant-numeric:
+        tabular-nums;
+
+    white-space:
+        nowrap;
+}
+
+.good {
+    color:
+        var(--ll-green);
+}
+
+.good .valuation-hover {
+    padding:
+        5px
+        8px;
+
+    border-radius:
+        8px;
+
+    background:
+        var(--ll-green-soft);
+}
+
+.big {
+    font-variant-numeric:
+        tabular-nums;
+}
+
+td[data-sort] > .big {
+    display:
+        inline-flex;
+
+    align-items:
+        center;
+
+    justify-content:
+        center;
+
+    min-width:
+        42px;
+
+    padding:
+        5px
+        9px;
+
+    border-radius:
+        9px;
+
+    background:
+        var(--ll-blue-soft);
+
+    color:
+        var(--ll-blue-dark);
+
+    font-weight:
+        760;
+}
+
+.product-thumb-cell {
+    width: 90px;
+    min-width: 90px;
+
+    padding-right:
+        6px;
+}
+
+.image-header {
+    width: 90px;
+    min-width: 90px;
+}
+
+.product-thumb-link {
+    display:
+        block;
+
+    width: 74px;
+    height: 74px;
+
+    border-radius:
+        11px;
+
+    overflow:
+        hidden;
+
+    background:
+        white;
+
+    border:
+        1px solid
+        var(--ll-border);
+
+    box-shadow:
+        0 2px 7px
+        rgba(16, 24, 40, .08);
+}
+
+.product-thumb {
+    display:
+        block;
+
+    width:
+        100%;
+
+    height:
+        100%;
+
+    object-fit:
+        contain;
+
+    background:
+        white;
+
+    transition:
+        transform .16s ease;
+}
+
+.product-thumb-link:hover
+.product-thumb {
+    transform:
+        scale(1.045);
+}
+
+.product-thumb-placeholder {
+    display:
+        grid;
+
+    place-items:
+        center;
+
+    width:
+        74px;
+
+    height:
+        74px;
+
+    border:
+        1px dashed
+        #cbd5e1;
+
+    border-radius:
+        11px;
+
+    background:
+        #f8fafc;
+
+    color:
+        #94a3b8;
+
+    font-size:
+        24px;
+}
+
+.confidence-meta {
+    color:
+        var(--ll-muted);
+}
+
+.valuation-tooltip {
+    border:
+        1px solid
+        var(--ll-border);
+
+    border-radius:
+        12px;
+
+    box-shadow:
+        0 18px 48px
+        rgba(16, 24, 40, .18);
+}
+
+.system-health-alert {
+    border-color:
+        #f04438;
+
+    background:
+        var(--ll-red-soft);
+
+    color:
+        var(--ll-red);
+}
+
+.sortable-header:hover {
+    background:
+        #eef4ff;
+}
+
+.sorted-asc,
+.sorted-desc {
+    color:
+        var(--ll-blue-dark);
+
+    background:
+        #eaf2ff;
+}
+
+@media (max-width: 900px) {
+
+    body {
+        padding:
+            14px;
+    }
+
+    .brand-header h1 {
+        font-size:
+            25px;
+    }
+
+    .sub {
+        margin-left:
+            0;
+    }
+
+    table {
+        font-size:
+            12px;
+    }
+
+    tbody td,
+    thead th {
+        padding:
+            9px 7px;
+    }
+
+    .product-thumb-cell,
+    .image-header {
+        width:
+            68px;
+
+        min-width:
+            68px;
+    }
+
+    .product-thumb-link,
+    .product-thumb-placeholder {
+        width:
+            58px;
+
+        height:
+            58px;
+    }
 }
 </style>
 
