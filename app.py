@@ -7201,7 +7201,7 @@ def run_cycle(
         conn
     )
 
-total_api = browse_usage_today(
+    total_api = browse_usage_today(
         conn
     )
 
