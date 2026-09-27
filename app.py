@@ -50,7 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.13"
+APP_VERSION = "0.9.14"
 CLASSIFIER_VERSION = "0.8.2"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -6377,6 +6377,82 @@ def diagnostics_html():
 
         return "".join(output)
 
+    def queue_card(
+        title,
+        remaining,
+        progress_pct,
+        eta,
+        detail="",
+        state="Working"
+    ):
+        progress_pct = max(
+            0.0,
+            min(
+                100.0,
+                float(progress_pct)
+            )
+        )
+
+        state_class = {
+            "WORKING": "good",
+            "COMPLETE": "good",
+            "PAUSED": "warn",
+            "BLOCKED": "bad",
+            "WAITING": "warn",
+        }.get(
+            str(state).upper(),
+            ""
+        )
+
+        detail_html = (
+            '<div class="queue-detail">'
+            + html.escape(str(detail))
+            + '</div>'
+            if detail
+            else ''
+        )
+
+        return f"""
+        <div class="queue-card">
+
+            <div class="queue-head">
+
+                <div>
+                    <div class="queue-title">
+                        {html.escape(str(title))}
+                    </div>
+
+                    <div class="queue-state {state_class}">
+                        {html.escape(str(state))}
+                    </div>
+                </div>
+
+                <div class="queue-count">
+                    {int(remaining):,} remaining
+                </div>
+
+            </div>
+
+            <div class="queue-progress">
+                <div style="width:{progress_pct:.1f}%"></div>
+            </div>
+
+            <div class="queue-meta">
+                <span>
+                    {progress_pct:.1f}% complete
+                </span>
+
+                <span>
+                    ETA: {html.escape(str(eta))}
+                </span>
+            </div>
+
+            {detail_html}
+
+        </div>
+        """
+
+
     total_all = safe_scalar(
         "SELECT COUNT(*) FROM listings"
     )
@@ -6585,6 +6661,227 @@ def diagnostics_html():
         cooldown = ebay_rate_limit_remaining()
     except Exception:
         cooldown = 0
+
+    # --------------------------------------------------------
+    # ACTIVE QUEUES / PROGRESS
+    # --------------------------------------------------------
+
+    current_classifier_count = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND classifier_version=?
+        """,
+        (
+            CLASSIFIER_VERSION,
+        )
+    )
+
+    classifier_queue_remaining = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND (
+                classifier_version IS NULL
+                OR classifier_version<>?
+              )
+        """,
+        (
+            CLASSIFIER_VERSION,
+        )
+    )
+
+    classifier_queue_total = (
+        current_classifier_count
+        + classifier_queue_remaining
+    )
+
+    classifier_progress_pct = (
+        (
+            current_classifier_count
+            / classifier_queue_total
+        ) * 100.0
+        if classifier_queue_total
+        else 100.0
+    )
+
+    classifier_capacity_per_hour = (
+        MAX_BACKFILL_DETAILS_PER_CYCLE
+        * 3600.0
+        / POLL_NORMAL
+        if POLL_NORMAL
+        else 0.0
+    )
+
+    if classifier_queue_remaining <= 0:
+        classifier_queue_state = "Complete"
+        classifier_eta = "Complete"
+
+    elif cooldown > 0:
+        classifier_queue_state = "Paused"
+
+        minutes, seconds = divmod(
+            int(cooldown),
+            60
+        )
+
+        classifier_eta = (
+            f"429 cooldown: "
+            f"{minutes}m {seconds:02d}s"
+        )
+
+    elif normal_budget_remaining <= 0:
+        classifier_queue_state = "Paused"
+        classifier_eta = (
+            "Normal API budget exhausted"
+        )
+
+    elif classifier_capacity_per_hour > 0:
+        classifier_queue_state = "Working"
+
+        eta_hours = (
+            classifier_queue_remaining
+            / classifier_capacity_per_hour
+        )
+
+        if eta_hours < 1:
+            classifier_eta = (
+                f"~{max(1, int(round(eta_hours * 60)))} min"
+            )
+
+        elif eta_hours < 24:
+            classifier_eta = (
+                f"~{eta_hours:.1f} hours"
+            )
+
+        else:
+            classifier_eta = (
+                f"~{eta_hours / 24:.1f} days"
+            )
+
+    else:
+        classifier_queue_state = "Waiting"
+        classifier_eta = "Unknown"
+
+
+    image_queue_remaining = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND estimated_value IS NOT NULL
+          AND deal_score > 0
+          AND undervaluation_gbp >= ?
+          AND (
+                image_url IS NULL
+                OR trim(image_url)=''
+              )
+        """,
+        (
+            MIN_UNDERVALUE_GBP,
+        )
+    )
+
+    image_allowance_remaining = max(
+        0,
+        IMAGE_BACKFILL_DAILY_ALLOWANCE
+        - image_backfill_used
+    )
+
+    image_queue_session_total = (
+        image_backfill_used
+        + image_queue_remaining
+    )
+
+    image_progress_pct = (
+        (
+            image_backfill_used
+            / image_queue_session_total
+        ) * 100.0
+        if image_queue_session_total
+        else 100.0
+    )
+
+    if image_queue_remaining <= 0:
+        image_queue_state = "Complete"
+        image_eta = "Complete"
+
+    elif cooldown > 0:
+        image_queue_state = "Paused"
+        image_eta = "429 cooldown active"
+
+    elif image_allowance_remaining <= 0:
+        image_queue_state = "Paused"
+        image_eta = "Daily allowance exhausted"
+
+    else:
+        image_queue_state = "Working"
+
+        processable_today = min(
+            image_queue_remaining,
+            image_allowance_remaining
+        )
+
+        cycles_needed = max(
+            1,
+            math.ceil(
+                processable_today
+                / max(
+                    1,
+                    IMAGE_BACKFILL_PER_CYCLE
+                )
+            )
+        )
+
+        eta_seconds = (
+            cycles_needed
+            * POLL_NORMAL
+        )
+
+        if image_queue_remaining > image_allowance_remaining:
+            image_eta = (
+                f"~{max(1, eta_seconds // 60)} min "
+                f"for today's allowance; "
+                f"{image_queue_remaining - image_allowance_remaining:,} "
+                f"will remain"
+            )
+
+        elif eta_seconds < 3600:
+            image_eta = (
+                f"~{max(1, eta_seconds // 60)} min"
+            )
+
+        else:
+            image_eta = (
+                f"~{eta_seconds / 3600:.1f} hours"
+            )
+
+
+    usb_pd_queue_pending = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM capability_queue
+        WHERE status='PENDING'
+          AND capability='USB_C_PD'
+        """
+    )
+
+    win11_queue_pending = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM capability_queue
+        WHERE status='PENDING'
+          AND capability='WIN11_APPROVED'
+        """
+    )
+
+    capability_pending_total = (
+        usb_pd_queue_pending
+        + win11_queue_pending
+    )
+
 
     try:
         session = _read_json_file(
@@ -7101,7 +7398,81 @@ def diagnostics_html():
                 grid-template-columns: 1fr;
             }}
         }}
-    </style>
+    
+        .queue-section {{
+            margin-bottom: 18px;
+        }}
+
+        .queue-stack {{
+            display: grid;
+            gap: 12px;
+            padding: 16px;
+        }}
+
+        .queue-card {{
+            background: #fff;
+            border: 1px solid #e4e7ec;
+            border-radius: 11px;
+            padding: 15px;
+        }}
+
+        .queue-head {{
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 16px;
+        }}
+
+        .queue-title {{
+            font-size: 16px;
+            font-weight: 700;
+        }}
+
+        .queue-state {{
+            margin-top: 3px;
+            color: #667085;
+            font-size: 13px;
+            font-weight: 600;
+        }}
+
+        .queue-count {{
+            font-weight: 700;
+            white-space: nowrap;
+            font-variant-numeric: tabular-nums;
+        }}
+
+        .queue-progress {{
+            height: 14px;
+            margin-top: 12px;
+            overflow: hidden;
+            background: #eaecf0;
+            border-radius: 999px;
+        }}
+
+        .queue-progress > div {{
+            height: 100%;
+            background: #2563eb;
+            border-radius: 999px;
+            transition: width .25s ease;
+        }}
+
+        .queue-meta {{
+            display: flex;
+            justify-content: space-between;
+            gap: 16px;
+            margin-top: 7px;
+            color: #667085;
+            font-size: 13px;
+        }}
+
+        .queue-detail {{
+            margin-top: 8px;
+            color: #98a2b3;
+            font-size: 12px;
+            line-height: 1.4;
+        }}
+
+</style>
 </head>
 
 <body>
@@ -7135,6 +7506,79 @@ def diagnostics_html():
         {stat_card("Auctions", auctions)}
         {stat_card("Fixed price", fixed_price)}
     </div>
+
+    <section class="panel queue-section">
+
+        <h2>Active work queues</h2>
+
+        <div class="queue-stack">
+
+            {queue_card(
+                "Classifier reanalysis / detail refresh",
+                classifier_queue_remaining,
+                classifier_progress_pct,
+                classifier_eta,
+                (
+                    f"{current_classifier_count:,} active listings "
+                    f"already use classifier "
+                    f"{CLASSIFIER_VERSION}. "
+                    f"Maximum "
+                    f"{MAX_BACKFILL_DETAILS_PER_CYCLE} "
+                    f"detail refreshes per cycle; "
+                    f"normal cycle {POLL_NORMAL}s. "
+                    f"ETA is based on maximum configured capacity."
+                ),
+                classifier_queue_state
+            )}
+
+            {queue_card(
+                "Dashboard image backfill",
+                image_queue_remaining,
+                image_progress_pct,
+                image_eta,
+                (
+                    f"{image_backfill_used:,}/"
+                    f"{IMAGE_BACKFILL_DAILY_ALLOWANCE:,} "
+                    f"thumbnail calls used today; "
+                    f"{image_allowance_remaining:,} "
+                    f"remaining in today's allowance."
+                ),
+                image_queue_state
+            )}
+
+            {queue_card(
+                "Capability lookups",
+                capability_pending_total,
+                (
+                    100.0
+                    if capability_pending_total == 0
+                    else 0.0
+                ),
+                (
+                    "Complete"
+                    if capability_pending_total == 0
+                    else
+                    "No reliable ETA yet"
+                ),
+                (
+                    f"USB-C PD pending: "
+                    f"{usb_pd_queue_pending:,}; "
+                    f"Windows 11 pending: "
+                    f"{win11_queue_pending:,}. "
+                    f"No percentage is inferred until "
+                    f"historical drain rate is available."
+                ),
+                (
+                    "Complete"
+                    if capability_pending_total == 0
+                    else
+                    "Working"
+                )
+            )}
+
+        </div>
+
+    </section>
 
     <div class="grid">
 
