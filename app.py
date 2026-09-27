@@ -50,8 +50,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # VERSION / CONFIG
 # ============================================================
 
-VERSION = "0.8.1"
+APP_VERSION = "0.9.0"
+CLASSIFIER_VERSION = "0.8.1"
 
+# Backward-compatible internal alias.
+# Existing classifier_version DB logic continues to use VERSION.
+VERSION = CLASSIFIER_VERSION
 # eBay short-term rate-limit protection.
 EBAY_429_COOLDOWN_SECONDS = 600
 
@@ -5877,8 +5881,10 @@ th.sorted-desc {
 <script>
 document.addEventListener("DOMContentLoaded", () => {
 
+    const SORT_KEY = "ebayLaptopHunterSort";
+
     // --------------------------------------------------------
-    // Hide implementation/debug cards when everything is healthy.
+    // Hide operational/debug cards when healthy.
     // --------------------------------------------------------
 
     const unwantedCardText = [
@@ -5912,6 +5918,7 @@ document.addEventListener("DOMContentLoaded", () => {
     );
 
     const table = tables.find(t => {
+
         const headers = Array.from(
             t.querySelectorAll("th")
         ).map(
@@ -5920,9 +5927,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
         return (
             headers.includes("Listing")
-            && headers.some(
-                x => x.includes("Apparent")
-            )
             && headers.includes("Score")
         );
     });
@@ -5931,368 +5935,87 @@ document.addEventListener("DOMContentLoaded", () => {
         return;
     }
 
-    const headerRow = table.querySelector("thead tr")
+    const headerRow =
+        table.querySelector("thead tr")
         || table.querySelector("tr");
 
     if (!headerRow) {
         return;
     }
 
-    const headerCells = Array.from(
-        headerRow.children
-    );
-
-    let scoreIndex = headerCells.findIndex(
-        th => th.textContent.trim() === "Score"
-    );
-
-    if (scoreIndex < 0) {
-        scoreIndex = Math.min(
-            6,
-            headerCells.length - 1
-        );
-    }
-
-    // --------------------------------------------------------
-    // Add Sold evidence header after Score.
-    // --------------------------------------------------------
-
-    const evidenceHeader = document.createElement("th");
-    evidenceHeader.textContent = "Sold evidence";
-
-    headerRow.insertBefore(
-        evidenceHeader,
-        headerRow.children[scoreIndex + 1] || null
-    );
-
-
-    // --------------------------------------------------------
-    // Convert current expanded evidence rows into compact cells.
-    // --------------------------------------------------------
-
-    const body = table.tBodies.length
+    const body =
+        table.tBodies.length
         ? table.tBodies[0]
         : table;
 
-    const allRows = Array.from(
-        body.querySelectorAll(":scope > tr")
-    );
 
-    const listingRows = [];
+    // --------------------------------------------------------
+    // Helpers
+    // --------------------------------------------------------
 
-    for (let i = 0; i < allRows.length; i++) {
+    function headerIndex(name) {
 
-        const row = allRows[i];
-
-        if (
-            row === headerRow
-            || row.closest("thead")
-        ) {
-            continue;
-        }
-
-        const cells = Array.from(
-            row.children
+        return Array.from(
+            headerRow.children
+        ).findIndex(
+            th => th.textContent.trim() === name
         );
-
-        // Evidence rows currently contain the "Show sold evidence"
-        // details element and typically span the entire table.
-        const isEvidenceRow =
-            cells.length === 1
-            && (
-                row.textContent.includes(
-                    "Show sold evidence"
-                )
-                || row.querySelector("details")
-            );
-
-        if (isEvidenceRow) {
-            continue;
-        }
-
-        if (cells.length >= 5) {
-            listingRows.push(row);
-        }
     }
 
 
-    listingRows.forEach(row => {
+    function findHeaderContaining(text) {
 
-        let next = row.nextElementSibling;
-
-        let evidenceRow = null;
-
-        if (
-            next
-            && (
-                next.textContent.includes(
-                    "Show sold evidence"
-                )
-                || next.querySelector("details")
-            )
-        ) {
-            evidenceRow = next;
-        }
-
-        const cell = document.createElement("td");
-        cell.className = "evidence-cell";
-
-        let soldRows = [];
-        let totalSales = 0;
-        let soldListingCount = 0;
-
-        if (evidenceRow) {
-
-            // Nested sold evidence table.
-            const nested = evidenceRow.querySelector("table");
-
-            if (nested) {
-                const nestedRows = Array.from(
-                    nested.querySelectorAll("tr")
-                ).filter(
-                    tr => tr.querySelectorAll("td").length >= 5
-                );
-
-                soldRows = nestedRows.map(tr => {
-
-                    const td = Array.from(
-                        tr.querySelectorAll("td")
-                    );
-
-                    const title =
-                        td[0]?.textContent.trim() || "";
-
-                    // Delivered sold price is column 1 in the
-                    // current evidence table.
-                    const price =
-                        td[1]?.textContent.trim() || "—";
-
-                    // Units sold is column 4.
-                    const unitsText =
-                        td[4]?.textContent.trim() || "1";
-
-                    const units = parseInt(
-                        unitsText.replace(/[^\d]/g, ""),
-                        10
-                    ) || 1;
-
-                    // Last sold is column 5.
-                    const soldDate =
-                        td[5]?.textContent.trim() || "—";
-
-                    totalSales += units;
-
-                    return {
-                        title,
-                        price,
-                        units,
-                        soldDate
-                    };
-                });
-
-                soldListingCount = soldRows.length;
-            }
-
-            evidenceRow.remove();
-        }
-
-
-        // ----------------------------------------------------
-        // Pull Q1 / median / Q3 from the visible value cell.
-        // ----------------------------------------------------
-
-        const currentCells = Array.from(
-            row.children
-        );
-
-        let valueCell = null;
-
-        const headerNow = Array.from(
+        return Array.from(
             headerRow.children
+        ).findIndex(
+            th => th.textContent.trim().includes(text)
         );
+    }
 
-        const valueIndex = headerNow.findIndex(
-            th =>
-                th.textContent.includes("Value")
-                || th.textContent.includes(
-                    "asking reference"
-                )
-        );
+
+    function statusSymbol(text) {
+
+        const t = String(text || "")
+            .trim()
+            .toUpperCase();
 
         if (
-            valueIndex >= 0
-            && currentCells[valueIndex]
+            t.includes("YES")
+            || t.includes("SUPPORTED")
+            || t.includes("APPROVED")
+            || t.includes("PASS")
+            || t.includes("TRUE")
+            || t.includes("✓")
         ) {
-            valueCell = currentCells[valueIndex];
+            return "✓";
         }
-
-        const valueText =
-            valueCell?.textContent || "";
-
-        const moneyValues = Array.from(
-            valueText.matchAll(
-                /£\s*([\d,]+(?:\.\d+)?)/g
-            )
-        ).map(
-            m => m[1]
-        );
-
-        const median = moneyValues[0]
-            ? "£" + moneyValues[0]
-            : "—";
-
-        let q1 = "—";
-        let q3 = "—";
-
-        if (moneyValues.length >= 3) {
-            q1 = "£" + moneyValues[1];
-            q3 = "£" + moneyValues[2];
-        }
-
-
-        // Confidence value.
-        const confidenceIndex = headerNow.findIndex(
-            th => th.textContent.trim() === "Confidence"
-        );
-
-        const confidence =
-            confidenceIndex >= 0
-            && currentCells[confidenceIndex]
-                ? currentCells[
-                    confidenceIndex
-                ].textContent.trim().split(/\s+/)[0]
-                : "—";
-
-
-        if (soldListingCount > 0) {
-
-            const badge = document.createElement("span");
-            badge.className = "evidence-badge";
-
-            // Main number = actual sales/units represented.
-            badge.appendChild(
-                document.createTextNode(
-                    String(totalSales)
-                )
-            );
-
-            const tooltip = document.createElement("div");
-            tooltip.className = "evidence-tooltip";
-
-            const summary = document.createElement("div");
-            summary.className = "summary";
-
-            summary.textContent =
-                soldListingCount
-                + (
-                    soldListingCount === 1
-                    ? " sold listing / "
-                    : " sold listings / "
-                )
-                + totalSales
-                + (
-                    totalSales === 1
-                    ? " sale"
-                    : " sales"
-                )
-                + " | Q1 "
-                + q1
-                + " | Median "
-                + median
-                + " | Q3 "
-                + q3
-                + " | Confidence "
-                + confidence;
-
-            tooltip.appendChild(summary);
-
-            soldRows.forEach(sale => {
-
-                const line = document.createElement("div");
-                line.className = "sale";
-
-                const first = document.createElement("div");
-
-                first.textContent =
-                    sale.price
-                    + " — "
-                    + sale.soldDate
-                    + (
-                        sale.units > 1
-                        ? " — " + sale.units + " sales"
-                        : ""
-                    );
-
-                const title = document.createElement("div");
-                title.className = "sale-title";
-                title.textContent = sale.title;
-
-                line.appendChild(first);
-                line.appendChild(title);
-
-                tooltip.appendChild(line);
-            });
-
-            badge.appendChild(tooltip);
-            cell.appendChild(badge);
-
-            cell.dataset.sort = String(totalSales);
-
-        } else {
-
-            cell.textContent = "—";
-            cell.dataset.sort = "0";
-        }
-
-        row.insertBefore(
-            cell,
-            row.children[scoreIndex + 1] || null
-        );
-    });
-
-
-    // Remove any orphaned evidence rows.
-    Array.from(
-        body.querySelectorAll(":scope > tr")
-    ).forEach(row => {
 
         if (
-            row.textContent.includes(
-                "Show sold evidence"
-            )
-            && row.children.length === 1
+            t.includes("NO")
+            || t.includes("UNSUPPORTED")
+            || t.includes("NOT APPROVED")
+            || t.includes("FAIL")
+            || t.includes("FALSE")
+            || t.includes("✗")
         ) {
-            row.remove();
+            return "✗";
         }
-    });
 
+        return "?";
+    }
 
-    // --------------------------------------------------------
-    // Sorting
-    // --------------------------------------------------------
-
-    const headers = Array.from(
-        headerRow.children
-    );
-
-    const numericNames = new Set([
-        "Delivered",
-        "Value / asking reference",
-        "Apparent undervalue",
-        "Score",
-        "Sold evidence"
-    ]);
 
     function numericValue(text) {
 
-        const cleaned = String(text)
+        const match = String(text)
             .replace(/,/g, "")
             .match(/-?\d+(?:\.\d+)?/);
 
-        return cleaned
-            ? parseFloat(cleaned[0])
+        return match
+            ? parseFloat(match[0])
             : Number.NEGATIVE_INFINITY;
     }
+
 
     function ageSeconds(text) {
 
@@ -6311,6 +6034,7 @@ document.addEventListener("DOMContentLoaded", () => {
         return seconds;
     }
 
+
     function confidenceRank(text) {
 
         const t = String(text).toUpperCase();
@@ -6322,19 +6046,543 @@ document.addEventListener("DOMContentLoaded", () => {
         return 0;
     }
 
-    function sortValue(row, index, name) {
 
-        const td = row.children[index];
+    // --------------------------------------------------------
+    // Convert old evidence detail rows into Sold evidence cell
+    // first, if previous enhancement has not already done so.
+    // --------------------------------------------------------
+
+    if (headerIndex("Sold evidence") < 0) {
+
+        let scoreIndex = headerIndex("Score");
+
+        if (scoreIndex < 0) {
+            scoreIndex = Math.min(
+                6,
+                headerRow.children.length - 1
+            );
+        }
+
+        const evidenceHeader =
+            document.createElement("th");
+
+        evidenceHeader.textContent =
+            "Sold evidence";
+
+        headerRow.insertBefore(
+            evidenceHeader,
+            headerRow.children[scoreIndex + 1] || null
+        );
+
+
+        const rows = Array.from(
+            body.querySelectorAll(":scope > tr")
+        );
+
+        const listingRows = rows.filter(row => {
+
+            if (
+                row === headerRow
+                || row.closest("thead")
+            ) {
+                return false;
+            }
+
+            if (
+                row.children.length === 1
+                && (
+                    row.textContent.includes(
+                        "Show sold evidence"
+                    )
+                    || row.querySelector("details")
+                )
+            ) {
+                return false;
+            }
+
+            return row.children.length >= 5;
+        });
+
+
+        listingRows.forEach(row => {
+
+            const next = row.nextElementSibling;
+
+            let evidenceRow = null;
+
+            if (
+                next
+                && (
+                    next.textContent.includes(
+                        "Show sold evidence"
+                    )
+                    || next.querySelector("details")
+                )
+            ) {
+                evidenceRow = next;
+            }
+
+            const cell =
+                document.createElement("td");
+
+            cell.className =
+                "evidence-cell";
+
+            let totalSales = 0;
+            let soldListingCount = 0;
+            const soldRows = [];
+
+            if (evidenceRow) {
+
+                const nested =
+                    evidenceRow.querySelector("table");
+
+                if (nested) {
+
+                    const nestedRows = Array.from(
+                        nested.querySelectorAll("tr")
+                    ).filter(
+                        tr =>
+                            tr.querySelectorAll("td").length >= 5
+                    );
+
+                    nestedRows.forEach(tr => {
+
+                        const td = Array.from(
+                            tr.querySelectorAll("td")
+                        );
+
+                        const units =
+                            parseInt(
+                                (
+                                    td[4]?.textContent
+                                    || "1"
+                                ).replace(/[^\d]/g, ""),
+                                10
+                            ) || 1;
+
+                        totalSales += units;
+                        soldListingCount += 1;
+
+                        soldRows.push({
+                            title:
+                                td[0]?.textContent.trim()
+                                || "",
+                            price:
+                                td[1]?.textContent.trim()
+                                || "—",
+                            units,
+                            soldDate:
+                                td[5]?.textContent.trim()
+                                || "—"
+                        });
+                    });
+                }
+
+                evidenceRow.remove();
+            }
+
+            if (soldListingCount > 0) {
+
+                const badge =
+                    document.createElement("span");
+
+                badge.className =
+                    "evidence-badge";
+
+                badge.appendChild(
+                    document.createTextNode(
+                        String(totalSales)
+                    )
+                );
+
+                const tooltip =
+                    document.createElement("div");
+
+                tooltip.className =
+                    "evidence-tooltip";
+
+                const summary =
+                    document.createElement("div");
+
+                summary.className =
+                    "summary";
+
+                summary.textContent =
+                    soldListingCount
+                    + (
+                        soldListingCount === 1
+                        ? " sold listing / "
+                        : " sold listings / "
+                    )
+                    + totalSales
+                    + (
+                        totalSales === 1
+                        ? " sale"
+                        : " sales"
+                    );
+
+                tooltip.appendChild(summary);
+
+                soldRows.forEach(sale => {
+
+                    const line =
+                        document.createElement("div");
+
+                    line.className = "sale";
+
+                    const first =
+                        document.createElement("div");
+
+                    first.textContent =
+                        sale.price
+                        + " — "
+                        + sale.soldDate
+                        + (
+                            sale.units > 1
+                            ? " — "
+                              + sale.units
+                              + " sales"
+                            : ""
+                        );
+
+                    const title =
+                        document.createElement("div");
+
+                    title.className =
+                        "sale-title";
+
+                    title.textContent =
+                        sale.title;
+
+                    line.appendChild(first);
+                    line.appendChild(title);
+
+                    tooltip.appendChild(line);
+                });
+
+                badge.appendChild(tooltip);
+                cell.appendChild(badge);
+
+                cell.dataset.sort =
+                    String(totalSales);
+
+            } else {
+
+                cell.textContent = "—";
+                cell.dataset.sort = "0";
+            }
+
+            row.insertBefore(
+                cell,
+                row.children[scoreIndex + 1] || null
+            );
+        });
+
+
+        Array.from(
+            body.querySelectorAll(":scope > tr")
+        ).forEach(row => {
+
+            if (
+                row.children.length === 1
+                && row.textContent.includes(
+                    "Show sold evidence"
+                )
+            ) {
+                row.remove();
+            }
+        });
+    }
+
+
+    // --------------------------------------------------------
+    // Merge Sold evidence + Condition + Eligibility into
+    // Confidence.
+    // --------------------------------------------------------
+
+    let confidenceIndex =
+        headerIndex("Confidence");
+
+    const evidenceIndex =
+        headerIndex("Sold evidence");
+
+    const conditionIndex =
+        headerIndex("Condition");
+
+    const eligibilityIndex =
+        headerIndex("Eligibility");
+
+
+    if (confidenceIndex >= 0) {
+
+        const rows = Array.from(
+            body.querySelectorAll(":scope > tr")
+        ).filter(
+            row =>
+                row !== headerRow
+                && !row.closest("thead")
+                && row.children.length
+                   === headerRow.children.length
+        );
+
+
+        rows.forEach(row => {
+
+            const cells =
+                Array.from(row.children);
+
+            const confidenceCell =
+                cells[confidenceIndex];
+
+            if (!confidenceCell) {
+                return;
+            }
+
+            const baseConfidence =
+                confidenceCell.textContent
+                    .trim()
+                    .split(/\s+/)[0]
+                || "—";
+
+
+            // Preserve evidence node/tooltip.
+            let evidenceNode = null;
+            let salesCount = 0;
+
+            if (
+                evidenceIndex >= 0
+                && cells[evidenceIndex]
+            ) {
+
+                const evidenceCell =
+                    cells[evidenceIndex];
+
+                salesCount =
+                    Number(
+                        evidenceCell.dataset.sort
+                        || numericValue(
+                            evidenceCell.textContent
+                        )
+                        || 0
+                    );
+
+                const badge =
+                    evidenceCell.querySelector(
+                        ".evidence-badge"
+                    );
+
+                if (badge) {
+                    evidenceNode =
+                        badge.cloneNode(true);
+                }
+            }
+
+
+            const conditionText =
+                conditionIndex >= 0
+                && cells[conditionIndex]
+                    ? cells[
+                        conditionIndex
+                    ].textContent.trim()
+                    : "";
+
+
+            const eligibilityText =
+                eligibilityIndex >= 0
+                && cells[eligibilityIndex]
+                    ? cells[
+                        eligibilityIndex
+                    ].textContent.trim()
+                    : "";
+
+
+            // The current Eligibility cell contains the
+            // Windows 11 / USB-C capability status text.
+            const win11 =
+                statusSymbol(
+                    eligibilityText.match(
+                        /win(?:dows)?\s*11[^|,;]*/i
+                    )?.[0]
+                    || eligibilityText
+                );
+
+            const usbc =
+                statusSymbol(
+                    eligibilityText.match(
+                        /usb[- ]?c[^|,;]*/i
+                    )?.[0]
+                    || eligibilityText
+                );
+
+
+            confidenceCell.innerHTML = "";
+
+            const main =
+                document.createElement("div");
+
+            main.style.fontWeight = "bold";
+            main.textContent =
+                baseConfidence;
+
+            confidenceCell.appendChild(main);
+
+
+            const meta =
+                document.createElement("div");
+
+            meta.className = "small";
+            meta.style.whiteSpace = "nowrap";
+
+            meta.appendChild(
+                document.createTextNode(
+                    "Win 11: "
+                    + win11
+                    + "  USB-C PD: "
+                    + usbc
+                    + "  Sales: "
+                )
+            );
+
+            if (evidenceNode) {
+
+                // Make the evidence badge compact inside
+                // Confidence.
+                evidenceNode.style.padding =
+                    "0 4px";
+
+                evidenceNode.style.minWidth =
+                    "auto";
+
+                meta.appendChild(
+                    evidenceNode
+                );
+
+            } else {
+
+                meta.appendChild(
+                    document.createTextNode(
+                        String(salesCount)
+                    )
+                );
+            }
+
+
+            if (
+                conditionText
+                && conditionText !== "—"
+            ) {
+
+                const cond =
+                    document.createElement("div");
+
+                cond.className = "small";
+                cond.textContent =
+                    "Condition: "
+                    + conditionText;
+
+                confidenceCell.appendChild(
+                    meta
+                );
+
+                confidenceCell.appendChild(
+                    cond
+                );
+
+            } else {
+
+                confidenceCell.appendChild(
+                    meta
+                );
+            }
+
+            confidenceCell.dataset.sort =
+                String(
+                    confidenceRank(
+                        baseConfidence
+                    )
+                );
+        });
+
+
+        // Remove old columns right-to-left so indexes don't move.
+        const indexesToRemove = [
+            evidenceIndex,
+            conditionIndex,
+            eligibilityIndex
+        ]
+        .filter(
+            i => i >= 0
+        )
+        .sort(
+            (a, b) => b - a
+        );
+
+
+        indexesToRemove.forEach(index => {
+
+            if (
+                headerRow.children[index]
+            ) {
+                headerRow.children[index].remove();
+            }
+
+            Array.from(
+                body.querySelectorAll(":scope > tr")
+            ).forEach(row => {
+
+                if (
+                    row !== headerRow
+                    && !row.closest("thead")
+                    && row.children[index]
+                ) {
+                    row.children[index].remove();
+                }
+            });
+        });
+    }
+
+
+    // --------------------------------------------------------
+    // Sorting
+    // --------------------------------------------------------
+
+    const headers =
+        Array.from(
+            headerRow.children
+        );
+
+    const numericNames = new Set([
+        "Delivered",
+        "Value / asking reference",
+        "Apparent undervalue",
+        "Score"
+    ]);
+
+
+    function sortValue(
+        row,
+        index,
+        name
+    ) {
+
+        const td =
+            row.children[index];
 
         if (!td) {
             return "";
         }
 
-        if (td.dataset.sort !== undefined) {
-            return Number(td.dataset.sort);
+        if (
+            td.dataset.sort !== undefined
+        ) {
+            return Number(
+                td.dataset.sort
+            );
         }
 
-        const text = td.textContent.trim();
+        const text =
+            td.textContent.trim();
 
         if (name === "Listing age") {
             return ageSeconds(text);
@@ -6352,69 +6600,87 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
 
-    headers.forEach((th, index) => {
+    function applySort(
+        index,
+        direction,
+        save=true
+    ) {
 
-        const name = th.textContent.trim();
+        const headersNow =
+            Array.from(
+                headerRow.children
+            );
 
-        th.classList.add(
-            "sortable-header"
-        );
+        const th =
+            headersNow[index];
 
-        const indicator = document.createElement("span");
-        indicator.className = "sort-indicator";
+        if (!th) {
+            return;
+        }
 
-        th.appendChild(indicator);
+        const name =
+            th.dataset.sortName
+            || th.childNodes[0]?.textContent?.trim()
+            || th.textContent.trim();
 
-        let ascending = true;
+        headersNow.forEach(other => {
 
-        th.addEventListener("click", () => {
+            other.classList.remove(
+                "sorted-asc",
+                "sorted-desc"
+            );
 
-            headers.forEach(other => {
-                other.classList.remove(
-                    "sorted-asc",
-                    "sorted-desc"
-                );
-
-                const marker = other.querySelector(
+            const marker =
+                other.querySelector(
                     ".sort-indicator"
                 );
 
-                if (marker) {
-                    marker.textContent = "";
-                }
-            });
+            if (marker) {
+                marker.textContent = "";
+            }
+        });
 
 
-            const rows = Array.from(
-                body.querySelectorAll(":scope > tr")
+        const rows =
+            Array.from(
+                body.querySelectorAll(
+                    ":scope > tr"
+                )
             ).filter(
-                r => r.children.length === headers.length
+                row =>
+                    row.children.length
+                    === headersNow.length
             );
 
 
-            rows.sort((a, b) => {
+        rows.sort((a, b) => {
 
-                const av = sortValue(
+            const av =
+                sortValue(
                     a,
                     index,
                     name
                 );
 
-                const bv = sortValue(
+            const bv =
+                sortValue(
                     b,
                     index,
                     name
                 );
 
-                let result;
+            let result;
 
-                if (
-                    typeof av === "number"
-                    && typeof bv === "number"
-                ) {
-                    result = av - bv;
-                } else {
-                    result = String(av).localeCompare(
+            if (
+                typeof av === "number"
+                && typeof bv === "number"
+            ) {
+                result = av - bv;
+
+            } else {
+
+                result =
+                    String(av).localeCompare(
                         String(bv),
                         undefined,
                         {
@@ -6422,30 +6688,154 @@ document.addEventListener("DOMContentLoaded", () => {
                             sensitivity: "base"
                         }
                     );
+            }
+
+            return direction === "asc"
+                ? result
+                : -result;
+        });
+
+
+        rows.forEach(
+            row => body.appendChild(row)
+        );
+
+
+        th.classList.add(
+            direction === "asc"
+            ? "sorted-asc"
+            : "sorted-desc"
+        );
+
+        const marker =
+            th.querySelector(
+                ".sort-indicator"
+            );
+
+        if (marker) {
+            marker.textContent =
+                direction === "asc"
+                ? "▲"
+                : "▼";
+        }
+
+
+        if (save) {
+
+            localStorage.setItem(
+                SORT_KEY,
+                JSON.stringify({
+                    name,
+                    direction
+                })
+            );
+        }
+    }
+
+
+    headers.forEach((th, index) => {
+
+        const name =
+            th.textContent.trim();
+
+        th.dataset.sortName =
+            name;
+
+        th.classList.add(
+            "sortable-header"
+        );
+
+        let indicator =
+            th.querySelector(
+                ".sort-indicator"
+            );
+
+        if (!indicator) {
+
+            indicator =
+                document.createElement(
+                    "span"
+                );
+
+            indicator.className =
+                "sort-indicator";
+
+            th.appendChild(
+                indicator
+            );
+        }
+
+
+        th.addEventListener(
+            "click",
+            () => {
+
+                let direction = "asc";
+
+                if (
+                    th.classList.contains(
+                        "sorted-asc"
+                    )
+                ) {
+                    direction = "desc";
                 }
 
-                return ascending
-                    ? result
-                    : -result;
-            });
-
-
-            rows.forEach(
-                r => body.appendChild(r)
-            );
-
-            th.classList.add(
-                ascending
-                ? "sorted-asc"
-                : "sorted-desc"
-            );
-
-            indicator.textContent =
-                ascending ? "▲" : "▼";
-
-            ascending = !ascending;
-        });
+                applySort(
+                    index,
+                    direction,
+                    true
+                );
+            }
+        );
     });
+
+
+    // --------------------------------------------------------
+    // Restore selected ordering after auto-refresh.
+    // --------------------------------------------------------
+
+    try {
+
+        const saved =
+            JSON.parse(
+                localStorage.getItem(
+                    SORT_KEY
+                )
+                || "null"
+            );
+
+        if (
+            saved
+            && saved.name
+            && saved.direction
+        ) {
+
+            const index =
+                Array.from(
+                    headerRow.children
+                ).findIndex(
+                    th =>
+                        th.dataset.sortName
+                        === saved.name
+                );
+
+            if (index >= 0) {
+
+                applySort(
+                    index,
+                    saved.direction,
+                    false
+                );
+            }
+        }
+
+    } catch (e) {
+
+        console.warn(
+            "Could not restore dashboard sort",
+            e
+        );
+    }
 
 });
 </script>
