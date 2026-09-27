@@ -50,7 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.14"
+APP_VERSION = "0.9.15"
 CLASSIFIER_VERSION = "0.8.2"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -8910,6 +8910,236 @@ def is_fixed_price_listing(row):
     )
 
 
+
+def drain_reanalysis_queue(
+    conn,
+    token,
+    maximum=MAX_BACKFILL_DETAILS_PER_CYCLE
+):
+    """
+    Explicitly drain active listings created by older classifier versions.
+
+    This is separate from newest-search processing and ordinary availability
+    housekeeping so classifier migrations make deterministic progress.
+    """
+
+    remaining_before = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND (
+                classifier_version IS NULL
+                OR classifier_version<>?
+              )
+        """,
+        (
+            CLASSIFIER_VERSION,
+        )
+    ).fetchone()["n"]
+
+    if remaining_before <= 0:
+        print("Reanalysis queue: complete")
+        return 0
+
+    if ebay_detail_rate_limited():
+        print(
+            "Reanalysis queue: paused — eBay 429 cooldown active; "
+            f"{remaining_before} remaining"
+        )
+        return 0
+
+    if not can_detail(conn):
+        print(
+            "Reanalysis queue: paused — daily detail budget reserve reached; "
+            f"{remaining_before} remaining"
+        )
+        return 0
+
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND (
+                classifier_version IS NULL
+                OR classifier_version<>?
+              )
+        ORDER BY
+            CASE
+                WHEN valuation_basis='REANALYSIS_REQUIRED'
+                THEN 0
+                ELSE 1
+            END,
+            COALESCE(
+                availability_checked_at,
+                '1970-01-01'
+            ) ASC,
+            first_seen ASC
+        LIMIT ?
+        """,
+        (
+            CLASSIFIER_VERSION,
+            maximum,
+        )
+    ).fetchall()
+
+    attempted = 0
+    completed = 0
+    inactivated = 0
+    errors = 0
+
+    for row in rows:
+
+        if attempted >= maximum:
+            break
+
+        if ebay_detail_rate_limited():
+            break
+
+        if not can_detail(conn):
+            break
+
+        record_api_call(
+            conn,
+            "BROWSE",
+            "REANALYSIS"
+        )
+
+        attempted += 1
+
+        try:
+            state, detail = ebay_get_item(
+                token,
+                row["item_id"]
+            )
+
+        except EbayRateLimited:
+            print(
+                "Reanalysis queue: 429 encountered; "
+                "queue paused"
+            )
+            break
+
+        except Exception as exc:
+            errors += 1
+            print(
+                "Reanalysis queue: error fetching "
+                f"{row['item_id']}: {exc!r}"
+            )
+            continue
+
+        now = iso_now()
+
+        conn.execute(
+            """
+            UPDATE listings
+            SET availability_checked_at=?
+            WHERE item_id=?
+            """,
+            (
+                now,
+                row["item_id"],
+            )
+        )
+
+        if state == "INACTIVE":
+
+            conn.execute(
+                """
+                UPDATE listings
+                SET
+                    active=0,
+                    inactive_since=?,
+                    inactive_reason='ENDED_OR_UNAVAILABLE'
+                WHERE item_id=?
+                """,
+                (
+                    now,
+                    row["item_id"],
+                )
+            )
+
+            conn.commit()
+
+            inactivated += 1
+            continue
+
+        if state != "ACTIVE" or not detail:
+            conn.commit()
+            continue
+
+        item = analyse_listing(
+            conn,
+            token,
+            detail,
+            fetch_detail=False,
+            supplied_detail=detail
+        )
+
+        if not item:
+            conn.commit()
+            continue
+
+        save_listing(
+            conn,
+            item
+        )
+
+        # Force valuation to be recalculated using the freshly
+        # classified identity/specification.
+        conn.execute(
+            """
+            UPDATE listings
+            SET
+                estimated_value=NULL,
+                valuation_q1=NULL,
+                valuation_q3=NULL,
+                comparable_count=NULL,
+                valuation_confidence=NULL,
+                undervaluation_gbp=NULL,
+                undervaluation_pct=NULL,
+                deal_score=NULL,
+                valuation_basis=NULL,
+                valuation_research_at=NULL
+            WHERE item_id=?
+            """,
+            (
+                row["item_id"],
+            )
+        )
+
+        conn.commit()
+
+        completed += 1
+
+    remaining_after = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND (
+                classifier_version IS NULL
+                OR classifier_version<>?
+              )
+        """,
+        (
+            CLASSIFIER_VERSION,
+        )
+    ).fetchone()["n"]
+
+    print(
+        "Reanalysis queue: "
+        f"attempted {attempted}; "
+        f"completed {completed}; "
+        f"inactivated {inactivated}; "
+        f"errors {errors}; "
+        f"{remaining_after} remaining"
+    )
+
+    return completed
+
+
 def recheck_active_bin_listings(conn, token, maximum=ACTIVE_BIN_RECHECKS_PER_CYCLE):
     """
     Recheck a rotating set of active BIN/Best Offer listings.
@@ -9404,6 +9634,14 @@ def run_cycle(
     backfill_dashboard_images(
         conn,
         token
+    )
+
+    # Drain old classifier versions before ordinary availability
+    # housekeeping consumes the remaining detail-call budget.
+    drain_reanalysis_queue(
+        conn,
+        token,
+        MAX_BACKFILL_DETAILS_PER_CYCLE
     )
 
     recheck_active_bin_listings(
