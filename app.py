@@ -50,8 +50,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.0"
+APP_VERSION = "0.9.1"
 CLASSIFIER_VERSION = "0.8.1"
+MIN_UNDERVALUE_GBP = 20.0
 
 # Backward-compatible internal alias.
 # Existing classifier_version DB logic continues to use VERSION.
@@ -4701,7 +4702,7 @@ def deal_score(target, value, undervalue, undervalue_pct, confidence):
         return None
     if value is None or undervalue is None or undervalue_pct is None:
         return None
-    if undervalue <= 0:
+    if undervalue < MIN_UNDERVALUE_GBP:
         return 0
     score = min(60, undervalue_pct * 1.2) + min(25, undervalue / 4)
     # LOW means review evidence, not a high-priority buying recommendation.
@@ -5086,7 +5087,7 @@ def _dashboard_html_base():
           AND estimated_value IS NOT NULL
           AND deal_score IS NOT NULL
           AND undervaluation_gbp IS NOT NULL
-          AND undervaluation_gbp > 0
+          AND undervaluation_gbp >= 20.0
           AND undervaluation_pct IS NOT NULL
           AND undervaluation_pct > 0
         ORDER BY
@@ -5116,7 +5117,7 @@ def _dashboard_html_base():
           AND estimated_value IS NOT NULL
           AND deal_score IS NOT NULL
           AND undervaluation_gbp IS NOT NULL
-          AND undervaluation_gbp > 0
+          AND undervaluation_gbp >= 20.0
           AND undervaluation_pct IS NOT NULL
           AND undervaluation_pct > 0
     """).fetchone()["n"]
