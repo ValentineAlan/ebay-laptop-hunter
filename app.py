@@ -7101,7 +7101,7 @@ def _dashboard_html_base():
             cpu_rating_html = (
                 f'<a href="{html.escape(cpu_benchmark["source_url"] or "#", quote=True)}" '
                 f'target="_blank" '
-                f'title="PassMark CPU Mark for {html.escape(cpu_benchmark["cpu_name"])}">'
+                f'title="CPU Rating: {cpu_rating_value:,}&#10;Click for CPU details">'
                 f'{cpu_rating_value:,}'
                 f'</a>'
             )
@@ -7118,7 +7118,7 @@ def _dashboard_html_base():
                 </td>
 
                 <td>
-                    <a href="{url}" target="_blank">
+                    <a href="{url}" target="_blank" class="listing-title">
                         {title}
                     </a>
                     <div class="small">
@@ -7189,7 +7189,8 @@ def _dashboard_html_base():
                 </td>
 
                 <td data-sort="{row['deal_score'] if row['deal_score'] is not None else -1}">
-                    <span class="big">
+                    <span class="big"
+                          title="Deal score: {score}/100&#10;Higher means a stronger deal">
                         {score}
                     </span>
                 </td>
@@ -7205,6 +7206,45 @@ def _dashboard_html_base():
         )
 
     conn.close()
+
+    auction_section_html = ""
+
+    if auction_candidates > 0:
+        auction_section_html = f"""
+    <section class="deal-section">
+
+        <div class="deal-section-header">
+            <h2>Auctions</h2>
+            <span class="small listing-count">
+                {auction_candidates} listing{
+                    "" if auction_candidates == 1 else "s"
+                }
+            </span>
+        </div>
+
+        <table class="auction-table">
+
+        <thead>
+        <tr>
+            <th class="image-header" aria-label="Product image"></th>
+            <th>Listing</th>
+            <th title="Overall CPU performance. Higher is better.">CPU rating</th>
+            <th>Time left</th>
+            <th>Current bid</th>
+            <th title="Estimated saving if the current bid wins.">Potential saving</th>
+            <th title="Deal score out of 100. Higher means a stronger deal.">Deal score</th>
+            <th>Notes</th>
+        </tr>
+        </thead>
+
+        <tbody>
+            {''.join(auction_body_rows)}
+        </tbody>
+
+        </table>
+
+    </section>
+    """
 
     return f"""
     <!doctype html>
@@ -7384,6 +7424,165 @@ def _dashboard_html_base():
             background-color: rgba(37, 99, 235, 0.04);
         }}
 
+
+        /* --------------------------------------------------
+           Final public dashboard polish
+           -------------------------------------------------- */
+
+        .brand-header {{
+            margin-bottom: 14px;
+        }}
+
+        .deal-section {{
+            margin-top: 20px;
+        }}
+
+        .deal-section th {{
+            text-transform: none;
+            letter-spacing: 0.015em;
+            font-size: 12px;
+            line-height: 1.25;
+        }}
+
+        .listing-count {{
+            display: inline-flex;
+            align-items: center;
+            padding: 3px 8px;
+            border-radius: 999px;
+            background: rgba(15, 23, 42, 0.045);
+            color: #667085;
+            font-size: 11px;
+            line-height: 1.25;
+            white-space: nowrap;
+        }}
+
+        .listing-title {{
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }}
+
+        .cpu-rating a {{
+            cursor: pointer;
+        }}
+
+        .notes-clear {{
+            color: #b0b8c4;
+            font-weight: 400;
+        }}
+
+        .empty-state {{
+            padding: 22px 18px;
+            border: 1px solid rgba(15, 23, 42, 0.08);
+            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.58);
+            color: #667085;
+            text-align: center;
+            font-size: 13px;
+            box-shadow: 0 5px 18px rgba(16, 24, 40, 0.04);
+        }}
+
+        /* Numeric information should visually line up. */
+        .deal-section th:nth-child(3),
+        .deal-section td:nth-child(3),
+        .deal-section th:nth-child(5),
+        .deal-section td:nth-child(5) {{
+            font-variant-numeric: tabular-nums;
+        }}
+
+        /* CPU rating is useful but secondary to the saving. */
+        .cpu-rating a {{
+            color: #344054;
+            font-weight: 700;
+        }}
+
+        .cpu-rating a:hover {{
+            color: #2563eb;
+        }}
+
+        /* Keep the green saving treatment as the main visual emphasis. */
+        .deal-section td.good {{
+            font-weight: 700;
+        }}
+
+        @media (max-width: 1050px) {{
+            /* Notes is the first low-priority column to disappear. */
+            .deal-section th:nth-child(8),
+            .deal-section td:nth-child(8) {{
+                display: none;
+            }}
+        }}
+
+        @media (max-width: 850px) {{
+            /* Then hide deal score. */
+            .deal-section th:nth-child(7),
+            .deal-section td:nth-child(7) {{
+                display: none;
+            }}
+        }}
+
+        @media (max-width: 700px) {{
+            /* Then age/time-left, leaving the buying essentials. */
+            .deal-section th:nth-child(4),
+            .deal-section td:nth-child(4) {{
+                display: none;
+            }}
+
+            .deal-section th:nth-child(1),
+            .deal-section td:nth-child(1) {{
+                width: 16%;
+            }}
+
+            .deal-section th:nth-child(2),
+            .deal-section td:nth-child(2) {{
+                width: 38%;
+            }}
+
+            .deal-section th:nth-child(3),
+            .deal-section td:nth-child(3) {{
+                width: 15%;
+            }}
+
+            .deal-section th:nth-child(5),
+            .deal-section td:nth-child(5) {{
+                width: 13%;
+            }}
+
+            .deal-section th:nth-child(6),
+            .deal-section td:nth-child(6) {{
+                width: 18%;
+            }}
+        }}
+
+        /* Final column alignment:
+           text left, numeric values right, score centred. */
+        .deal-section th:nth-child(2),
+        .deal-section td:nth-child(2) {{
+            text-align: left;
+        }}
+
+        .deal-section th:nth-child(3),
+        .deal-section td:nth-child(3),
+        .deal-section th:nth-child(4),
+        .deal-section td:nth-child(4),
+        .deal-section th:nth-child(5),
+        .deal-section td:nth-child(5),
+        .deal-section th:nth-child(6),
+        .deal-section td:nth-child(6) {{
+            text-align: right;
+        }}
+
+        .deal-section th:nth-child(7),
+        .deal-section td:nth-child(7) {{
+            text-align: center;
+        }}
+
+        .deal-section th:nth-child(8),
+        .deal-section td:nth-child(8) {{
+            text-align: left;
+        }}
+
         /* Keep rounded table ends visually clean. */
         .deal-section th:first-child {{
             border-top-left-radius: 8px;
@@ -7398,7 +7597,7 @@ def _dashboard_html_base():
 
         <div class="deal-section-header">
             <h2>Buy It Now deals</h2>
-            <span class="small">
+            <span class="small listing-count">
                 {buy_now_candidates} listing{
                     "" if buy_now_candidates == 1 else "s"
                 }
@@ -7411,11 +7610,11 @@ def _dashboard_html_base():
         <tr>
             <th class="image-header" aria-label="Product image"></th>
             <th>Listing</th>
-            <th>CPU Rating</th>
+            <th title="Overall CPU performance. Higher is better.">CPU rating</th>
             <th>Listing age</th>
             <th>Price</th>
-            <th>Saving vs usual sold price</th>
-            <th>Score</th>
+            <th title="Compared with similar laptops recently sold.">Saving</th>
+            <th title="Deal score out of 100. Higher means a stronger deal.">Deal score</th>
             <th>Notes</th>
         </tr>
         </thead>
@@ -7429,39 +7628,7 @@ def _dashboard_html_base():
     </section>
 
 
-    <section class="deal-section">
-
-        <div class="deal-section-header">
-            <h2>Auctions</h2>
-            <span class="small">
-                {auction_candidates} listing{
-                    "" if auction_candidates == 1 else "s"
-                }
-            </span>
-        </div>
-
-        <table class="auction-table">
-
-        <thead>
-        <tr>
-            <th class="image-header" aria-label="Product image"></th>
-            <th>Listing</th>
-            <th>CPU Rating</th>
-            <th>Time left</th>
-            <th>Current bid</th>
-            <th>Potential saving</th>
-            <th>Score</th>
-            <th>Notes</th>
-        </tr>
-        </thead>
-
-        <tbody>
-            {''.join(auction_body_rows)}
-        </tbody>
-
-        </table>
-
-    </section>
+    {auction_section_html}
 
     </body>
     </html>
