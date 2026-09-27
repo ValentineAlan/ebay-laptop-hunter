@@ -52,6 +52,29 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 VERSION = "0.8.1"
 
+# eBay short-term rate-limit protection.
+EBAY_429_COOLDOWN_SECONDS = 600
+_ebay_rate_limited_until = 0.0
+
+
+def ebay_detail_rate_limited():
+    return time.time() < _ebay_rate_limited_until
+
+
+def mark_ebay_rate_limited(seconds=EBAY_429_COOLDOWN_SECONDS):
+    global _ebay_rate_limited_until
+
+    _ebay_rate_limited_until = max(
+        _ebay_rate_limited_until,
+        time.time() + seconds,
+    )
+
+    print(
+        f"eBay rate limit: pausing detail calls for "
+        f"{int(seconds)} seconds"
+    )
+
+
 DB = "/data/hunter.db"
 LOG_FILE = "/data/hunter.log"
 PRODUCT_RESEARCH_CURL = "/data/product-research.curl"
@@ -5682,6 +5705,13 @@ def recheck_active_bin_listings(conn, token, maximum=ACTIVE_BIN_RECHECKS_PER_CYC
     checked = 0
     inactivated = 0
 
+    if ebay_detail_rate_limited():
+        print(
+            "Listing housekeeping: eBay detail calls skipped "
+            "because 429 cooldown is active"
+        )
+        return checked, inactivated
+
     for row in rows:
         if checked >= maximum or not can_detail(conn):
             break
@@ -5692,7 +5722,27 @@ def recheck_active_bin_listings(conn, token, maximum=ACTIVE_BIN_RECHECKS_PER_CYC
             continue
 
         record_api_call(conn, "BROWSE", "GET_ITEM")
-        state, detail = ebay_get_item(token, row["item_id"])
+
+        try:
+            state, detail = ebay_get_item(
+                token,
+                row["item_id"]
+            )
+
+        except urllib.error.HTTPError as exc:
+
+            if exc.code == 429:
+                mark_ebay_rate_limited()
+
+                print(
+                    "Listing housekeeping: received HTTP 429; "
+                    "stopping detail calls for this cycle"
+                )
+
+                break
+
+            raise
+
         checked += 1
         now = iso_now()
 
@@ -5878,6 +5928,7 @@ def run_cycle(
                 and can_detail(
                     conn
                 )
+                and not ebay_detail_rate_limited()
             ):
 
                 item = analyse_listing(
