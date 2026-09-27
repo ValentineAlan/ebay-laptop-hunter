@@ -1,4 +1,4 @@
-# Laptop Lander v0.9.8
+# Laptop Lander
 #
 # Features:
 #   - eBay GB laptop discovery
@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.22"
+APP_VERSION = "0.9.23"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -190,7 +190,7 @@ SETTINGS_SCHEMA = [
     {"key": "DAILY_SAFETY_LIMIT", "label": "Daily Browse API safety limit", "group": "API & polling", "type": "int", "min": 1000, "max": 5000, "step": 1, "apply": "Applies live"},
     {"key": "SEARCH_RESERVE", "label": "Search reserve", "group": "API & polling", "type": "int", "min": 0, "max": 2000, "step": 1, "apply": "Applies live"},
     {"key": "MIN_SEARCH_RESERVE", "label": "Minimum search reserve", "group": "API & polling", "type": "int", "min": 0, "max": 1000, "step": 1, "apply": "Applies live"},
-    {"key": "SEARCH_RESERVE_TAPER_START_HOUR", "label": "Reserve taper start (UTC hour)", "group": "API & polling", "type": "int", "min": 0, "max": 23, "step": 1, "apply": "Applies live"},
+    {"key": "SEARCH_RESERVE_TAPER_START_HOUR", "label": "Reserve taper start (hours into eBay window)", "group": "API & polling", "type": "int", "min": 0, "max": 23, "step": 1, "apply": "Applies live"},
     {"key": "EMERGENCY_RESERVE", "label": "Emergency reserve", "group": "API & polling", "type": "int", "min": 0, "max": 1000, "step": 1, "apply": "Applies live"},
     {"key": "MAX_DETAIL_CALLS_PER_CYCLE", "label": "Maximum detail calls per cycle", "group": "API & polling", "type": "int", "min": 1, "max": 500, "step": 1, "apply": "Next polling cycle"},
     {"key": "MAX_BACKFILL_DETAILS_PER_CYCLE", "label": "Maximum reanalysis details per cycle", "group": "API & polling", "type": "int", "min": 1, "max": 500, "step": 1, "apply": "Next polling cycle"},
@@ -1013,8 +1013,317 @@ def record_api_call(
 
     conn.commit()
 
+    if api == "BROWSE":
+        global _ebay_browse_quota_local_delta
 
-def browse_usage_today(conn):
+        with _ebay_browse_quota_lock:
+            _ebay_browse_quota_local_delta += 1
+
+
+# eBay Developer Analytics quota state.
+#
+# The Browse API quota is authoritative. We cache eBay's reported count and
+# reset time, then add calls made locally after that snapshot so the safety
+# budget remains current between Analytics refreshes.
+
+EBAY_QUOTA_CACHE_SECONDS = 300
+
+_ebay_browse_quota_cache = {
+    "fetched_at": 0.0,
+    "data": None,
+    "error": None,
+}
+
+_ebay_browse_quota_local_delta = 0
+_ebay_browse_quota_lock = threading.Lock()
+
+
+def _parse_ebay_reset(value):
+    if not value:
+        return None
+
+    try:
+        text = str(value).strip()
+
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+
+        dt = datetime.fromisoformat(text)
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        return dt.astimezone(timezone.utc)
+
+    except Exception:
+        return None
+
+
+def _format_quota_countdown(seconds):
+    seconds = max(0, int(seconds))
+
+    hours, remainder = divmod(seconds, 3600)
+    minutes, _ = divmod(remainder, 60)
+
+    if hours:
+        return f"{hours}h {minutes}m"
+
+    return f"{minutes}m"
+
+
+def ebay_browse_quota(force=False):
+    """
+    Return eBay's application-level Browse API quota information.
+
+    Uses Developer Analytics:
+      GET /developer/analytics/v1_beta/rate_limit/
+          ?api_context=buy&api_name=browse
+
+    The response is cached because the quota endpoint itself does not need
+    to be called for every Browse request.
+    """
+    global _ebay_browse_quota_local_delta
+
+    now = time.time()
+
+    with _ebay_browse_quota_lock:
+        cached = _ebay_browse_quota_cache.get("data")
+        fetched_at = float(
+            _ebay_browse_quota_cache.get("fetched_at")
+            or 0
+        )
+
+    if cached and not force:
+        reset_dt = _parse_ebay_reset(
+            cached.get("reset")
+        )
+
+        cache_fresh = (
+            now - fetched_at
+            < EBAY_QUOTA_CACHE_SECONDS
+        )
+
+        reset_still_current = (
+            reset_dt is None
+            or reset_dt.timestamp() > now
+        )
+
+        if cache_fresh and reset_still_current:
+            return cached
+
+    with _ebay_browse_quota_lock:
+        delta_before = _ebay_browse_quota_local_delta
+
+    try:
+        token = get_token()
+
+        params = urllib.parse.urlencode({
+            "api_context": "buy",
+            "api_name": "browse",
+        })
+
+        url = (
+            "https://api.ebay.com/"
+            "developer/analytics/v1_beta/"
+            "rate_limit/?"
+            + params
+        )
+
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization":
+                    f"Bearer {token}",
+                "Accept":
+                    "application/json",
+            }
+        )
+
+        # Deliberately do not use api_get() here:
+        # Analytics calls must not count against our Browse accounting.
+        with urllib.request.urlopen(
+            req,
+            timeout=20
+        ) as response:
+
+            status = getattr(
+                response,
+                "status",
+                200
+            )
+
+            if status == 204:
+                raise RuntimeError(
+                    "eBay Analytics returned HTTP 204"
+                )
+
+            payload = json.load(response)
+
+        candidates = []
+
+        for rate_limit in payload.get(
+            "rateLimits",
+            []
+        ):
+            api_name = str(
+                rate_limit.get("apiName") or ""
+            ).lower()
+
+            if api_name and api_name != "browse":
+                continue
+
+            for resource in rate_limit.get(
+                "resources",
+                []
+            ):
+                resource_name = (
+                    resource.get("name")
+                    or "Browse"
+                )
+
+                for rate in resource.get(
+                    "rates",
+                    []
+                ):
+                    try:
+                        limit = int(
+                            rate.get("limit")
+                            or 0
+                        )
+
+                        remaining = int(
+                            rate.get("remaining")
+                            or 0
+                        )
+
+                        time_window = int(
+                            rate.get("timeWindow")
+                            or 0
+                        )
+
+                        count_value = rate.get(
+                            "count"
+                        )
+
+                        if count_value is None:
+                            count = max(
+                                0,
+                                limit - remaining
+                            )
+                        else:
+                            count = int(
+                                count_value
+                            )
+
+                        reset = (
+                            rate.get("reset")
+                            or rate.get("resetTime")
+                        )
+
+                    except (
+                        TypeError,
+                        ValueError
+                    ):
+                        continue
+
+                    if limit <= 0:
+                        continue
+
+                    candidates.append({
+                        "limit": limit,
+                        "remaining": remaining,
+                        "count": count,
+                        "reset": reset,
+                        "time_window": time_window,
+                        "resource": resource_name,
+                    })
+
+        if not candidates:
+            raise RuntimeError(
+                "No Browse quota returned by "
+                "eBay Developer Analytics"
+            )
+
+        # Prefer the daily Browse quota. If eBay returns more than one
+        # Browse resource, use the one currently showing the greatest
+        # utilisation. This is conservative for our safety budget.
+        daily = [
+            candidate
+            for candidate in candidates
+            if candidate["time_window"]
+            >= 23 * 3600
+        ]
+
+        pool = daily or candidates
+
+        quota = max(
+            pool,
+            key=lambda candidate: (
+                candidate["count"],
+                -candidate["remaining"],
+                candidate["time_window"],
+            )
+        )
+
+        quota = dict(quota)
+        quota["source"] = "eBay Analytics"
+
+        with _ebay_browse_quota_lock:
+            # Preserve calls made while the Analytics HTTP request
+            # itself was in flight.
+            current_delta = (
+                _ebay_browse_quota_local_delta
+            )
+
+            _ebay_browse_quota_local_delta = max(
+                0,
+                current_delta - delta_before
+            )
+
+            _ebay_browse_quota_cache[
+                "data"
+            ] = quota
+
+            _ebay_browse_quota_cache[
+                "fetched_at"
+            ] = time.time()
+
+            _ebay_browse_quota_cache[
+                "error"
+            ] = None
+
+        return quota
+
+    except Exception as exc:
+        with _ebay_browse_quota_lock:
+            _ebay_browse_quota_cache[
+                "error"
+            ] = str(exc)
+
+            old = _ebay_browse_quota_cache.get(
+                "data"
+            )
+
+        # A still-valid previous response is preferable to guessing.
+        if old:
+            reset_dt = _parse_ebay_reset(
+                old.get("reset")
+            )
+
+            if (
+                reset_dt is not None
+                and reset_dt.timestamp() > now
+            ):
+                return old
+
+        return None
+
+
+def browse_usage_local_today(conn):
+    """
+    Local UTC-day counter retained for diagnostics/fallback only.
+    Budget enforcement uses eBay's real quota window whenever available.
+    """
     row = conn.execute("""
         SELECT
             COALESCE(
@@ -1053,51 +1362,242 @@ def operation_usage(
     return int(row["n"] or 0)
 
 
+def browse_budget_status(conn):
+    quota = ebay_browse_quota()
+
+    if quota:
+        with _ebay_browse_quota_lock:
+            delta = int(
+                _ebay_browse_quota_local_delta
+            )
+
+            quota_error = (
+                _ebay_browse_quota_cache.get(
+                    "error"
+                )
+            )
+
+        used = max(
+            0,
+            int(quota["count"]) + delta
+        )
+
+        limit = int(
+            quota["limit"]
+            or DAILY_SAFETY_LIMIT
+        )
+
+        reset_dt = _parse_ebay_reset(
+            quota.get("reset")
+        )
+
+        reset_seconds = (
+            max(
+                0,
+                int(
+                    reset_dt.timestamp()
+                    - time.time()
+                )
+            )
+            if reset_dt
+            else None
+        )
+
+        return {
+            "used": used,
+            "limit": limit,
+            "remaining": max(
+                0,
+                limit - used
+            ),
+            "reset": reset_dt,
+            "reset_seconds": reset_seconds,
+            "time_window": int(
+                quota.get("time_window")
+                or 86400
+            ),
+            "resource": quota.get(
+                "resource"
+            ),
+            "source": quota.get(
+                "source"
+            ) or "eBay Analytics",
+            "error": quota_error,
+        }
+
+    # Fail safe: retain the old local UTC-day accounting if Analytics
+    # is temporarily unavailable.
+    local_used = browse_usage_local_today(
+        conn
+    )
+
+    now = utcnow()
+
+    seconds_today = (
+        now.hour * 3600
+        + now.minute * 60
+        + now.second
+    )
+
+    seconds_until_midnight = max(
+        0,
+        86400 - seconds_today
+    )
+
+    return {
+        "used": local_used,
+        "limit": DAILY_SAFETY_LIMIT,
+        "remaining": max(
+            0,
+            DAILY_SAFETY_LIMIT
+            - local_used
+        ),
+        "reset": None,
+        "reset_seconds":
+            seconds_until_midnight,
+        "time_window": 86400,
+        "resource": None,
+        "source":
+            "Local UTC fallback",
+        "error":
+            _ebay_browse_quota_cache.get(
+                "error"
+            ),
+    }
+
+
+def browse_budget_used(conn):
+    return int(
+        browse_budget_status(conn)["used"]
+    )
+
+
+def browse_usage_today(conn):
+    """
+    Backwards-compatible name.
+
+    Existing callers now receive usage for eBay's actual current quota
+    window instead of an assumed UTC calendar day.
+    """
+    return browse_budget_used(conn)
+
+
 def can_search(conn):
     return (
-        browse_usage_today(conn)
+        browse_budget_used(conn)
         <
         DAILY_SAFETY_LIMIT
         - EMERGENCY_RESERVE
     )
 
 
-
 def current_search_reserve(now=None):
     """
-    Preserve more search capacity early in the UTC day, then gradually release
-    unused reserve to detail/reanalysis work during the second half of the day.
+    Preserve the full search reserve during the early part of eBay's
+    current quota window, then taper it down toward reset.
 
-    00:00-12:00 UTC: SEARCH_RESERVE
-    12:00-24:00 UTC: linearly tapers to MIN_SEARCH_RESERVE
+    SEARCH_RESERVE_TAPER_START_HOUR now means hours elapsed since the
+    start of eBay's quota window rather than a UTC clock hour.
     """
     now = now or utcnow()
 
-    hour = (
-        now.hour
-        + now.minute / 60.0
-        + now.second / 3600.0
-    )
+    quota = ebay_browse_quota()
 
-    if hour <= SEARCH_RESERVE_TAPER_START_HOUR:
-        return SEARCH_RESERVE
-
-    taper_hours = (
-        24.0
-        - SEARCH_RESERVE_TAPER_START_HOUR
-    )
-
-    progress = min(
-        1.0,
-        max(
-            0.0,
-            (
-                hour
-                - SEARCH_RESERVE_TAPER_START_HOUR
-            )
-            / taper_hours
+    if quota:
+        reset_dt = _parse_ebay_reset(
+            quota.get("reset")
         )
-    )
+
+        window_seconds = int(
+            quota.get("time_window")
+            or 86400
+        )
+
+        if reset_dt and window_seconds > 0:
+            reset_ts = (
+                reset_dt.timestamp()
+            )
+
+            now_ts = now.timestamp()
+
+            window_start_ts = (
+                reset_ts
+                - window_seconds
+            )
+
+            elapsed = max(
+                0.0,
+                min(
+                    float(window_seconds),
+                    now_ts - window_start_ts
+                )
+            )
+
+            taper_start = min(
+                float(window_seconds),
+                float(
+                    SEARCH_RESERVE_TAPER_START_HOUR
+                )
+                * 3600.0
+            )
+
+            if elapsed <= taper_start:
+                return SEARCH_RESERVE
+
+            taper_span = max(
+                1.0,
+                float(window_seconds)
+                - taper_start
+            )
+
+            progress = min(
+                1.0,
+                max(
+                    0.0,
+                    (
+                        elapsed
+                        - taper_start
+                    )
+                    / taper_span
+                )
+            )
+
+        else:
+            progress = None
+
+    else:
+        progress = None
+
+    if progress is None:
+        # Exact old fallback behaviour.
+        hour = (
+            now.hour
+            + now.minute / 60.0
+            + now.second / 3600.0
+        )
+
+        if (
+            hour
+            <= SEARCH_RESERVE_TAPER_START_HOUR
+        ):
+            return SEARCH_RESERVE
+
+        taper_hours = (
+            24.0
+            - SEARCH_RESERVE_TAPER_START_HOUR
+        )
+
+        progress = min(
+            1.0,
+            max(
+                0.0,
+                (
+                    hour
+                    - SEARCH_RESERVE_TAPER_START_HOUR
+                )
+                / taper_hours
+            )
+        )
 
     reserve = round(
         SEARCH_RESERVE
@@ -1127,14 +1627,14 @@ def detail_api_cutoff(now=None):
 
 def can_detail(conn):
     return (
-        browse_usage_today(conn)
+        browse_budget_used(conn)
         < detail_api_cutoff()
     )
 
 
 def budget_percentage(conn):
     return (
-        browse_usage_today(conn)
+        browse_budget_used(conn)
         / DAILY_SAFETY_LIMIT
         * 100
     )
@@ -7246,6 +7746,75 @@ def _dashboard_html_base():
     </section>
     """
 
+    hero_cards = []
+
+    for hero_row in buy_now_rows[:3]:
+        hero_title = html.escape(
+            hero_row["title"]
+            or "Laptop deal"
+        )
+
+        hero_price = money(
+            hero_row["total"]
+        )
+
+        hero_saving = money(
+            hero_row["undervaluation_gbp"]
+        )
+
+        hero_image_url = (
+            hero_row["image_url"]
+            or ""
+        )
+
+        if hero_image_url:
+            hero_image = (
+                '<img src="'
+                + html.escape(
+                    hero_image_url,
+                    quote=True
+                )
+                + '" alt="" loading="lazy">'
+            )
+        else:
+            hero_image = """
+                <svg viewBox="0 0 64 48"
+                     aria-hidden="true">
+                    <rect x="11" y="7"
+                          width="42" height="28"
+                          rx="3"></rect>
+                    <path d="M6 40h52"></path>
+                </svg>
+            """
+
+        hero_cards.append(
+            f"""
+            <div class="hero-deal-card">
+                <div class="hero-deal-image">
+                    {hero_image}
+                </div>
+
+                <div class="hero-deal-copy">
+                    <div class="hero-deal-title">
+                        {hero_title}
+                    </div>
+
+                    <div class="hero-deal-price">
+                        {hero_price}
+                    </div>
+
+                    <div class="hero-deal-saving">
+                        Save {hero_saving}
+                    </div>
+                </div>
+            </div>
+            """
+        )
+
+    hero_cards_html = "".join(
+        hero_cards
+    )
+
     return f"""
     <!doctype html>
     <html>
@@ -7259,27 +7828,465 @@ def _dashboard_html_base():
 
     <body>
 
-    <div class="brand-header">
-    <div class="brand-mark" aria-hidden="true">
-        <svg viewBox="0 0 64 64" role="img">
-            <rect x="13" y="28" width="31" height="21" rx="3"></rect>
-            <path d="M9 52h39"></path>
-            <path d="M39 27c3-11 9-17 17-20 1 9-2 17-10 23"></path>
-            <path d="M47 17l7 7"></path>
-            <path d="M18 25l-5-7"></path>
-            <path d="M14 30l-8-2"></path>
-        </svg>
-    </div>
+    <header class="public-topbar">
+        <a href="/"
+           class="public-logo"
+           aria-label="Laptop Lander home">
+            <svg viewBox="0 0 64 64"
+                 aria-hidden="true">
+                <rect x="9" y="13"
+                      width="39" height="28"
+                      rx="4"></rect>
+                <path d="M5 47h48"></path>
+                <path d="M40 15l13 3 3 13-14 14-13-13z"></path>
+                <circle cx="47" cy="23" r="2.2"></circle>
+            </svg>
+        </a>
+    </header>
 
-    <div>
-        <h1>Laptop Lander</h1>
-        <div class="brand-tagline">
-            Land the right laptop at the right price.
+    <section class="home-hero">
+
+        <div class="hero-copy">
+
+            <div class="hero-wordmark">
+                <div class="hero-wordmark-icon"
+                     aria-hidden="true">
+                    <svg viewBox="0 0 64 64">
+                        <rect x="9" y="13"
+                              width="39" height="28"
+                              rx="4"></rect>
+                        <path d="M5 47h48"></path>
+                        <path d="M40 15l13 3 3 13-14 14-13-13z"></path>
+                        <circle cx="47" cy="23" r="2.2"></circle>
+                    </svg>
+                </div>
+
+                <h1>Laptop Lander</h1>
+            </div>
+
+            <p class="hero-subtitle">
+                Find great eBay UK laptop deals.
+            </p>
+
+            <div class="hero-benefits"
+                 id="how-it-works">
+
+                <div class="hero-benefit">
+                    <span class="benefit-icon">
+                        <svg viewBox="0 0 32 32"
+                             aria-hidden="true">
+                            <circle cx="13"
+                                    cy="13"
+                                    r="7"></circle>
+                            <path d="M18 18l7 7"></path>
+                            <path d="M13 2v3M2 13h3M21 13h3"></path>
+                        </svg>
+                    </span>
+
+                    <span>
+                        Scours all new listings
+                    </span>
+                </div>
+
+                <div class="hero-benefit">
+                    <span class="benefit-icon">
+                        <svg viewBox="0 0 32 32"
+                             aria-hidden="true">
+                            <path d="M5 25h22"></path>
+                            <rect x="7" y="16"
+                                  width="4" height="7"
+                                  rx="1"></rect>
+                            <rect x="14" y="11"
+                                  width="4" height="12"
+                                  rx="1"></rect>
+                            <rect x="21" y="6"
+                                  width="4" height="17"
+                                  rx="1"></rect>
+                        </svg>
+                    </span>
+
+                    <span>
+                        Compares previous sold prices
+                    </span>
+                </div>
+
+                <div class="hero-benefit">
+                    <span class="benefit-icon">
+                        <svg viewBox="0 0 32 32"
+                             aria-hidden="true">
+                            <path d="M5 7h12l10 10-10 10L5 15z"></path>
+                            <circle cx="10"
+                                    cy="12"
+                                    r="1.7"></circle>
+                            <path d="M14 18l3 3 6-7"></path>
+                        </svg>
+                    </span>
+
+                    <span>
+                        Spots the bargains
+                    </span>
+                </div>
+
+            </div>
         </div>
-    </div>
-</div>
+
+        <div class="hero-deals"
+             aria-label="Current laptop deals">
+            {hero_cards_html}
+        </div>
+
+    </section>
 
     <style>
+        .public-topbar {{
+            display: flex;
+            align-items: center;
+            min-height: 58px;
+            margin-bottom: 18px;
+        }}
+
+        .public-logo {{
+            width: 43px;
+            height: 43px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 12px;
+            background:
+                linear-gradient(
+                    145deg,
+                    #315ae8,
+                    #2446c7
+                );
+            box-shadow:
+                0 7px 18px
+                rgba(37, 76, 210, .20);
+        }}
+
+        .public-logo svg {{
+            width: 30px;
+            height: 30px;
+            fill: none;
+            stroke: #fff;
+            stroke-width: 3;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }}
+
+        .home-hero {{
+            display: grid;
+            grid-template-columns:
+                minmax(0, 1.05fr)
+                minmax(340px, .95fr);
+            align-items: center;
+            gap: 54px;
+            padding: 46px 50px;
+            margin-bottom: 30px;
+            overflow: hidden;
+            border:
+                1px solid
+                rgba(69, 91, 160, .12);
+            border-radius: 24px;
+            background:
+                radial-gradient(
+                    circle at 92% 8%,
+                    rgba(128, 157, 255, .24),
+                    transparent 36%
+                ),
+                linear-gradient(
+                    135deg,
+                    #f9fbff 0%,
+                    #f0f5ff 55%,
+                    #eef1ff 100%
+                );
+            box-shadow:
+                0 18px 48px
+                rgba(29, 53, 107, .09);
+        }}
+
+        .hero-wordmark {{
+            display: flex;
+            align-items: center;
+            gap: 17px;
+        }}
+
+        .hero-wordmark-icon {{
+            width: 61px;
+            height: 61px;
+            flex: 0 0 61px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 16px;
+            background:
+                linear-gradient(
+                    145deg,
+                    #315ae8,
+                    #2446c7
+                );
+            box-shadow:
+                0 10px 24px
+                rgba(37, 76, 210, .22);
+        }}
+
+        .hero-wordmark-icon svg {{
+            width: 43px;
+            height: 43px;
+            fill: none;
+            stroke: #fff;
+            stroke-width: 3;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }}
+
+        .hero-wordmark h1 {{
+            margin: 0;
+            color: #16213d;
+            font-size:
+                clamp(38px, 5vw, 62px);
+            line-height: .98;
+            letter-spacing: -.045em;
+            font-weight: 800;
+        }}
+
+        .hero-subtitle {{
+            margin: 21px 0 0;
+            color: #536078;
+            font-size:
+                clamp(18px, 2vw, 23px);
+            line-height: 1.4;
+            font-weight: 500;
+        }}
+
+        .hero-benefits {{
+            display: grid;
+            grid-template-columns:
+                repeat(3, minmax(0, 1fr));
+            gap: 18px;
+            margin-top: 35px;
+        }}
+
+        .hero-benefit {{
+            min-width: 0;
+            color: #354158;
+            font-size: 13px;
+            line-height: 1.35;
+            font-weight: 650;
+        }}
+
+        .benefit-icon {{
+            width: 42px;
+            height: 42px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 10px;
+            border-radius: 12px;
+            background: #fff;
+            box-shadow:
+                0 5px 16px
+                rgba(33, 57, 111, .09);
+        }}
+
+        .benefit-icon svg {{
+            width: 24px;
+            height: 24px;
+            fill: none;
+            stroke: #365bd7;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }}
+
+        .hero-deals {{
+            position: relative;
+            min-height: 284px;
+        }}
+
+        .hero-deal-card {{
+            position: relative;
+            display: grid;
+            grid-template-columns: 82px 1fr;
+            gap: 14px;
+            align-items: center;
+            width: min(100%, 410px);
+            min-height: 92px;
+            padding: 14px 17px;
+            margin-left: auto;
+            border:
+                1px solid
+                rgba(45, 64, 115, .10);
+            border-radius: 15px;
+            background:
+                rgba(255, 255, 255, .96);
+            box-shadow:
+                0 12px 30px
+                rgba(31, 48, 89, .12);
+        }}
+
+        .hero-deal-card
+        + .hero-deal-card {{
+            margin-top: -2px;
+        }}
+
+        .hero-deal-card:nth-child(1) {{
+            transform:
+                translateX(-22px)
+                rotate(-1.4deg);
+            z-index: 3;
+        }}
+
+        .hero-deal-card:nth-child(2) {{
+            transform:
+                translateX(8px)
+                rotate(.8deg);
+            z-index: 2;
+        }}
+
+        .hero-deal-card:nth-child(3) {{
+            transform:
+                translateX(-8px)
+                rotate(-.4deg);
+            z-index: 1;
+        }}
+
+        .hero-deal-image {{
+            width: 82px;
+            height: 62px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            border-radius: 9px;
+            background: #f5f7fb;
+        }}
+
+        .hero-deal-image img {{
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }}
+
+        .hero-deal-image svg {{
+            width: 52px;
+            height: 40px;
+            fill: none;
+            stroke: #8b96aa;
+            stroke-width: 2.3;
+            stroke-linecap: round;
+        }}
+
+        .hero-deal-copy {{
+            min-width: 0;
+        }}
+
+        .hero-deal-title {{
+            overflow: hidden;
+            color: #202b43;
+            font-size: 13px;
+            line-height: 1.3;
+            font-weight: 700;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }}
+
+        .hero-deal-price {{
+            margin-top: 5px;
+            color: #16213d;
+            font-size: 19px;
+            font-weight: 800;
+            font-variant-numeric:
+                tabular-nums;
+        }}
+
+        .hero-deal-saving {{
+            margin-top: 2px;
+            color: #14804a;
+            font-size: 12px;
+            font-weight: 750;
+        }}
+
+        @media (max-width: 900px) {{
+            .home-hero {{
+                grid-template-columns: 1fr;
+                gap: 35px;
+                padding: 36px 30px;
+            }}
+
+            .hero-deals {{
+                min-height: auto;
+            }}
+
+            .hero-deal-card {{
+                margin-left: 0;
+            }}
+        }}
+
+        @media (max-width: 620px) {{
+            .public-topbar {{
+                min-height: 48px;
+                margin-bottom: 12px;
+            }}
+
+            .public-logo {{
+                width: 39px;
+                height: 39px;
+            }}
+
+            .home-hero {{
+                padding: 28px 21px;
+                border-radius: 18px;
+            }}
+
+            .hero-wordmark {{
+                gap: 12px;
+            }}
+
+            .hero-wordmark-icon {{
+                width: 49px;
+                height: 49px;
+                flex-basis: 49px;
+            }}
+
+            .hero-wordmark-icon svg {{
+                width: 35px;
+                height: 35px;
+            }}
+
+            .hero-benefits {{
+                grid-template-columns: 1fr;
+                gap: 13px;
+                margin-top: 27px;
+            }}
+
+            .hero-benefit {{
+                display: flex;
+                align-items: center;
+                gap: 11px;
+            }}
+
+            .benefit-icon {{
+                flex: 0 0 38px;
+                width: 38px;
+                height: 38px;
+                margin: 0;
+            }}
+
+            .hero-deal-card {{
+                grid-template-columns: 68px 1fr;
+                min-height: 82px;
+            }}
+
+            .hero-deal-card:nth-child(n) {{
+                transform: none;
+            }}
+
+            .hero-deal-image {{
+                width: 68px;
+                height: 54px;
+            }}
+        }}
+
         .deal-section {{
             margin-top: 28px;
         }}
@@ -7969,7 +8976,11 @@ def diagnostics_html():
         """
     )
 
-    api_used = browse_usage_today(conn)
+    api_budget = browse_budget_status(conn)
+
+    api_used = int(
+        api_budget["used"]
+    )
 
     api_remaining = max(
         0,
@@ -7982,6 +8993,55 @@ def diagnostics_html():
         - EMERGENCY_RESERVE
         - api_used
     )
+
+    ebay_quota_limit = api_budget.get(
+        "limit"
+    )
+
+    ebay_quota_remaining = (
+        max(
+            0,
+            int(ebay_quota_limit)
+            - api_used
+        )
+        if ebay_quota_limit
+        is not None
+        else None
+    )
+
+    ebay_reset = api_budget.get(
+        "reset"
+    )
+
+    ebay_reset_seconds = (
+        api_budget.get(
+            "reset_seconds"
+        )
+    )
+
+    if ebay_reset is not None:
+        ebay_reset_text = (
+            ebay_reset.strftime(
+                "%Y-%m-%d %H:%M:%S UTC"
+            )
+        )
+
+        if (
+            ebay_reset_seconds
+            is not None
+        ):
+            ebay_reset_text += (
+                " (in "
+                + _format_quota_countdown(
+                    ebay_reset_seconds
+                )
+                + ")"
+            )
+    else:
+        ebay_reset_text = (
+            "Unavailable — local UTC "
+            "fallback active"
+        )
 
     image_backfill_used = operation_usage(
         conn,
@@ -8452,9 +9512,27 @@ def diagnostics_html():
     ]
 
     api_items = [
-        ("Browse API calls today", api_used),
-        ("Daily safety limit", DAILY_SAFETY_LIMIT),
-        ("Calls remaining", api_remaining),
+        ("Browse calls this eBay window", api_used),
+        (
+            "eBay quota limit",
+            ebay_quota_limit
+            if ebay_quota_limit is not None
+            else "—"
+        ),
+        (
+            "eBay quota remaining",
+            ebay_quota_remaining
+            if ebay_quota_remaining is not None
+            else "—"
+        ),
+        ("eBay quota reset", ebay_reset_text),
+        (
+            "Budget source",
+            api_budget.get("source")
+            or "Unknown"
+        ),
+        ("Local safety limit", DAILY_SAFETY_LIMIT),
+        ("Safety budget remaining", api_remaining),
         ("Normal budget remaining", normal_budget_remaining),
         ("Emergency reserve", EMERGENCY_RESERVE),
         ("SEARCH", search_calls),
@@ -10463,7 +11541,7 @@ td[data-sort] > .big {
 
 
 /* ==========================================================
-   Laptop Lander v0.9.7 refinements
+   Laptop Lander refinements
    ========================================================== */
 
 /* Image=1, Listing=2, Age=3 */
