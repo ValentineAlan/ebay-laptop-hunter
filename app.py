@@ -1,4 +1,4 @@
-# Laptop Lander v0.9.6
+# Laptop Lander v0.9.7
 #
 # Features:
 #   - eBay GB laptop discovery
@@ -50,9 +50,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.6"
+APP_VERSION = "0.9.7"
 CLASSIFIER_VERSION = "0.8.1"
 MIN_UNDERVALUE_GBP = 20.0
+IMAGE_BACKFILL_PER_CYCLE = 12
 
 # Backward-compatible internal alias.
 # Existing classifier_version DB logic continues to use CLASSIFIER_VERSION.
@@ -6351,6 +6352,67 @@ td[data-sort] > .big {
             58px;
     }
 }
+
+
+/* ==========================================================
+   Laptop Lander v0.9.7 refinements
+   ========================================================== */
+
+/* Image=1, Listing=2, Age=3 */
+tbody td:nth-child(3),
+thead th:nth-child(3) {
+    white-space: nowrap;
+}
+
+/* Less unused vertical space in dashboard statistics */
+.cards {
+    gap: 12px;
+    margin-top: 14px;
+    margin-bottom: 18px;
+}
+
+.card {
+    padding: 13px 16px;
+}
+
+.card .big {
+    font-size: 25px;
+    line-height: 1.15;
+}
+
+/* Slightly denser rows */
+tbody td {
+    padding-top: 11px;
+    padding-bottom: 11px;
+}
+
+/* Confidence pills */
+.confidence-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    line-height: 1.3;
+    font-weight: 750;
+    letter-spacing: .035em;
+}
+
+.confidence-high {
+    color: #166534;
+    background: #dcfce7;
+}
+
+.confidence-medium {
+    color: #92400e;
+    background: #fef3c7;
+}
+
+.confidence-low {
+    color: #475467;
+    background: #eef2f6;
+}
+
 </style>
 
 <script>
@@ -6581,7 +6643,106 @@ def dashboard_html():
         else:
             page = health + page
 
-    if "</body>" in page:
+    if "
+<script id="ll-confidence-badge-script">
+document.addEventListener("DOMContentLoaded", function () {
+
+    document.querySelectorAll("tbody tr").forEach(function (row) {
+
+        const cells = row.children;
+
+        /*
+         * Image
+         * Listing
+         * Age
+         * Price
+         * Undervaluation
+         * Score
+         * Confidence
+         */
+        if (cells.length < 7) return;
+
+        const cell = cells[6];
+
+        if (
+            cell.querySelector(
+                ".confidence-badge"
+            )
+        ) {
+            return;
+        }
+
+        const walker =
+            document.createTreeWalker(
+                cell,
+                NodeFilter.SHOW_TEXT
+            );
+
+        let node;
+
+        while (
+            (node = walker.nextNode())
+        ) {
+
+            const value =
+                node.nodeValue || "";
+
+            const match =
+                value.match(
+                    /^\s*(HIGH|MEDIUM|LOW)\b/
+                );
+
+            if (!match) {
+                continue;
+            }
+
+            const level =
+                match[1];
+
+            const badge =
+                document.createElement(
+                    "span"
+                );
+
+            badge.className =
+                "confidence-badge "
+                + "confidence-"
+                + level.toLowerCase();
+
+            badge.textContent =
+                level;
+
+            const remaining =
+                value.slice(
+                    match[0].length
+                );
+
+            const fragment =
+                document.createDocumentFragment();
+
+            fragment.appendChild(
+                badge
+            );
+
+            if (remaining) {
+                fragment.appendChild(
+                    document.createTextNode(
+                        remaining
+                    )
+                );
+            }
+
+            node.parentNode.replaceChild(
+                fragment,
+                node
+            );
+
+            break;
+        }
+    });
+});
+</script>
+</body>" in page:
         page = page.replace(
             "</body>",
             _DASHBOARD_UI_ENHANCEMENT
@@ -6815,6 +6976,116 @@ def recheck_active_bin_listings(conn, token, maximum=ACTIVE_BIN_RECHECKS_PER_CYC
     return checked, inactivated
 
 
+
+# ============================================================
+# DASHBOARD IMAGE BACKFILL
+# ============================================================
+
+def backfill_dashboard_images(
+    conn,
+    token,
+    maximum=IMAGE_BACKFILL_PER_CYCLE
+):
+    """
+    Fetch primary eBay images only for listings currently
+    eligible to appear on the deal dashboard.
+
+    Does not change classifier state or valuation state.
+    """
+
+    rows = conn.execute("""
+        SELECT item_id
+        FROM listings
+        WHERE COALESCE(active, 1) = 1
+          AND estimated_value IS NOT NULL
+          AND deal_score > 0
+          AND undervaluation_gbp >= ?
+          AND (
+                image_url IS NULL
+                OR trim(image_url) = ''
+              )
+        ORDER BY
+            deal_score DESC,
+            undervaluation_gbp DESC,
+            first_seen DESC
+        LIMIT ?
+    """, (
+        MIN_UNDERVALUE_GBP,
+        maximum
+    )).fetchall()
+
+    if not rows:
+        return 0
+
+    updated = 0
+
+    for row in rows:
+
+        if not can_detail(conn):
+            break
+
+        try:
+            detail = get_item(
+                conn,
+                token,
+                row["item_id"]
+            )
+
+        except Exception as exc:
+            print(
+                "Dashboard image backfill:",
+                row["item_id"],
+                type(exc).__name__,
+                str(exc)[:160]
+            )
+            continue
+
+        image_url = (
+            (detail.get("image") or {})
+            .get("imageUrl")
+            or
+            (
+                (
+                    (
+                        detail.get(
+                            "thumbnailImages"
+                        )
+                        or [{}]
+                    )[0]
+                    or {}
+                )
+                .get("imageUrl")
+            )
+        )
+
+        if not image_url:
+            continue
+
+        conn.execute(
+            """
+            UPDATE listings
+            SET image_url=?
+            WHERE item_id=?
+            """,
+            (
+                image_url,
+                row["item_id"]
+            )
+        )
+
+        updated += 1
+
+    if updated:
+        conn.commit()
+
+    print(
+        "Dashboard image backfill: "
+        f"{updated}/{len(rows)} populated"
+    )
+
+    return updated
+
+
 # ============================================================
 # ACTIVE LISTING HOUSEKEEPING
 # ============================================================
@@ -7023,6 +7294,11 @@ def run_cycle(
         conn
     )
 
+    backfill_dashboard_images(
+        conn,
+        token
+    )
+
     total_api = browse_usage_today(
         conn
     )
@@ -7139,7 +7415,7 @@ def main():
     migration_conn.close()
 
     print(
-        f"eBay Laptop Hunter "
+        f"Laptop Lander "
         f"v{APP_VERSION}"
     )
 
