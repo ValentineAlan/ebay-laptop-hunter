@@ -50,7 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.12"
+APP_VERSION = "0.9.13"
 CLASSIFIER_VERSION = "0.8.2"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -6301,17 +6301,991 @@ def _dashboard_html_base():
     """
 
 
+
+def _site_nav(active="deals"):
+    deals_class = " active" if active == "deals" else ""
+    diagnostics_class = " active" if active == "diagnostics" else ""
+
+    return f"""
+    <nav class="site-nav">
+        <a class="{deals_class}" href="/">Deals</a>
+        <a class="{diagnostics_class}" href="/diagnostics">Diagnostics</a>
+    </nav>
+    """
+
+
+def diagnostics_html():
+    conn = connect_db()
+
+    def scalar(sql, params=()):
+        row = conn.execute(sql, params).fetchone()
+
+        if not row:
+            return 0
+
+        value = row[0]
+
+        return 0 if value is None else value
+
+    def safe_scalar(sql, params=(), default=0):
+        try:
+            return scalar(sql, params)
+        except Exception:
+            return default
+
+    def safe_rows(sql, params=()):
+        try:
+            return conn.execute(
+                sql,
+                params
+            ).fetchall()
+        except Exception:
+            return []
+
+    def stat_card(label, value, note=""):
+        return (
+            '<div class="stat-card">'
+            f'<div class="stat-label">{html.escape(str(label))}</div>'
+            f'<div class="stat-value">{html.escape(str(value))}</div>'
+            + (
+                f'<div class="stat-note">{html.escape(str(note))}</div>'
+                if note
+                else ""
+            )
+            + '</div>'
+        )
+
+    def table_rows(items):
+        if not items:
+            return (
+                "<tr>"
+                "<td colspan='2' class='muted'>No data</td>"
+                "</tr>"
+            )
+
+        output = []
+
+        for key, value in items:
+            output.append(
+                "<tr>"
+                f"<td>{html.escape(str(key))}</td>"
+                f"<td class='number'>{html.escape(str(value))}</td>"
+                "</tr>"
+            )
+
+        return "".join(output)
+
+    total_all = safe_scalar(
+        "SELECT COUNT(*) FROM listings"
+    )
+
+    active_total = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+        """
+    )
+
+    inactive_total = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=0
+        """
+    )
+
+    valued = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND estimated_value IS NOT NULL
+        """
+    )
+
+    unvalued = max(
+        0,
+        active_total - valued
+    )
+
+    scored = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND deal_score > 0
+        """
+    )
+
+    qualifying = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND estimated_value IS NOT NULL
+          AND undervaluation_gbp >= ?
+          AND undervaluation_pct >= ?
+        """,
+        (
+            MIN_UNDERVALUE_GBP,
+            MIN_UNDERVALUE_PCT,
+        )
+    )
+
+    auctions = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND buying_options LIKE '%"AUCTION"%'
+        """
+    )
+
+    fixed_price = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND (
+              buying_options LIKE '%"FIXED_PRICE"%'
+              OR buying_options LIKE '%"BUY_IT_NOW"%'
+              OR buying_options LIKE '%"BEST_OFFER"%'
+          )
+        """
+    )
+
+    reanalysis = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND valuation_basis='REANALYSIS_REQUIRED'
+        """
+    )
+
+    incomplete = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND valuation_basis='INCOMPLETE_IDENTITY_OR_SPEC'
+        """
+    )
+
+    condition_review = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND valuation_basis='CONDITION_REQUIRES_REVIEW'
+        """
+    )
+
+    active_fallback = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND valuation_basis LIKE 'ACTIVE_FALLBACK:%'
+        """
+    )
+
+    unknown_cost = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND valuation_basis='UNKNOWN_DELIVERED_COST'
+        """
+    )
+
+    missing_brand = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND valuation_basis='INCOMPLETE_IDENTITY_OR_SPEC'
+          AND (brand IS NULL OR trim(brand)='')
+        """
+    )
+
+    missing_model = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND valuation_basis='INCOMPLETE_IDENTITY_OR_SPEC'
+          AND (model IS NULL OR trim(model)='')
+        """
+    )
+
+    missing_cpu = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND valuation_basis='INCOMPLETE_IDENTITY_OR_SPEC'
+          AND (cpu IS NULL OR trim(cpu)='')
+        """
+    )
+
+    missing_ram = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND valuation_basis='INCOMPLETE_IDENTITY_OR_SPEC'
+          AND ram_gb IS NULL
+        """
+    )
+
+    missing_storage = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND valuation_basis='INCOMPLETE_IDENTITY_OR_SPEC'
+          AND storage_gb IS NULL
+        """
+    )
+
+    api_used = browse_usage_today(conn)
+
+    api_remaining = max(
+        0,
+        DAILY_SAFETY_LIMIT - api_used
+    )
+
+    normal_budget_remaining = max(
+        0,
+        DAILY_SAFETY_LIMIT
+        - EMERGENCY_RESERVE
+        - api_used
+    )
+
+    image_backfill_used = operation_usage(
+        conn,
+        "IMAGE_BACKFILL"
+    )
+
+    search_calls = operation_usage(
+        conn,
+        "SEARCH"
+    )
+
+    get_item_calls = operation_usage(
+        conn,
+        "GET_ITEM"
+    )
+
+    try:
+        cooldown = ebay_rate_limit_remaining()
+    except Exception:
+        cooldown = 0
+
+    try:
+        session = _read_json_file(
+            PRODUCT_RESEARCH_SESSION_STATE
+        ) or {}
+    except Exception:
+        session = {}
+
+    try:
+        helper = _read_json_file(
+            PRODUCT_RESEARCH_HELPER_STATE
+        ) or {}
+    except Exception:
+        helper = {}
+
+    session_status = session.get(
+        "status",
+        "UNKNOWN"
+    )
+
+    helper_status = helper.get(
+        "status",
+        "UNKNOWN"
+    )
+
+    latest_seen = safe_scalar(
+        """
+        SELECT MAX(last_seen)
+        FROM listings
+        """,
+        default="—"
+    ) or "—"
+
+    latest_research = safe_scalar(
+        """
+        SELECT MAX(valuation_research_at)
+        FROM listings
+        """,
+        default="—"
+    ) or "—"
+
+    latest_availability = safe_scalar(
+        """
+        SELECT MAX(availability_checked_at)
+        FROM listings
+        """,
+        default="—"
+    ) or "—"
+
+    never_availability_checked = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND availability_checked_at IS NULL
+        """
+    )
+
+    recently_inactive = safe_scalar(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE COALESCE(active,1)=0
+          AND inactive_since >= datetime('now', '-24 hours')
+        """
+    )
+
+    valuation_basis_rows = safe_rows(
+        """
+        SELECT
+            COALESCE(valuation_basis, 'NO_VALUATION_BASIS') AS basis,
+            COUNT(*) AS n
+        FROM listings
+        WHERE COALESCE(active,1)=1
+        GROUP BY COALESCE(valuation_basis, 'NO_VALUATION_BASIS')
+        ORDER BY n DESC
+        """
+    )
+
+    valuation_basis_items = [
+        (
+            row["basis"],
+            row["n"]
+        )
+        for row in valuation_basis_rows
+    ]
+
+    classifier_rows = safe_rows(
+        """
+        SELECT
+            COALESCE(classifier_version, 'NULL') AS version,
+            COUNT(*) AS n
+        FROM listings
+        WHERE COALESCE(active,1)=1
+        GROUP BY COALESCE(classifier_version, 'NULL')
+        ORDER BY n DESC
+        """
+    )
+
+    classifier_items = [
+        (
+            row["version"],
+            row["n"]
+        )
+        for row in classifier_rows
+    ]
+
+    capability_rows = safe_rows(
+        """
+        SELECT
+            capability || ' / ' || status AS label,
+            COUNT(*) AS n
+        FROM capability_queue
+        GROUP BY capability, status
+        ORDER BY capability, status
+        """
+    )
+
+    capability_items = [
+        (
+            row["label"],
+            row["n"]
+        )
+        for row in capability_rows
+    ]
+
+    sold_search_rows = safe_rows(
+        """
+        SELECT
+            COALESCE(status, 'UNKNOWN') AS status,
+            COUNT(*) AS n
+        FROM sold_searches
+        GROUP BY COALESCE(status, 'UNKNOWN')
+        ORDER BY n DESC
+        """
+    )
+
+    sold_search_items = [
+        (
+            row["status"],
+            row["n"]
+        )
+        for row in sold_search_rows
+    ]
+
+    sold_comparables = safe_scalar(
+        "SELECT COUNT(*) FROM sold_comparables"
+    )
+
+    sold_search_total = safe_scalar(
+        "SELECT COUNT(*) FROM sold_searches"
+    )
+
+    migration_rows = safe_rows(
+        """
+        SELECT migration_key, applied_at
+        FROM app_migrations
+        ORDER BY applied_at DESC
+        LIMIT 10
+        """
+    )
+
+    migration_html = ""
+
+    if migration_rows:
+        migration_html = "".join(
+            (
+                "<tr>"
+                f"<td>{html.escape(str(row['migration_key']))}</td>"
+                f"<td>{html.escape(str(row['applied_at']))}</td>"
+                "</tr>"
+            )
+            for row in migration_rows
+        )
+    else:
+        migration_html = (
+            "<tr><td colspan='2' class='muted'>No migrations recorded</td></tr>"
+        )
+
+    session_items = [
+        ("Status", session_status),
+        (
+            "Last checked",
+            relative_age(
+                session.get("last_checked_at")
+            )
+        ),
+        (
+            "Last success",
+            relative_age(
+                session.get("last_success_at")
+            )
+        ),
+        (
+            "Last refresh",
+            relative_age(
+                session.get("last_refresh_at")
+            )
+        ),
+    ]
+
+    helper_items = [
+        ("Status", helper_status),
+        (
+            "Last seen",
+            relative_age(
+                helper.get("last_seen_at")
+            )
+        ),
+        (
+            "Page",
+            helper.get("page_title")
+            or "—"
+        ),
+        (
+            "URL",
+            helper.get("page_url")
+            or "—"
+        ),
+    ]
+
+    queue_items = [
+        ("REANALYSIS_REQUIRED", reanalysis),
+        ("INCOMPLETE_IDENTITY_OR_SPEC", incomplete),
+        ("CONDITION_REQUIRES_REVIEW", condition_review),
+        ("ACTIVE_FALLBACK", active_fallback),
+        ("UNKNOWN_DELIVERED_COST", unknown_cost),
+    ]
+
+    missing_items = [
+        ("Missing brand", missing_brand),
+        ("Missing model", missing_model),
+        ("Missing CPU", missing_cpu),
+        ("Missing RAM", missing_ram),
+        ("Missing storage", missing_storage),
+    ]
+
+    api_items = [
+        ("Browse API calls today", api_used),
+        ("Daily safety limit", DAILY_SAFETY_LIMIT),
+        ("Calls remaining", api_remaining),
+        ("Normal budget remaining", normal_budget_remaining),
+        ("Emergency reserve", EMERGENCY_RESERVE),
+        ("SEARCH", search_calls),
+        ("GET_ITEM", get_item_calls),
+        ("IMAGE_BACKFILL", image_backfill_used),
+        (
+            "Image allowance",
+            IMAGE_BACKFILL_DAILY_ALLOWANCE
+        ),
+        (
+            "429 cooldown",
+            (
+                f"{int(cooldown)}s remaining"
+                if cooldown > 0
+                else "Clear"
+            )
+        ),
+    ]
+
+    maintenance_items = [
+        ("Latest listing seen", latest_seen),
+        ("Latest valuation research", latest_research),
+        ("Latest availability check", latest_availability),
+        (
+            "Active listings never availability checked",
+            never_availability_checked
+        ),
+        ("Listings made inactive in last 24h", recently_inactive),
+    ]
+
+    status_class = (
+        "good"
+        if str(session_status).upper() == "WORKING"
+        else "bad"
+    )
+
+    helper_class = (
+        "good"
+        if str(helper_status).upper()
+        in ("CONNECTED", "WORKING", "OK")
+        else "warn"
+    )
+
+    usage_pct = (
+        (api_used / DAILY_SAFETY_LIMIT) * 100
+        if DAILY_SAFETY_LIMIT
+        else 0
+    )
+
+    html_page = f"""<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="refresh" content="60">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Laptop Lander Diagnostics</title>
+
+    <style>
+        * {{
+            box-sizing: border-box;
+        }}
+
+        body {{
+            margin: 0;
+            background: #f4f7fb;
+            color: #172033;
+            font-family:
+                Inter,
+                ui-sans-serif,
+                system-ui,
+                -apple-system,
+                BlinkMacSystemFont,
+                "Segoe UI",
+                sans-serif;
+        }}
+
+        .page {{
+            max-width: 1500px;
+            margin: 0 auto;
+            padding: 22px;
+        }}
+
+        .top {{
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 20px;
+            margin-bottom: 18px;
+        }}
+
+        h1 {{
+            margin: 0;
+            font-size: 28px;
+        }}
+
+        .subtitle {{
+            margin-top: 5px;
+            color: #667085;
+        }}
+
+        .version {{
+            text-align: right;
+            color: #667085;
+            font-size: 13px;
+        }}
+
+        .site-nav {{
+            display: flex;
+            gap: 8px;
+            margin: 0 0 18px;
+        }}
+
+        .site-nav a {{
+            text-decoration: none;
+            color: #344054;
+            background: #fff;
+            border: 1px solid #d0d5dd;
+            border-radius: 9px;
+            padding: 8px 13px;
+            font-weight: 600;
+        }}
+
+        .site-nav a.active {{
+            color: #fff;
+            background: #2563eb;
+            border-color: #2563eb;
+        }}
+
+        .stats {{
+            display: grid;
+            grid-template-columns:
+                repeat(auto-fit, minmax(165px, 1fr));
+            gap: 12px;
+            margin-bottom: 18px;
+        }}
+
+        .stat-card,
+        .panel {{
+            background: #fff;
+            border: 1px solid #e4e7ec;
+            border-radius: 13px;
+            box-shadow: 0 2px 7px rgba(16, 24, 40, .05);
+        }}
+
+        .stat-card {{
+            padding: 15px;
+        }}
+
+        .stat-label {{
+            color: #667085;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: .04em;
+        }}
+
+        .stat-value {{
+            font-size: 27px;
+            font-weight: 700;
+            margin-top: 5px;
+        }}
+
+        .stat-note {{
+            color: #98a2b3;
+            margin-top: 4px;
+            font-size: 12px;
+        }}
+
+        .grid {{
+            display: grid;
+            grid-template-columns:
+                repeat(auto-fit, minmax(390px, 1fr));
+            gap: 16px;
+        }}
+
+        .panel {{
+            overflow: hidden;
+        }}
+
+        .panel h2 {{
+            margin: 0;
+            padding: 14px 17px;
+            font-size: 17px;
+            background: #f9fafb;
+            border-bottom: 1px solid #eaecf0;
+        }}
+
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+        }}
+
+        th,
+        td {{
+            padding: 9px 15px;
+            text-align: left;
+            border-bottom: 1px solid #f0f2f5;
+            vertical-align: top;
+        }}
+
+        th {{
+            color: #667085;
+            font-size: 12px;
+            text-transform: uppercase;
+        }}
+
+        td {{
+            font-size: 14px;
+        }}
+
+        td.number {{
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            font-weight: 600;
+        }}
+
+        tr:last-child td {{
+            border-bottom: 0;
+        }}
+
+        .good {{
+            color: #067647;
+            font-weight: 700;
+        }}
+
+        .warn {{
+            color: #b54708;
+            font-weight: 700;
+        }}
+
+        .bad {{
+            color: #b42318;
+            font-weight: 700;
+        }}
+
+        .muted {{
+            color: #98a2b3;
+        }}
+
+        .progress {{
+            height: 12px;
+            overflow: hidden;
+            background: #eaecf0;
+            border-radius: 999px;
+            margin: 12px 15px 15px;
+        }}
+
+        .progress > div {{
+            height: 100%;
+            width: {min(100, usage_pct):.1f}%;
+            background: #2563eb;
+        }}
+
+        .status-line {{
+            padding: 12px 15px 0;
+            font-size: 14px;
+        }}
+
+        @media (max-width: 700px) {{
+            .page {{
+                padding: 12px;
+            }}
+
+            .top {{
+                display: block;
+            }}
+
+            .version {{
+                margin-top: 8px;
+                text-align: left;
+            }}
+
+            .grid {{
+                grid-template-columns: 1fr;
+            }}
+        }}
+    </style>
+</head>
+
+<body>
+<div class="page">
+
+    {_site_nav("diagnostics")}
+
+    <div class="top">
+        <div>
+            <h1>Laptop Lander Diagnostics</h1>
+            <div class="subtitle">
+                Live operational state — refreshes every 60 seconds
+            </div>
+        </div>
+
+        <div class="version">
+            App v{html.escape(str(APP_VERSION))}<br>
+            Classifier v{html.escape(str(CLASSIFIER_VERSION))}<br>
+            {html.escape(utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"))}
+        </div>
+    </div>
+
+    <div class="stats">
+        {stat_card("Active listings", active_total)}
+        {stat_card("Valued", valued,
+                   f"{(valued / active_total * 100):.1f}% of active" if active_total else "0%")}
+        {stat_card("Unvalued", unvalued)}
+        {stat_card("Reanalysis queue", reanalysis)}
+        {stat_card("Scored deals", scored)}
+        {stat_card("Qualifying value gaps", qualifying)}
+        {stat_card("Auctions", auctions)}
+        {stat_card("Fixed price", fixed_price)}
+    </div>
+
+    <div class="grid">
+
+        <section class="panel">
+            <h2>Valuation pipeline</h2>
+            <table>
+                {table_rows(queue_items)}
+            </table>
+        </section>
+
+        <section class="panel">
+            <h2>Incomplete specification</h2>
+            <table>
+                {table_rows(missing_items)}
+            </table>
+        </section>
+
+        <section class="panel">
+            <h2>Valuation basis — active listings</h2>
+            <table>
+                {table_rows(valuation_basis_items)}
+            </table>
+        </section>
+
+        <section class="panel">
+            <h2>Classifier versions — active listings</h2>
+            <table>
+                {table_rows(classifier_items)}
+            </table>
+        </section>
+
+        <section class="panel">
+            <h2>eBay API budget</h2>
+            <div class="status-line">
+                Usage:
+                <strong>{api_used:,} / {DAILY_SAFETY_LIMIT:,}</strong>
+                ({usage_pct:.1f}%)
+            </div>
+            <div class="progress"><div></div></div>
+            <table>
+                {table_rows(api_items)}
+            </table>
+        </section>
+
+        <section class="panel">
+            <h2>Product Research session</h2>
+            <div class="status-line {status_class}">
+                {html.escape(str(session_status))}
+            </div>
+            <table>
+                {table_rows(session_items)}
+            </table>
+        </section>
+
+        <section class="panel">
+            <h2>Chromium session helper</h2>
+            <div class="status-line {helper_class}">
+                {html.escape(str(helper_status))}
+            </div>
+            <table>
+                {table_rows(helper_items)}
+            </table>
+        </section>
+
+        <section class="panel">
+            <h2>Product Research cache</h2>
+            <table>
+                {table_rows(
+                    [
+                        ("Search cache rows", sold_search_total),
+                        ("Sold comparable rows", sold_comparables),
+                    ]
+                    + sold_search_items
+                )}
+            </table>
+        </section>
+
+        <section class="panel">
+            <h2>Capability queues</h2>
+            <table>
+                {table_rows(capability_items)}
+            </table>
+        </section>
+
+        <section class="panel">
+            <h2>Maintenance / freshness</h2>
+            <table>
+                {table_rows(maintenance_items)}
+            </table>
+        </section>
+
+        <section class="panel">
+            <h2>Database</h2>
+            <table>
+                {table_rows([
+                    ("All listings", total_all),
+                    ("Active listings", active_total),
+                    ("Inactive listings", inactive_total),
+                    ("Valued active", valued),
+                    ("Unvalued active", unvalued),
+                ])}
+            </table>
+        </section>
+
+        <section class="panel">
+            <h2>Recent migrations</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Migration</th>
+                        <th>Applied</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {migration_html}
+                </tbody>
+            </table>
+        </section>
+
+    </div>
+</div>
+</body>
+</html>
+"""
+
+    conn.close()
+
+    return html_page
+
+
 class DashboardHandler(
     BaseHTTPRequestHandler
 ):
 
     def do_GET(self):
 
-        if self.path not in (
+        path = urllib.parse.urlparse(
+            self.path
+        ).path
+
+        if path in (
             "/",
             "/index.html"
         ):
+            page = dashboard_html()
 
+        elif path in (
+            "/diagnostics",
+            "/diagnostics/"
+        ):
+            page = diagnostics_html()
+
+        else:
             self.send_response(
                 404
             )
@@ -6320,7 +7294,7 @@ class DashboardHandler(
 
             return
 
-        content = dashboard_html().encode(
+        content = page.encode(
             "utf-8"
         )
 
@@ -6490,6 +7464,28 @@ def _dashboard_health_alert():
 
 _DASHBOARD_UI_ENHANCEMENT = r"""
 <style>
+.site-nav {
+    display: flex;
+    gap: 8px;
+    margin: 14px 18px 4px;
+}
+
+.site-nav a {
+    text-decoration: none;
+    color: #344054;
+    background: #fff;
+    border: 1px solid #d0d5dd;
+    border-radius: 9px;
+    padding: 8px 13px;
+    font-weight: 600;
+}
+
+.site-nav a.active {
+    color: #fff;
+    background: #2563eb;
+    border-color: #2563eb;
+}
+
 .system-health-alert {
     margin: 12px;
     padding: 14px 18px;
@@ -7376,6 +8372,23 @@ def dashboard_html():
         )
     else:
         page += _DASHBOARD_UI_ENHANCEMENT
+
+    nav = _site_nav("deals")
+
+    body_pos = page.lower().find("<body")
+
+    if body_pos >= 0:
+        close = page.find(
+            ">",
+            body_pos
+        )
+
+        if close >= 0:
+            page = (
+                page[:close + 1]
+                + nav
+                + page[close + 1:]
+            )
 
     return page
 
