@@ -50,7 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.15"
+APP_VERSION = "0.9.16"
 CLASSIFIER_VERSION = "0.8.2"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -506,6 +506,18 @@ def init_db():
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_sold_cpu
         ON sold_comparables (cpu, ram_gb, storage_gb)
+    """)
+
+    # Capability verification queues are no longer used:
+    # Windows 11 suitability comes directly from CPU assessment and USB-C PD
+    # is no longer a qualification requirement.
+    conn.execute("""
+        DELETE FROM capability_queue
+        WHERE status='PENDING'
+          AND capability IN (
+              'USB_C_PD',
+              'WIN11_APPROVED'
+          )
     """)
 
     conn.commit()
@@ -2235,61 +2247,62 @@ def cached_win11_capability(conn, cpu_name):
     }
 
 
+
 def queue_win11_verification(conn, cpu):
-    name = cpu.get("name") if cpu else None
-    key = cpu_capability_key(name)
-    if not key:
-        return
-    capability_key_value = "win11:" + key
-    now = iso_now()
-    conn.execute("""
-        INSERT INTO capability_queue(
-            capability_key, brand, model, capability, status,
-            attempts, first_seen
-        )
-        VALUES (?, NULL, ?, 'WIN11_APPROVED', 'PENDING', 0, ?)
-        ON CONFLICT(capability_key) DO NOTHING
-    """, (capability_key_value, name, now))
-    conn.commit()
+    """
+    Retained as a compatibility no-op.
+
+    Windows 11 suitability is determined from the detected CPU. We no longer
+    require a separate verification queue for this application's purpose.
+    """
+    return
+
 
 
 def win11_approved_assessment(conn, cpu):
     """
-    'Approved' means supported hardware eligibility, not merely that a seller
-    has installed Windows 11. Cached Microsoft-backed determinations are
-    VERIFIED. Existing CPU-generation logic is retained as inferred evidence.
+    Determine whether the detected CPU is modern enough for this application.
+
+    Existing exact cached CPU determinations are accepted when available.
+    Otherwise the local CPU support rule is authoritative; no verification
+    queue is created.
     """
     name = cpu.get("name") if cpu else None
-    cached = cached_win11_capability(conn, name)
+
+    cached = cached_win11_capability(
+        conn,
+        name
+    )
+
     if cached:
         return cached
 
     inferred = windows11_assessment(cpu)
 
     if inferred is True:
-        queue_win11_verification(conn, cpu)
         return {
             "value": True,
-            "confidence": "PROBABLE",
+            "confidence": "HIGH",
             "source": "CPU_SUPPORT_RULE",
-            "evidence": "CPU family/generation indicates Windows 11 support; exact CPU verification pending",
+            "evidence":
+                "Detected CPU family/generation is considered Windows 11 capable",
         }
 
     if inferred is False:
-        queue_win11_verification(conn, cpu)
         return {
             "value": False,
-            "confidence": "PROBABLE",
+            "confidence": "HIGH",
             "source": "CPU_SUPPORT_RULE",
-            "evidence": "CPU family/generation indicates it is outside supported Windows 11 CPU generations; exact CPU verification pending",
+            "evidence":
+                "Detected CPU family/generation is outside the Windows 11 capable range",
         }
 
-    queue_win11_verification(conn, cpu)
     return {
         "value": None,
         "confidence": "UNKNOWN",
-        "source": "UNVERIFIED_CPU",
-        "evidence": "Exact Windows 11 approved CPU status has not yet been verified",
+        "source": "CPU_NOT_IDENTIFIED_OR_UNRESOLVED",
+        "evidence":
+            "Windows 11 capability could not be inferred from the detected CPU",
     }
 
 
@@ -2391,135 +2404,40 @@ def cached_usb_c_capability(conn, brand, model):
     }
 
 
-def queue_capability_verification(conn, brand, model):
-    """Queue a precise unknown model; no web scraping is performed here."""
-    key = capability_key(brand, model)
-    if not key or not precise_model_for_capability(brand, model):
-        return
 
-    now = iso_now()
-    conn.execute("""
-        INSERT INTO capability_queue(
-            capability_key, brand, model, capability, status,
-            attempts, first_seen
-        )
-        VALUES (?, ?, ?, 'USB_C_PD', 'PENDING', 0, ?)
-        ON CONFLICT(capability_key) DO NOTHING
-    """, (key, brand, model, now))
-    conn.commit()
+def queue_capability_verification(conn, brand, model):
+    """
+    Compatibility no-op.
+
+    USB-C PD is no longer a requirement for deal qualification and is not
+    researched or queued.
+    """
+    return
+
 
 
 def usb_c_pd_assessment(conn, brand, model, text, detail):
     """
-    Evidence hierarchy:
-      1. cached verified model capability
-      2. explicit item-specific charging / power-input evidence
-      3. explicit listing charging language
-      4. known model-family hint (PROBABLE, not VERIFIED)
-      5. UNKNOWN + verification queue
+    USB-C PD is no longer a qualification requirement.
 
-    Thunderbolt presence alone is deliberately NOT proof of charging input.
+    Retain an already cached capability when one exists, otherwise return
+    UNKNOWN without performing or scheduling any further capability research.
     """
-    cached = cached_usb_c_capability(conn, brand, model)
+    cached = cached_usb_c_capability(
+        conn,
+        brand,
+        model
+    )
+
     if cached:
         return cached
 
-    aspects = aspects_dict(detail)
-
-    # Strong item-specific evidence. We require charging/input semantics,
-    # not merely "USB Type-C" or Thunderbolt.
-    aspect_lines = []
-    for name, values in aspects.items():
-        for value in values:
-            aspect_lines.append(f"{name}: {value}")
-    aspect_text = normalise(" ".join(aspect_lines))
-
-    explicit_positive = [
-        r"\bUSB[- ]?C\s+(?:PD|Power Delivery|Charging)\b",
-        r"\bUSB\s+Type[- ]?C\s+(?:PD|Power Delivery|Charging)\b",
-        r"\bcharge[sd]?\s+(?:via|through|over|with)\s+USB[- ]?C\b",
-        r"\bUSB[- ]?C\s+charger\b",
-        r"\bAC\s+adapter\b.{0,50}\bUSB\s*(?:Type[- ]?)?C\b",
-        r"\bpower\s+(?:input|connector|adapter)\b.{0,50}\bUSB\s*(?:Type[- ]?)?C\b",
-    ]
-    explicit_negative = [
-        r"\bdoes\s+not\s+charge\s+(?:via|through|over)\s+USB[- ]?C\b",
-        r"\bno\s+USB[- ]?C\s+charging\b",
-        r"\bUSB[- ]?C\s+(?:is\s+)?(?:data|display)\s+only\b",
-    ]
-
-    for pattern in explicit_negative:
-        m = re.search(pattern, aspect_text, re.I)
-        if m:
-            return {
-                "value": False,
-                "confidence": "HIGH",
-                "source": "EBAY_ITEM_SPECIFICS",
-                "evidence": normalise(m.group(0)),
-                "watts": None,
-            }
-
-    for pattern in explicit_positive:
-        m = re.search(pattern, aspect_text, re.I)
-        if m:
-            watts = None
-            wm = re.search(r"\b(\d{2,3})\s*W\b", aspect_text, re.I)
-            if wm:
-                watts = int(wm.group(1))
-            return {
-                "value": True,
-                "confidence": "HIGH",
-                "source": "EBAY_ITEM_SPECIFICS",
-                "evidence": normalise(m.group(0)),
-                "watts": watts,
-            }
-
-    for pattern in explicit_negative:
-        m = re.search(pattern, text, re.I)
-        if m:
-            return {
-                "value": False,
-                "confidence": "MEDIUM",
-                "source": "EBAY_LISTING_TEXT",
-                "evidence": normalise(m.group(0)),
-                "watts": None,
-            }
-
-    for pattern in explicit_positive:
-        m = re.search(pattern, text, re.I)
-        if m:
-            watts = None
-            wm = re.search(r"\b(\d{2,3})\s*W\b", text, re.I)
-            if wm:
-                watts = int(wm.group(1))
-            return {
-                "value": True,
-                "confidence": "MEDIUM",
-                "source": "EBAY_LISTING_TEXT",
-                "evidence": normalise(m.group(0)),
-                "watts": watts,
-            }
-
-    # Thunderbolt 3/4 is intentionally only contextual evidence now.
-    # A known family match is PROBABLE and must not masquerade as VERIFIED.
-    model_text = normalise(f"{brand or ''} {model or ''}")
-    for pattern in USB_PD_MODELS:
-        if re.search(pattern, model_text, re.I):
-            queue_capability_verification(conn, brand, model)
-            return {
-                "value": True,
-                "confidence": "PROBABLE",
-                "source": "KNOWN_MODEL_FAMILY",
-                "evidence": "Known USB-C-charging family; manufacturer verification pending",
-                "watts": None,
-            }
-
-    queue_capability_verification(conn, brand, model)
     return {
         "value": None,
-        "confidence": "UNKNOWN",
-        "source": "UNVERIFIED",
-        "evidence": "No reliable USB-C power-input evidence found",
+        "confidence": "NOT_REQUIRED",
+        "source": "NOT_REQUIRED",
+        "evidence":
+            "USB-C PD is not used for Laptop Lander deal qualification",
         "watts": None,
     }
 
@@ -5490,7 +5408,6 @@ def display_listing(item):
     )
 
     print(
-        "USB-C PD:",
         yesno(
             item["usbc_pd"]
         )
@@ -5745,20 +5662,6 @@ def _dashboard_html_base():
     api_calls = browse_usage_today(
         conn
     )
-
-    capability_pending = conn.execute("""
-        SELECT COUNT(*) AS n
-        FROM capability_queue
-        WHERE status='PENDING'
-          AND capability='USB_C_PD'
-    """).fetchone()["n"]
-
-    win11_pending = conn.execute("""
-        SELECT COUNT(*) AS n
-        FROM capability_queue
-        WHERE status='PENDING'
-          AND capability='WIN11_APPROVED'
-    """).fetchone()["n"]
 
 
     # Exact pipeline state using the same eligibility rules as valuation.
@@ -6138,7 +6041,6 @@ def _dashboard_html_base():
 
                     <div class="small confidence-meta">
                         Win 11: {win11_mark}
-                        · USB-C PD: {usbc_mark}
                         · Sales: {sales_total}
                         · Condition: {html.escape(row["status"] or "—")}
                     </div>
@@ -6859,28 +6761,15 @@ def diagnostics_html():
             )
 
 
-    usb_pd_queue_pending = safe_scalar(
+    win11_unresolved = safe_scalar(
         """
         SELECT COUNT(*)
-        FROM capability_queue
-        WHERE status='PENDING'
-          AND capability='USB_C_PD'
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND win11 IS NULL
         """
     )
 
-    win11_queue_pending = safe_scalar(
-        """
-        SELECT COUNT(*)
-        FROM capability_queue
-        WHERE status='PENDING'
-          AND capability='WIN11_APPROVED'
-        """
-    )
-
-    capability_pending_total = (
-        usb_pd_queue_pending
-        + win11_queue_pending
-    )
 
 
     try:
@@ -7532,6 +7421,34 @@ def diagnostics_html():
             )}
 
             {queue_card(
+                "Windows 11 CPU status",
+                win11_unresolved,
+                (
+                    (
+                        (active_total - win11_unresolved)
+                        / active_total
+                    ) * 100.0
+                    if active_total
+                    else 100.0
+                ),
+                (
+                    "Complete"
+                    if win11_unresolved == 0
+                    else "Resolved as listings are reanalysed"
+                ),
+                (
+                    f"{win11_unresolved:,} active listings do not yet have "
+                    f"a Windows 11 capability result from their detected CPU. "
+                    f"No separate verification queue is required."
+                ),
+                (
+                    "Complete"
+                    if win11_unresolved == 0
+                    else "Waiting"
+                )
+            )}
+
+            {queue_card(
                 "Dashboard image backfill",
                 image_queue_remaining,
                 image_progress_pct,
@@ -7544,36 +7461,6 @@ def diagnostics_html():
                     f"remaining in today's allowance."
                 ),
                 image_queue_state
-            )}
-
-            {queue_card(
-                "Capability lookups",
-                capability_pending_total,
-                (
-                    100.0
-                    if capability_pending_total == 0
-                    else 0.0
-                ),
-                (
-                    "Complete"
-                    if capability_pending_total == 0
-                    else
-                    "No reliable ETA yet"
-                ),
-                (
-                    f"USB-C PD pending: "
-                    f"{usb_pd_queue_pending:,}; "
-                    f"Windows 11 pending: "
-                    f"{win11_queue_pending:,}. "
-                    f"No percentage is inferred until "
-                    f"historical drain rate is available."
-                ),
-                (
-                    "Complete"
-                    if capability_pending_total == 0
-                    else
-                    "Working"
-                )
             )}
 
         </div>
