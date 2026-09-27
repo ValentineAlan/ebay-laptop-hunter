@@ -50,7 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.1"
+APP_VERSION = "0.9.2"
 CLASSIFIER_VERSION = "0.8.1"
 MIN_UNDERVALUE_GBP = 20.0
 
@@ -5369,7 +5369,7 @@ def _dashboard_html_base():
                         ]
                     )}
                     <div class="small">
-                    Comparable middle 50% (not a confidence interval)<br>
+                    <br>
                     {
                         (
                             money(
@@ -6543,6 +6543,464 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
+
+
+    // --------------------------------------------------------
+    // Compact table presentation
+    // --------------------------------------------------------
+
+    function cleanHeaderText() {
+        Array.from(headerRow.children).forEach(th => {
+
+            const text = th.textContent.trim();
+
+            if (text === "Delivered") {
+                th.textContent = "Price";
+            }
+
+            if (
+                text === "Apparent undervalue"
+                || text === "Apparent undervaluation"
+            ) {
+                th.textContent = "Undervaluation";
+            }
+        });
+    }
+
+    cleanHeaderText();
+
+
+    // --------------------------------------------------------
+    // Remove "eBay listed" repetition from Listing age.
+    // --------------------------------------------------------
+
+    let ageIndex = Array.from(
+        headerRow.children
+    ).findIndex(
+        th =>
+            th.textContent.trim() === "Listing age"
+            || th.textContent.trim() === "Age"
+    );
+
+    if (ageIndex >= 0) {
+
+        const ageHeader =
+            headerRow.children[ageIndex];
+
+        ageHeader.textContent = "Age";
+
+        Array.from(
+            body.querySelectorAll(":scope > tr")
+        ).forEach(row => {
+
+            const cell =
+                row.children[ageIndex];
+
+            if (!cell) {
+                return;
+            }
+
+            // Keep the visible relative age / NEW marker,
+            // remove repetitive label text.
+            cell.innerHTML =
+                cell.innerHTML
+                    .replace(
+                        /eBay listed\s*/gi,
+                        ""
+                    )
+                    .replace(
+                        /First seen\s*/gi,
+                        ""
+                    );
+        });
+    }
+
+
+    // --------------------------------------------------------
+    // Merge Model into specs line in Listing column.
+    // --------------------------------------------------------
+
+    let headersNow =
+        Array.from(headerRow.children);
+
+    const listingIndex =
+        headersNow.findIndex(
+            th =>
+                th.textContent.trim() === "Listing"
+        );
+
+    const modelIndex =
+        headersNow.findIndex(
+            th =>
+                th.textContent.trim() === "Model"
+        );
+
+    if (
+        listingIndex >= 0
+        && modelIndex >= 0
+    ) {
+
+        Array.from(
+            body.querySelectorAll(":scope > tr")
+        ).forEach(row => {
+
+            if (
+                row.children.length
+                !== headerRow.children.length
+            ) {
+                return;
+            }
+
+            const listingCell =
+                row.children[listingIndex];
+
+            const modelCell =
+                row.children[modelIndex];
+
+            if (
+                !listingCell
+                || !modelCell
+            ) {
+                return;
+            }
+
+            const model =
+                modelCell.textContent.trim();
+
+            if (
+                model
+                && model !== "—"
+            ) {
+
+                // Locate the existing specification line.
+                const smalls =
+                    listingCell.querySelectorAll(
+                        ".small"
+                    );
+
+                let specLine = null;
+
+                for (const el of smalls) {
+
+                    const text =
+                        el.textContent || "";
+
+                    if (
+                        /GB|RAM|SSD|HDD|NVMe|i[3579]-|Ryzen/i.test(
+                            text
+                        )
+                    ) {
+                        specLine = el;
+                        break;
+                    }
+                }
+
+                if (specLine) {
+
+                    const existing =
+                        specLine.textContent.trim();
+
+                    if (
+                        !existing
+                            .toLowerCase()
+                            .includes(
+                                model.toLowerCase()
+                            )
+                    ) {
+                        specLine.textContent =
+                            model
+                            + " / "
+                            + existing;
+                    }
+
+                } else {
+
+                    const line =
+                        document.createElement(
+                            "div"
+                        );
+
+                    line.className =
+                        "small";
+
+                    line.textContent =
+                        model;
+
+                    listingCell.appendChild(
+                        line
+                    );
+                }
+            }
+        });
+
+
+        // Remove Model column after copying its contents.
+        headerRow.children[
+            modelIndex
+        ].remove();
+
+        Array.from(
+            body.querySelectorAll(":scope > tr")
+        ).forEach(row => {
+
+            if (
+                row.children[modelIndex]
+            ) {
+                row.children[
+                    modelIndex
+                ].remove();
+            }
+        });
+    }
+
+
+    // --------------------------------------------------------
+    // Merge Value/reference + sold evidence tooltip into
+    // Undervaluation.
+    // --------------------------------------------------------
+
+    headersNow =
+        Array.from(headerRow.children);
+
+    let valueIndex =
+        headersNow.findIndex(
+            th =>
+                th.textContent.trim()
+                    .includes("Value")
+                || th.textContent.trim()
+                    .includes(
+                        "asking reference"
+                    )
+        );
+
+    let undervalueIndex =
+        headersNow.findIndex(
+            th =>
+                th.textContent.trim()
+                    === "Undervaluation"
+                || th.textContent.trim()
+                    .includes("undervalue")
+        );
+
+    let confidenceIndex =
+        headersNow.findIndex(
+            th =>
+                th.textContent.trim()
+                    === "Confidence"
+        );
+
+
+    if (
+        valueIndex >= 0
+        && undervalueIndex >= 0
+    ) {
+
+        Array.from(
+            body.querySelectorAll(":scope > tr")
+        ).forEach(row => {
+
+            if (
+                row.children.length
+                !== headerRow.children.length
+            ) {
+                return;
+            }
+
+            const valueCell =
+                row.children[valueIndex];
+
+            const underCell =
+                row.children[
+                    undervalueIndex
+                ];
+
+            const confidenceCell =
+                confidenceIndex >= 0
+                    ? row.children[
+                        confidenceIndex
+                    ]
+                    : null;
+
+            if (
+                !valueCell
+                || !underCell
+            ) {
+                return;
+            }
+
+
+            // Build one clean hover panel.
+            const hover =
+                document.createElement(
+                    "div"
+                );
+
+            hover.className =
+                "evidence-tooltip";
+
+
+            const valueText =
+                valueCell.textContent
+                    .replace(
+                        /Comparable middle 50%[^£]*/gi,
+                        ""
+                    )
+                    .replace(
+                        /not a confidence interval/gi,
+                        ""
+                    )
+                    .trim();
+
+
+            const valueBlock =
+                document.createElement(
+                    "div"
+                );
+
+            valueBlock.className =
+                "summary";
+
+            valueBlock.textContent =
+                valueText;
+
+            hover.appendChild(
+                valueBlock
+            );
+
+
+            // Move existing sold-evidence tooltip out of Confidence.
+            if (confidenceCell) {
+
+                const oldBadge =
+                    confidenceCell.querySelector(
+                        ".evidence-badge"
+                    );
+
+                if (oldBadge) {
+
+                    const oldTooltip =
+                        oldBadge.querySelector(
+                            ".evidence-tooltip"
+                        );
+
+                    if (oldTooltip) {
+
+                        Array.from(
+                            oldTooltip.children
+                        ).forEach(child => {
+
+                            hover.appendChild(
+                                child.cloneNode(
+                                    true
+                                )
+                            );
+                        });
+                    }
+
+
+                    // Replace "Sales: [badge]" with plain sales count.
+                    const count =
+                        oldBadge.childNodes.length
+                            ? (
+                                oldBadge.childNodes[0]
+                                    .textContent
+                                || "0"
+                            ).trim()
+                            : "0";
+
+                    oldBadge.replaceWith(
+                        document.createTextNode(
+                            count
+                        )
+                    );
+                }
+            }
+
+
+            // Wrap existing undervaluation text with hover trigger.
+            const wrapper =
+                document.createElement(
+                    "span"
+                );
+
+            wrapper.className =
+                "evidence-badge";
+
+            wrapper.style.minWidth =
+                "auto";
+
+            wrapper.style.padding =
+                "2px 6px";
+
+            wrapper.style.whiteSpace =
+                "nowrap";
+
+
+            while (
+                underCell.firstChild
+            ) {
+                wrapper.appendChild(
+                    underCell.firstChild
+                );
+            }
+
+            wrapper.appendChild(
+                hover
+            );
+
+            underCell.appendChild(
+                wrapper
+            );
+        });
+
+
+        // Remove standalone Value/reference column.
+        headerRow.children[
+            valueIndex
+        ].remove();
+
+        Array.from(
+            body.querySelectorAll(":scope > tr")
+        ).forEach(row => {
+
+            if (
+                row.children[valueIndex]
+            ) {
+                row.children[
+                    valueIndex
+                ].remove();
+            }
+        });
+    }
+
+
+    // --------------------------------------------------------
+    // Final header labels after column removal.
+    // --------------------------------------------------------
+
+    Array.from(
+        headerRow.children
+    ).forEach(th => {
+
+        const text =
+            th.textContent.trim();
+
+        if (text === "Delivered") {
+            th.textContent = "Price";
+        }
+
+        if (
+            text === "Apparent undervalue"
+            || text === "Apparent undervaluation"
+        ) {
+            th.textContent =
+                "Undervaluation";
+        }
+
+        if (text === "Listing age") {
+            th.textContent = "Age";
+        }
+    });
 
     // --------------------------------------------------------
     // Sorting
