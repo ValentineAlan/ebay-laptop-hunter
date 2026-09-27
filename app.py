@@ -6838,6 +6838,111 @@ def _dashboard_html_base():
         .auction-table td:nth-child(6) {{
             display: none;
         }}
+
+        /* ------------------------------------------------------
+           Deal table layout / alignment
+           ------------------------------------------------------ */
+
+        .deal-section table {{
+            width: 100%;
+            table-layout: fixed;
+            border-collapse: separate;
+            border-spacing: 0;
+        }}
+
+        .deal-section th {{
+            vertical-align: middle;
+            background: rgba(15, 23, 42, 0.028);
+            color: #344054;
+            font-size: 12px;
+            font-weight: 750;
+            letter-spacing: 0.025em;
+        }}
+
+        /* Image */
+        .deal-section th:nth-child(1),
+        .deal-section td:nth-child(1) {{
+            width: 8%;
+            text-align: center;
+        }}
+
+        /* Listing */
+        .deal-section th:nth-child(2),
+        .deal-section td:nth-child(2) {{
+            width: 40%;
+            text-align: left;
+        }}
+
+        /* Listing age / time left */
+        .deal-section th:nth-child(3),
+        .deal-section td:nth-child(3) {{
+            width: 10%;
+            text-align: left;
+            white-space: nowrap;
+        }}
+
+        /* Price / current bid */
+        .deal-section th:nth-child(4),
+        .deal-section td:nth-child(4) {{
+            width: 9%;
+            text-align: right;
+            white-space: nowrap;
+        }}
+
+        /* Saving / potential undervaluation */
+        .deal-section th:nth-child(5),
+        .deal-section td:nth-child(5) {{
+            width: 17%;
+            text-align: left;
+        }}
+
+        /* Score */
+        .deal-section th:nth-child(6),
+        .deal-section td:nth-child(6) {{
+            width: 7%;
+            text-align: center;
+            white-space: nowrap;
+        }}
+
+        /* Notes */
+        .deal-section th:nth-child(7),
+        .deal-section td:nth-child(7) {{
+            width: 9%;
+            text-align: left;
+        }}
+
+        /* Selective separators between major information groups. */
+        .deal-section th:nth-child(2),
+        .deal-section td:nth-child(2),
+
+        .deal-section th:nth-child(4),
+        .deal-section td:nth-child(4),
+
+        .deal-section th:nth-child(5),
+        .deal-section td:nth-child(5),
+
+        .deal-section th:nth-child(6),
+        .deal-section td:nth-child(6) {{
+            border-right: 1px solid rgba(15, 23, 42, 0.05);
+        }}
+
+        /* Gentle hover makes wide rows easier to track visually. */
+        .deal-section tbody tr {{
+            transition: background-color 120ms ease;
+        }}
+
+        .deal-section tbody tr:hover td {{
+            background-color: rgba(37, 99, 235, 0.04);
+        }}
+
+        /* Keep rounded table ends visually clean. */
+        .deal-section th:first-child {{
+            border-top-left-radius: 8px;
+        }}
+
+        .deal-section th:last-child {{
+            border-top-right-radius: 8px;
+        }}
     </style>
 
     <section class="deal-section">
