@@ -50,7 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.10"
+APP_VERSION = "0.9.11"
 CLASSIFIER_VERSION = "0.8.1"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -5378,6 +5378,55 @@ a {
 """
 
 
+
+def auction_time_left(value):
+    if not value:
+        return "—"
+
+    try:
+        end = datetime.fromisoformat(
+            str(value).replace("Z", "+00:00")
+        )
+
+        if end.tzinfo is None:
+            end = end.replace(
+                tzinfo=timezone.utc
+            )
+
+        seconds = int(
+            (
+                end.astimezone(timezone.utc)
+                - utcnow()
+            ).total_seconds()
+        )
+
+        if seconds <= 0:
+            return "Ended"
+
+        days, seconds = divmod(
+            seconds,
+            86400
+        )
+
+        hours, seconds = divmod(
+            seconds,
+            3600
+        )
+
+        minutes = seconds // 60
+
+        if days:
+            return f"{days}d {hours}h"
+
+        if hours:
+            return f"{hours}h {minutes}m"
+
+        return f"{max(1, minutes)}m"
+
+    except Exception:
+        return "—"
+
+
 def money(value):
     if value is None:
         return "—"
@@ -5422,8 +5471,12 @@ def _dashboard_html_base():
           AND undervaluation_pct IS NOT NULL
           AND undervaluation_pct >= ?
         ORDER BY
-            undervaluation_gbp DESC,
-            first_seen DESC
+            CASE
+                WHEN end_date IS NULL THEN 1
+                ELSE 0
+            END,
+            end_date ASC,
+            undervaluation_gbp DESC
         LIMIT 500
     """, (
         MIN_UNDERVALUE_GBP,
@@ -5740,6 +5793,19 @@ def _dashboard_html_base():
                 "</div>"
             )
 
+        auction_time_html = (
+            (
+                html.escape(
+                    auction_time_left(
+                        row["end_date"]
+                    )
+                )
+                + "<div class='small'>time left</div>"
+            )
+            if is_auction
+            else ""
+        )
+
         target_rows = (
             auction_body_rows
             if is_auction
@@ -5764,10 +5830,7 @@ def _dashboard_html_base():
 
                 <td>
                     {
-                        (
-                            "—"
-                            "<div class='small'>time left</div>"
-                        )
+                        auction_time_html
                         if is_auction
                         else age_html
                     }
