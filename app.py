@@ -4531,8 +4531,33 @@ def calculate_sold_valuation(conn, target):
     confidence = "MEDIUM" if effective_n >= MEDIUM_CONFIDENCE_COMPARABLES and (q3-q1)/estimate <= .3 else "LOW"
     under = estimate - target["total"]
     pct = under / estimate * 100
-    score = deal_score(target, q1, q1-target["total"],
-                       (q1-target["total"])/q1*100, confidence)
+
+    # Median sold value defines ordinary undervaluation.
+    # Q1 is retained as a separate conservative strong-deal signal.
+    score = deal_score(
+        target,
+        estimate,
+        under,
+        pct,
+        confidence,
+    )
+
+    if (
+        score is not None
+        and score > 0
+        and q1 is not None
+        and target["total"] < q1
+    ):
+        # Price is below the lower quartile of matching sold evidence.
+        # This is substantially stronger than merely being below median.
+        score_cap = 45 if confidence == "LOW" else 75
+        score = round(
+            min(
+                score_cap,
+                score + 10,
+            ),
+            1,
+        )
     return dict(estimated_value=round(estimate, 2), q1=q1, q3=q3,
         count=len(selected), confidence=confidence, undervaluation_gbp=round(under, 2),
         undervaluation_pct=round(pct, 1), deal_score=score,
