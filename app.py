@@ -50,7 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.18"
+APP_VERSION = "0.9.19"
 CLASSIFIER_VERSION = "0.8.2"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -120,8 +120,13 @@ ACTIVE_BIN_RECHECK_INTERVAL_MINUTES = 15
 CATEGORY = "177"
 MARKETPLACE = "EBAY_GB"
 
-# We only need the newest listings for routine discovery.
-SEARCH_LIMIT = 50
+# Timestamp-window discovery.
+SEARCH_LIMIT = 200
+SEARCH_INTERVAL_SECONDS = 15 * 60
+SEARCH_WINDOW_OVERLAP_SECONDS = 2 * 60
+SEARCH_INITIAL_LOOKBACK_SECONDS = 17 * 60
+SEARCH_MAX_CATCHUP_WINDOW_SECONDS = 60 * 60
+SEARCH_CHECKPOINT_FILE = "/data/ebay-search-checkpoint.json"
 
 DASHBOARD_HOST = "0.0.0.0"
 DASHBOARD_PORT = int(
@@ -143,12 +148,11 @@ SEARCH_RESERVE_TAPER_START_HOUR = 12
 EMERGENCY_RESERVE = 150
 MAX_DETAIL_CALLS_PER_CYCLE = 40
 MAX_BACKFILL_DETAILS_PER_CYCLE = 40
-POLL_NORMAL = 90
-POLL_60_PERCENT = 120
-POLL_75_PERCENT = 180
-POLL_85_PERCENT = 300
-POLL_90_PERCENT = 600
-
+POLL_NORMAL = 900
+POLL_60_PERCENT = 900
+POLL_75_PERCENT = 900
+POLL_85_PERCENT = 900
+POLL_90_PERCENT = 900
 # Valuation
 MIN_COMPARABLES = 2
 MEDIUM_CONFIDENCE_COMPARABLES = 6
@@ -890,9 +894,71 @@ def ebay_urlopen(*args, **kwargs):
         raise
 
 
-def ebay_search(
+def ebay_datetime(value):
+    return (
+        value
+        .astimezone(timezone.utc)
+        .strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    )
+
+
+def read_search_checkpoint():
+    try:
+        with open(
+            SEARCH_CHECKPOINT_FILE,
+            "r",
+            encoding="utf-8"
+        ) as fh:
+            data = json.load(fh)
+
+        value = data.get("last_successful_end")
+        if not value:
+            return None
+
+        dt = datetime.fromisoformat(
+            str(value).replace("Z", "+00:00")
+        )
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        return dt.astimezone(timezone.utc)
+
+    except Exception:
+        return None
+
+
+def write_search_checkpoint(value):
+    tmp = SEARCH_CHECKPOINT_FILE + ".tmp"
+
+    data = {
+        "last_successful_end":
+            value.astimezone(timezone.utc).isoformat()
+    }
+
+    with open(
+        tmp,
+        "w",
+        encoding="utf-8"
+    ) as fh:
+        json.dump(
+            data,
+            fh,
+            indent=2
+        )
+
+    os.replace(
+        tmp,
+        SEARCH_CHECKPOINT_FILE
+    )
+
+
+def ebay_search_page(
     conn,
-    token
+    token,
+    start,
+    end,
+    offset=0
 ):
     return api_get(
         conn,
@@ -908,17 +974,126 @@ def ebay_search(
                 CATEGORY,
 
             "filter":
-                "itemLocationCountry:GB",
+                (
+                    "itemLocationCountry:GB,"
+                    f"itemStartDate:[{ebay_datetime(start)}"
+                    f"..{ebay_datetime(end)}]"
+                ),
 
             "sort":
                 "newlyListed",
 
             "limit":
-                str(
-                    SEARCH_LIMIT
-                )
+                str(SEARCH_LIMIT),
+
+            "offset":
+                str(offset)
         }
     )
+
+
+def ebay_search(
+    conn,
+    token
+):
+    """
+    Retrieve every listing from the current timestamp window.
+
+    A small overlap deliberately repeats the edge of the previous window.
+    Existing item IDs make that harmless while protecting against boundary
+    timing issues.
+
+    The checkpoint only advances after every page succeeds.
+    """
+    now = utcnow()
+
+    checkpoint = read_search_checkpoint()
+
+    if checkpoint is None:
+        start = (
+            now
+            - timedelta(
+                seconds=SEARCH_INITIAL_LOOKBACK_SECONDS
+            )
+        )
+    else:
+        start = (
+            checkpoint
+            - timedelta(
+                seconds=SEARCH_WINDOW_OVERLAP_SECONDS
+            )
+        )
+
+    # Avoid one enormous query after prolonged downtime. Catch up in chunks;
+    # the checkpoint advances to the end of each successful chunk.
+    end = min(
+        now,
+        start
+        + timedelta(
+            seconds=SEARCH_MAX_CATCHUP_WINDOW_SECONDS
+        )
+    )
+
+    all_summaries = []
+    seen_ids = set()
+    offset = 0
+    pages = 0
+
+    while True:
+        if not can_search(conn):
+            raise RuntimeError(
+                "Timestamp search window incomplete because "
+                "Browse API emergency reserve was reached"
+            )
+
+        result = ebay_search_page(
+            conn,
+            token,
+            start,
+            end,
+            offset
+        )
+
+        pages += 1
+
+        page = (
+            result.get("itemSummaries")
+            or []
+        )
+
+        for summary in page:
+            item_id = summary.get("itemId")
+
+            if item_id and item_id in seen_ids:
+                continue
+
+            if item_id:
+                seen_ids.add(item_id)
+
+            all_summaries.append(summary)
+
+        if len(page) < SEARCH_LIMIT:
+            break
+
+        offset += SEARCH_LIMIT
+
+        # Browse search cannot paginate beyond 10,000 matches.
+        if offset >= 10000:
+            raise RuntimeError(
+                "Timestamp search window exceeded "
+                "Browse API pagination limit"
+            )
+
+    # Only move the checkpoint after the entire window completed.
+    write_search_checkpoint(end)
+
+    return {
+        "itemSummaries": all_summaries,
+        "_window_start": start,
+        "_window_end": end,
+        "_pages": pages,
+        "_catching_up": end < now,
+    }
 
 
 def get_item(
@@ -9484,10 +9659,28 @@ def run_cycle(
         or []
     )
 
+    window_start = result.get("_window_start")
+    window_end = result.get("_window_end")
+    search_pages = result.get("_pages", 1)
+
+    print(
+        f"eBay timestamp window: "
+        f"{window_start.isoformat() if window_start else '?'} "
+        f"-> "
+        f"{window_end.isoformat() if window_end else '?'}"
+    )
+
     print(
         f"eBay returned "
-        f"{len(summaries)} newest listings"
+        f"{len(summaries)} listings "
+        f"across {search_pages} search page(s)"
     )
+
+    if result.get("_catching_up"):
+        print(
+            "Timestamp discovery: catching up "
+            "from an earlier checkpoint"
+        )
 
     new_count = 0
     known_count = 0
