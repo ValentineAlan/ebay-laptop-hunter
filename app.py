@@ -50,7 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.9"
+APP_VERSION = "0.9.10"
 CLASSIFIER_VERSION = "0.8.1"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -5390,27 +5390,17 @@ def money(value):
 def _dashboard_html_base():
     conn = connect_db()
 
-    rows = conn.execute("""
+    buy_now_rows = conn.execute("""
         SELECT *
         FROM listings
         WHERE COALESCE(active, 1) = 1
           AND estimated_value IS NOT NULL
+          AND deal_score > 0
           AND undervaluation_gbp IS NOT NULL
           AND undervaluation_gbp >= ?
           AND undervaluation_pct IS NOT NULL
           AND undervaluation_pct >= ?
-          AND (
-                deal_score > 0
-                OR (
-                    deal_score IS NULL
-                    AND buying_options LIKE '%"AUCTION"%'
-                )
-              )
         ORDER BY
-            CASE
-                WHEN deal_score IS NULL THEN 1
-                ELSE 0
-            END,
             deal_score DESC,
             undervaluation_gbp DESC,
             first_seen DESC
@@ -5419,6 +5409,28 @@ def _dashboard_html_base():
         MIN_UNDERVALUE_GBP,
         MIN_UNDERVALUE_PCT,
     )).fetchall()
+
+    auction_rows = conn.execute("""
+        SELECT *
+        FROM listings
+        WHERE COALESCE(active, 1) = 1
+          AND estimated_value IS NOT NULL
+          AND deal_score IS NULL
+          AND buying_options LIKE '%"AUCTION"%'
+          AND undervaluation_gbp IS NOT NULL
+          AND undervaluation_gbp >= ?
+          AND undervaluation_pct IS NOT NULL
+          AND undervaluation_pct >= ?
+        ORDER BY
+            undervaluation_gbp DESC,
+            first_seen DESC
+        LIMIT 500
+    """, (
+        MIN_UNDERVALUE_GBP,
+        MIN_UNDERVALUE_PCT,
+    )).fetchall()
+
+    rows = list(buy_now_rows) + list(auction_rows)
 
     total = conn.execute("""
         SELECT COUNT(*) AS n
@@ -5433,26 +5445,9 @@ def _dashboard_html_base():
           AND COALESCE(active, 1) = 1
     """).fetchone()["n"]
 
-    candidates = conn.execute("""
-        SELECT COUNT(*) AS n
-        FROM listings
-        WHERE COALESCE(active, 1) = 1
-          AND estimated_value IS NOT NULL
-          AND undervaluation_gbp IS NOT NULL
-          AND undervaluation_gbp >= ?
-          AND undervaluation_pct IS NOT NULL
-          AND undervaluation_pct >= ?
-          AND (
-                deal_score > 0
-                OR (
-                    deal_score IS NULL
-                    AND buying_options LIKE '%"AUCTION"%'
-                )
-              )
-    """, (
-        MIN_UNDERVALUE_GBP,
-        MIN_UNDERVALUE_PCT,
-    )).fetchone()["n"]
+    buy_now_candidates = len(buy_now_rows)
+    auction_candidates = len(auction_rows)
+    candidates = buy_now_candidates + auction_candidates
 
     api_calls = browse_usage_today(
         conn
@@ -5528,7 +5523,8 @@ def _dashboard_html_base():
     helper_status = helper_state.get("status", "UNKNOWN")
     helper_seen = relative_age(helper_state.get("last_seen_at"))
 
-    body_rows = []
+    buy_now_body_rows = []
+    auction_body_rows = []
 
     for row in rows:
 
@@ -5744,7 +5740,13 @@ def _dashboard_html_base():
                 "</div>"
             )
 
-        body_rows.append(
+        target_rows = (
+            auction_body_rows
+            if is_auction
+            else buy_now_body_rows
+        )
+
+        target_rows.append(
             f"""
             <tr>
                 <td class="product-thumb-cell">
@@ -5761,13 +5763,26 @@ def _dashboard_html_base():
                 </td>
 
                 <td>
-                    {age_html}
+                    {
+                        (
+                            "—"
+                            "<div class='small'>time left</div>"
+                        )
+                        if is_auction
+                        else age_html
+                    }
                 </td>
 
                 <td class="money"
                     data-sort="{row['total'] if row['total'] is not None else -1}">
                     {money(row["total"])}
-                    {auction_badge}
+                    {
+                        (
+                            "<div class='small'>current bid</div>"
+                        )
+                        if is_auction
+                        else ""
+                    }
                 </td>
 
                 <td class="money good"
@@ -5888,25 +5903,95 @@ def _dashboard_html_base():
 
     </div>
 
-    <table>
+    <style>
+        .deal-section {{
+            margin-top: 28px;
+        }}
 
-    <thead>
-    <tr>
-        <th class="image-header" aria-label="Product image"></th>
-        <th>Listing</th>
-        <th>Age</th>
-        <th>Price</th>
-        <th>Undervaluation</th>
-        <th>Score</th>
-        <th>Confidence</th>
-    </tr>
-    </thead>
+        .deal-section-header {{
+            display: flex;
+            align-items: baseline;
+            gap: 10px;
+            margin: 0 0 10px 0;
+        }}
 
-    <tbody>
-        {''.join(body_rows)}
-    </tbody>
+        .deal-section-header h2 {{
+            margin: 0;
+            font-size: 20px;
+        }}
 
-    </table>
+        .auction-table th:nth-child(6),
+        .auction-table td:nth-child(6) {{
+            display: none;
+        }}
+    </style>
+
+    <section class="deal-section">
+
+        <div class="deal-section-header">
+            <h2>Buy It Now deals</h2>
+            <span class="small">
+                {buy_now_candidates} listing{
+                    "" if buy_now_candidates == 1 else "s"
+                }
+            </span>
+        </div>
+
+        <table>
+
+        <thead>
+        <tr>
+            <th class="image-header" aria-label="Product image"></th>
+            <th>Listing</th>
+            <th>Age</th>
+            <th>Price</th>
+            <th>Undervaluation</th>
+            <th>Score</th>
+            <th>Confidence</th>
+        </tr>
+        </thead>
+
+        <tbody>
+            {''.join(buy_now_body_rows)}
+        </tbody>
+
+        </table>
+
+    </section>
+
+
+    <section class="deal-section">
+
+        <div class="deal-section-header">
+            <h2>Auctions</h2>
+            <span class="small">
+                {auction_candidates} listing{
+                    "" if auction_candidates == 1 else "s"
+                }
+            </span>
+        </div>
+
+        <table class="auction-table">
+
+        <thead>
+        <tr>
+            <th class="image-header" aria-label="Product image"></th>
+            <th>Listing</th>
+            <th>Time Left</th>
+            <th>Current Bid</th>
+            <th>Potential Undervaluation</th>
+            <th>Score</th>
+            <th>Confidence</th>
+        </tr>
+        </thead>
+
+        <tbody>
+            {''.join(auction_body_rows)}
+        </tbody>
+
+        </table>
+
+    </section>
 
     </body>
     </html>
