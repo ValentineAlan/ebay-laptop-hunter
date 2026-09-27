@@ -6183,8 +6183,7 @@ def _dashboard_html_base():
 </div>
 
     <div class="sub">
-        v{APP_VERSION} —
-        eBay UK deal intelligence
+        
     </div>
 
     <div class="cards">
@@ -6303,13 +6302,16 @@ def _dashboard_html_base():
 
 
 def _site_nav(active="deals"):
-    deals_class = " active" if active == "deals" else ""
-    diagnostics_class = " active" if active == "diagnostics" else ""
+    if active == "diagnostics":
+        href = "/"
+        label = "Deals"
+    else:
+        href = "/diagnostics"
+        label = "Diagnostics"
 
     return f"""
     <nav class="site-nav">
-        <a class="{deals_class}" href="/">Deals</a>
-        <a class="{diagnostics_class}" href="/diagnostics">Diagnostics</a>
+        <a href="{href}">{label}</a>
     </nav>
     """
 
@@ -7466,24 +7468,18 @@ _DASHBOARD_UI_ENHANCEMENT = r"""
 <style>
 .site-nav {
     display: flex;
-    gap: 8px;
-    margin: 14px 18px 4px;
+    justify-content: flex-end;
+    margin: 14px 18px 0;
 }
 
 .site-nav a {
     text-decoration: none;
-    color: #344054;
-    background: #fff;
-    border: 1px solid #d0d5dd;
+    color: #fff;
+    background: #2563eb;
+    border: 1px solid #2563eb;
     border-radius: 9px;
     padding: 8px 13px;
     font-weight: 600;
-}
-
-.site-nav a.active {
-    color: #fff;
-    background: #2563eb;
-    border-color: #2563eb;
 }
 
 .system-health-alert {
