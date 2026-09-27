@@ -2232,7 +2232,7 @@ def clean_model(model):
         model,
         flags=re.I,
     )
-    model = re.sub(r"(Surface\s+Pro\s+\d+)\s+Plus$", r"\1+", model, flags=re.I)
+    model = re.sub(r"(Surface\s+Pro\s+\d+)\s+Plus$", r"+", model, flags=re.I)
     return model.strip()
 
 
@@ -7410,7 +7410,8 @@ def _dashboard_html_base():
         <thead>
         <tr>
             <th class="image-header" aria-label="Product image"></th>
-            \1<th>CPU Rating</th>
+            <th>Listing</th>
+            <th>CPU Rating</th>
             <th>Listing age</th>
             <th>Price</th>
             <th>Saving vs usual sold price</th>
@@ -7444,10 +7445,11 @@ def _dashboard_html_base():
         <thead>
         <tr>
             <th class="image-header" aria-label="Product image"></th>
-            \1<th>CPU Rating</th>
-            <th>Time Left</th>
-            <th>Current Bid</th>
-            <th>Potential Undervaluation</th>
+            <th>Listing</th>
+            <th>CPU Rating</th>
+            <th>Time left</th>
+            <th>Current bid</th>
+            <th>Potential saving</th>
             <th>Score</th>
             <th>Notes</th>
         </tr>
