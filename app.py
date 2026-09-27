@@ -1,4 +1,4 @@
-# Laptop Lander v0.9.7
+# Laptop Lander v0.9.8
 #
 # Features:
 #   - eBay GB laptop discovery
@@ -50,9 +50,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.7"
+APP_VERSION = "0.9.8"
 CLASSIFIER_VERSION = "0.8.1"
 MIN_UNDERVALUE_GBP = 20.0
+MIN_UNDERVALUE_PCT = 10.0
 IMAGE_BACKFILL_PER_CYCLE = 100
 IMAGE_BACKFILL_DAILY_ALLOWANCE = 100
 
@@ -4361,6 +4362,48 @@ def advertised_variants_compatible(left, right):
 
 
 
+
+def variant_evidence_tier(target, comp):
+    """
+    Rate the quality of optional advertised variant evidence.
+
+    Core model/CPU/RAM/storage matching is handled separately by same_spec().
+
+    EXACT:
+        Both adverts explicitly describe the same optional variant markers.
+
+    COMPATIBLE:
+        There is no explicit contradiction, but one or both adverts omit
+        optional variant information.
+
+    INCOMPATIBLE:
+        The adverts explicitly contradict one another.
+    """
+
+    if not advertised_variants_compatible(
+        target,
+        comp
+    ):
+        return "INCOMPATIBLE", 0.0
+
+    target_variants = advertised_variants(
+        target
+    )
+
+    comp_variants = advertised_variants(
+        comp
+    )
+
+    if (
+        target_variants
+        and comp_variants
+        and target_variants == comp_variants
+    ):
+        return "EXACT", 1.0
+
+    return "COMPATIBLE", 0.75
+
+
 def same_spec(target, comp):
     if not exact_spec_identity(comp):
         return False
@@ -4553,49 +4596,133 @@ def canonical_sold_item_id(value):
 def sold_candidates(conn, target):
     if target_valuation_problem(target):
         return []
+
     rows = conn.execute(
         "SELECT * FROM sold_comparables WHERE delivered_price > 0 "
         "AND currency='GBP' AND evidence_version=? AND LOWER(brand)=LOWER(?) "
-        "AND LOWER(model)=LOWER(?)", (SOLD_EVIDENCE_VERSION, target["brand"], target["model"])
+        "AND LOWER(model)=LOWER(?)",
+        (
+            SOLD_EVIDENCE_VERSION,
+            target["brand"],
+            target["model"]
+        )
     ).fetchall()
+
     best = {}
     fingerprints = set()
+
     target_item_id = canonical_sold_item_id(
         row_value(target, "item_id")
     )
 
-    for row in sorted(rows, key=lambda r: r["collected_at"], reverse=True):
+    for row in sorted(
+        rows,
+        key=lambda r: r["collected_at"],
+        reverse=True
+    ):
         sold_item_id = canonical_sold_item_id(
             row["item_id"]
         )
 
-        if not sold_item_id or sold_item_id.startswith("title:"):
+        if (
+            not sold_item_id
+            or sold_item_id.startswith("title:")
+        ):
             continue
 
         # Never use the target listing itself as sold evidence.
-        if target_item_id and sold_item_id == target_item_id:
+        if (
+            target_item_id
+            and sold_item_id == target_item_id
+        ):
             continue
-        age = evidence_age_days(row["last_sold"])
-        cache_age = evidence_age_days(row["collected_at"])
-        if (age is None or age > PRODUCT_RESEARCH_DAY_RANGE or cache_age is None
-                or cache_age > SOLD_CACHE_MAX_AGE_DAYS):
+
+        age = evidence_age_days(
+            row["last_sold"]
+        )
+
+        cache_age = evidence_age_days(
+            row["collected_at"]
+        )
+
+        if (
+            age is None
+            or age > PRODUCT_RESEARCH_DAY_RANGE
+            or cache_age is None
+            or cache_age > SOLD_CACHE_MAX_AGE_DAYS
+        ):
             continue
-        if not same_spec(target, row) or not ordinary_laptop(row["title"]):
+
+        if (
+            not same_spec(target, row)
+            or not ordinary_laptop(row["title"])
+        ):
             continue
-        if row["avg_postage"] is None or row["avg_postage"] < 0:
+
+        if (
+            row["avg_postage"] is None
+            or row["avg_postage"] < 0
+        ):
             continue
-        price = float(row["delivered_price"])
+
+        price = float(
+            row["delivered_price"]
+        )
+
         if not math.isfinite(price):
             continue
-        # Repeated identical adverts must not manufacture independent evidence.
-        fingerprint = normalise(row["title"]).lower()
-        if sold_item_id in best or fingerprint in fingerprints:
+
+        # Repeated identical adverts must not manufacture
+        # independent evidence.
+        fingerprint = normalise(
+            row["title"]
+        ).lower()
+
+        if (
+            sold_item_id in best
+            or fingerprint in fingerprints
+        ):
             continue
-        fingerprints.add(fingerprint)
-        best[sold_item_id] = dict(row=row, total=price, similarity=100,
-            tier="EXACT_MODEL_SPEC", units=max(1, int(row["units_sold"] or 1)),
-            weight=2 ** (-age / 60.0))
-    return list(best.values())
+
+        tier, variant_weight = variant_evidence_tier(
+            target,
+            row
+        )
+
+        if tier == "INCOMPATIBLE":
+            continue
+
+        fingerprints.add(
+            fingerprint
+        )
+
+        recency_weight = (
+            2 ** (-age / 60.0)
+        )
+
+        best[sold_item_id] = dict(
+            row=row,
+            total=price,
+            similarity=(
+                100
+                if tier == "EXACT"
+                else 75
+            ),
+            tier=tier,
+            units=max(
+                1,
+                int(row["units_sold"] or 1)
+            ),
+            weight=(
+                recency_weight
+                * variant_weight
+            )
+        )
+
+    return list(
+        best.values()
+    )
+
 
 def weighted_percentile(candidates, p):
     if not candidates:
@@ -4612,21 +4739,80 @@ def weighted_percentile(candidates, p):
 
 
 def calculate_sold_valuation(conn, target):
-    selected = select_sold_evidence(conn, target)
+    selected = select_sold_evidence(
+        conn,
+        target
+    )
+
     if not selected:
         return None
-    estimate = weighted_percentile(selected, .5)
-    q1, q3 = weighted_percentile(selected, .25), weighted_percentile(selected, .75)
-    weights = [c["weight"] for c in selected]
-    effective_n = sum(weights) ** 2 / sum(w * w for w in weights)
-    # Title-only condition/display evidence and unknown seller diversity cannot
-    # justify HIGH confidence, even when many units have sold.
-    confidence = "MEDIUM" if effective_n >= MEDIUM_CONFIDENCE_COMPARABLES and (q3-q1)/estimate <= .3 else "LOW"
-    under = estimate - target["total"]
-    pct = under / estimate * 100
 
-    # Median sold value defines ordinary undervaluation.
-    # Q1 is retained as a separate conservative strong-deal signal.
+    estimate = weighted_percentile(
+        selected,
+        .5
+    )
+
+    q1 = weighted_percentile(
+        selected,
+        .25
+    )
+
+    q3 = weighted_percentile(
+        selected,
+        .75
+    )
+
+    weights = [
+        candidate["weight"]
+        for candidate in selected
+    ]
+
+    weight_sum = sum(weights)
+
+    weight_square_sum = sum(
+        weight * weight
+        for weight in weights
+    )
+
+    effective_n = (
+        weight_sum ** 2
+        / weight_square_sum
+        if weight_square_sum
+        else 0
+    )
+
+    spread = (
+        (q3 - q1) / estimate
+        if estimate
+        else float("inf")
+    )
+
+    if (
+        effective_n >= 8
+        and spread <= 0.20
+    ):
+        confidence = "HIGH"
+
+    elif (
+        effective_n >= 4
+        and spread <= 0.35
+    ):
+        confidence = "MEDIUM"
+
+    else:
+        confidence = "LOW"
+
+    under = (
+        estimate
+        - target["total"]
+    )
+
+    pct = (
+        under
+        / estimate
+        * 100
+    )
+
     score = deal_score(
         target,
         estimate,
@@ -4635,27 +4821,68 @@ def calculate_sold_valuation(conn, target):
         confidence,
     )
 
+    # Q1 is useful only when the evidence pool is large enough
+    # for the lower quartile to carry meaningful information.
     if (
         score is not None
         and score > 0
         and q1 is not None
+        and effective_n >= 4
         and target["total"] < q1
     ):
-        # Price is below the lower quartile of matching sold evidence.
-        # This is substantially stronger than merely being below median.
-        score_cap = 45 if confidence == "LOW" else 75
+        bonus = (
+            10
+            * deal_confidence_multiplier(
+                confidence
+            )
+        )
+
         score = round(
             min(
-                score_cap,
-                score + 10,
+                100,
+                score + bonus
             ),
-            1,
+            1
         )
-    return dict(estimated_value=round(estimate, 2), q1=q1, q3=q3,
-        count=len(selected), confidence=confidence, undervaluation_gbp=round(under, 2),
-        undervaluation_pct=round(pct, 1), deal_score=score,
-        basis=f"SOLD_EXACT_MODEL_SPEC:{len(selected)}_ROWS/"
-              f"{sum(c['units'] for c in selected)}_SALES/NEFF={effective_n:.1f}")
+
+    exact_count = sum(
+        candidate["tier"] == "EXACT"
+        for candidate in selected
+    )
+
+    compatible_count = (
+        len(selected)
+        - exact_count
+    )
+
+    return dict(
+        estimated_value=round(
+            estimate,
+            2
+        ),
+        q1=q1,
+        q3=q3,
+        count=len(selected),
+        confidence=confidence,
+        undervaluation_gbp=round(
+            under,
+            2
+        ),
+        undervaluation_pct=round(
+            pct,
+            1
+        ),
+        deal_score=score,
+        basis=(
+            "SOLD_MODEL_SPEC_WEIGHTED:"
+            f"{len(selected)}_ROWS/"
+            f"{sum(c['units'] for c in selected)}_SALES/"
+            f"EXACT={exact_count}/"
+            f"COMPAT={compatible_count}/"
+            f"NEFF={effective_n:.1f}"
+        )
+    )
+
 
 def fixed_price_listing(row):
     try:
@@ -4718,16 +4945,65 @@ def calculate_active_valuation(conn, target):
         confidence="ASKING_PRICES_ONLY", undervaluation_gbp=None,
         undervaluation_pct=None, deal_score=None, basis="ACTIVE_ASKING_REFERENCE")
 
-def deal_score(target, value, undervalue, undervalue_pct, confidence):
-    if target_valuation_problem(target) or not fixed_price_listing(target):
+
+def deal_confidence_multiplier(confidence):
+    return {
+        "LOW": 0.75,
+        "MEDIUM": 0.90,
+        "HIGH": 1.00,
+    }.get(confidence, 0.75)
+
+
+def deal_score(
+    target,
+    value,
+    undervalue,
+    undervalue_pct,
+    confidence
+):
+    if (
+        target_valuation_problem(target)
+        or not fixed_price_listing(target)
+    ):
         return None
-    if value is None or undervalue is None or undervalue_pct is None:
+
+    if (
+        value is None
+        or undervalue is None
+        or undervalue_pct is None
+    ):
         return None
-    if undervalue < MIN_UNDERVALUE_GBP:
+
+    if (
+        undervalue < MIN_UNDERVALUE_GBP
+        or undervalue_pct < MIN_UNDERVALUE_PCT
+    ):
         return 0
-    score = min(60, undervalue_pct * 1.2) + min(25, undervalue / 4)
-    # LOW means review evidence, not a high-priority buying recommendation.
-    return round(min(45 if confidence == "LOW" else 75, score), 1)
+
+    raw_score = (
+        min(
+            60,
+            undervalue_pct * 1.2
+        )
+        +
+        min(
+            25,
+            undervalue / 4
+        )
+    )
+
+    score = (
+        raw_score
+        * deal_confidence_multiplier(
+            confidence
+        )
+    )
+
+    return round(
+        min(100, score),
+        1
+    )
+
 
 def sold_evidence_for_basis(conn, target, basis):
     if not basis or not basis.startswith("SOLD_"):
