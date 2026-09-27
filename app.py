@@ -47,16 +47,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 # ============================================================
-# VERSION / CONFIG
+# CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.2"
+APP_VERSION = "0.9.3"
 CLASSIFIER_VERSION = "0.8.1"
 MIN_UNDERVALUE_GBP = 20.0
 
 # Backward-compatible internal alias.
-# Existing classifier_version DB logic continues to use VERSION.
-VERSION = CLASSIFIER_VERSION
+# Existing classifier_version DB logic continues to use CLASSIFIER_VERSION.
 # eBay short-term rate-limit protection.
 EBAY_429_COOLDOWN_SECONDS = 600
 
@@ -2913,7 +2912,7 @@ def save_listing(
             item["detail_status"],
 
         "classifier_version":
-            VERSION
+            CLASSIFIER_VERSION
     }
 
     if existing:
@@ -3801,7 +3800,7 @@ def collect_needed_sold_data(conn, maximum=PRODUCT_RESEARCH_SEARCHES_PER_CYCLE):
             CASE WHEN estimated_value IS NULL THEN 0 ELSE 1 END,
             COALESCE(valuation_research_at, '1970-01-01') ASC,
             first_seen ASC
-    """, (VERSION,)).fetchall()
+    """, (CLASSIFIER_VERSION,)).fetchall()
 
     done = 0
     attempted_listings = 0
@@ -4246,7 +4245,7 @@ def exact_spec_identity(row):
     )
 
 def target_valuation_problem(target):
-    if row_value(target, "classifier_version") != VERSION:
+    if row_value(target, "classifier_version") != CLASSIFIER_VERSION:
         return "REANALYSIS_REQUIRED"
     if not exact_spec_identity(target):
         return "INCOMPLETE_IDENTITY_OR_SPEC"
@@ -4658,7 +4657,7 @@ def comparable_candidates(conn, target):
         WHERE item_id != ? AND brand = ? AND LOWER(model) = LOWER(?)
           AND total > 0 AND postage IS NOT NULL AND active=1
           AND status='NORMAL' AND classifier_version=?""",
-        (target["item_id"], target["brand"], target["model"], VERSION)).fetchall()
+        (target["item_id"], target["brand"], target["model"], CLASSIFIER_VERSION)).fetchall()
     candidates, seen = [], set()
     for row in rows:
         age = evidence_age_days(row["last_seen"])
@@ -4803,7 +4802,7 @@ def revalue_all(conn):
 def needs_reanalysis(row):
     if (
         row["classifier_version"]
-        != VERSION
+        != CLASSIFIER_VERSION
     ):
         return True
 
@@ -5490,7 +5489,7 @@ def _dashboard_html_base():
     <h1>eBay Laptop Hunter</h1>
 
     <div class="sub">
-        v{VERSION} —
+        v{CLASSIFIER_VERSION} —
         sold-market bargain dashboard
     </div>
 
@@ -7883,7 +7882,7 @@ def main():
 
     print(
         f"eBay Laptop Hunter "
-        f"v{VERSION}"
+        f"v{CLASSIFIER_VERSION}"
     )
 
     if not os.path.exists(PRODUCT_RESEARCH_SESSION_STATE):
