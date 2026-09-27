@@ -50,8 +50,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.19"
-CLASSIFIER_VERSION = "0.8.2"
+APP_VERSION = "0.9.20"
+CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
 IMAGE_BACKFILL_PER_CYCLE = 100
@@ -2763,7 +2763,10 @@ def classify_faults(
         "activation locked",
         "autopilot locked",
         "for parts",
-        "parts or not working"
+        "parts or not working",
+        "parts only",
+        "spares or repair",
+        "spares or repairs",
     ]
 
     moderate = [
@@ -2784,7 +2787,12 @@ def classify_faults(
         "cracks",
         "dented",
         "dents",
-        "dent"
+        "dent",
+        "scratch",
+        "scratches",
+        "scratched",
+        "grade b",
+        "grade c",
     ]
 
     low = [
@@ -2804,6 +2812,26 @@ def classify_faults(
         "missing charger",
         "no os"
     ]
+
+    # Extra condition wording worth surfacing prominently
+    # in Laptop Lander's Notes column.
+    for phrase in (
+        "parts only",
+        "spares or repair",
+        "spares or repairs",
+    ):
+        if phrase not in high:
+            high.append(phrase)
+
+    for phrase in (
+        "scratch",
+        "scratches",
+        "scratched",
+        "grade b",
+        "grade c",
+    ):
+        if phrase not in moderate:
+            moderate.append(phrase)
 
     matches = []
 
@@ -6141,6 +6169,48 @@ def _dashboard_html_base():
         win11_mark = compact_mark(row["win11"])
         usbc_mark = compact_mark(row["usbc_pd"])
 
+        raw_fault_reasons = row["fault_reasons"] or ""
+
+        try:
+            fault_reasons = json.loads(raw_fault_reasons)
+        except Exception:
+            fault_reasons = [
+                part.strip()
+                for part in re.split(
+                    r"[,;|]",
+                    str(raw_fault_reasons)
+                )
+                if part.strip()
+            ]
+
+        if isinstance(fault_reasons, str):
+            fault_reasons = [fault_reasons]
+
+        if not isinstance(fault_reasons, (list, tuple)):
+            fault_reasons = []
+
+        clean_notes = []
+
+        for reason in fault_reasons:
+            reason = normalise(reason)
+
+            if (
+                reason
+                and reason.lower()
+                not in {
+                    existing.lower()
+                    for existing in clean_notes
+                }
+            ):
+                clean_notes.append(reason)
+
+        notes_html = "".join(
+            "<span class='condition-note'>"
+            + html.escape(reason.upper())
+            + "</span>"
+            for reason in clean_notes
+        )
+
         hover_evidence_html = (
             evidence_html
             .replace("<details class='evidence'>", "<div class='evidence'>")
@@ -6226,8 +6296,13 @@ def _dashboard_html_base():
 
                 <td class="money good"
                     data-sort="{row['undervaluation_gbp'] if row['undervaluation_gbp'] is not None else -999999}">
-                    <span class="valuation-hover">
+                    <span class="valuation-hover" tabindex="0">
                         {under}
+                        <span
+                            class="valuation-info"
+                            aria-label="View valuation evidence"
+                            title="View valuation evidence"
+                        >i</span>
 
                         <span class="valuation-tooltip">
                             <div class="valuation-summary">
@@ -6262,21 +6337,11 @@ def _dashboard_html_base():
                     </span>
                 </td>
 
-                <td data-sort="{
-                    3 if row['valuation_confidence'] == 'HIGH'
-                    else 2 if row['valuation_confidence'] == 'MEDIUM'
-                    else 1 if row['valuation_confidence'] == 'LOW'
-                    else 0
-                }">
-                    <strong>
-                        {html.escape(row["valuation_confidence"] or "—")}
-                    </strong>
-
-                    <div class="small confidence-meta">
-                        Win 11: {win11_mark}
-                        · Sales: {sales_total}
-                        · Condition: {html.escape(row["status"] or "—")}
-                    </div>
+                <td class="notes-cell">
+                    {
+                        notes_html
+                        or "<span class='notes-clear'>—</span>"
+                    }
                 </td>
             </tr>
             """
@@ -6380,11 +6445,11 @@ def _dashboard_html_base():
         <tr>
             <th class="image-header" aria-label="Product image"></th>
             <th>Listing</th>
-            <th>Age</th>
+            <th>Listing age</th>
             <th>Price</th>
-            <th>Undervaluation</th>
+            <th>Saving vs usual sold price</th>
             <th>Score</th>
-            <th>Confidence</th>
+            <th>Notes</th>
         </tr>
         </thead>
 
@@ -6418,7 +6483,7 @@ def _dashboard_html_base():
             <th>Current Bid</th>
             <th>Potential Undervaluation</th>
             <th>Score</th>
-            <th>Confidence</th>
+            <th>Notes</th>
         </tr>
         </thead>
 
@@ -8068,24 +8133,55 @@ _DASHBOARD_UI_ENHANCEMENT = r"""
 }
 
 .valuation-hover {
-    position: relative;
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     cursor: help;
+    outline: none;
+}
+
+.valuation-info {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border: 1px solid #2563eb;
+    border-radius: 50%;
+    color: #2563eb;
+    background: #eff6ff;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: help;
+    flex: 0 0 auto;
+}
+
+.valuation-info.discovery-pulse {
+    animation: valuation-info-pulse 0.9s ease-in-out 2;
+}
+
+@keyframes valuation-info-pulse {
+    0%, 100% {
+        transform: scale(1);
+        box-shadow: 0 0 0 0 rgba(37, 99, 235, 0);
+    }
+    50% {
+        transform: scale(1.15);
+        box-shadow: 0 0 0 5px rgba(37, 99, 235, 0.16);
+    }
 }
 
 .valuation-tooltip {
     display: none;
-    position: absolute;
-    z-index: 10000;
-    left: 50%;
-    top: calc(100% + 8px);
-    transform: translateX(-50%);
-    width: min(620px, 82vw);
-    max-height: 460px;
+    position: fixed;
+    z-index: 99999;
+    width: min(620px, calc(100vw - 24px));
+    max-height: min(460px, calc(100vh - 24px));
     overflow-y: auto;
     padding: 12px;
     border: 1px solid #777;
-    border-radius: 6px;
+    border-radius: 8px;
     background: white;
     color: #111;
     text-align: left;
@@ -8093,10 +8189,10 @@ _DASHBOARD_UI_ENHANCEMENT = r"""
     font-weight: normal;
     font-size: 13px;
     line-height: 1.4;
-    box-shadow: 0 4px 18px rgba(0,0,0,.22);
+    box-shadow: 0 8px 28px rgba(0,0,0,.24);
 }
 
-.valuation-hover:hover .valuation-tooltip {
+.valuation-hover.tooltip-open .valuation-tooltip {
     display: block;
 }
 
@@ -8112,6 +8208,29 @@ _DASHBOARD_UI_ENHANCEMENT = r"""
 .confidence-meta {
     white-space: nowrap;
     margin-top: 3px;
+}
+
+.notes-cell {
+    min-width: 120px;
+    max-width: 240px;
+}
+
+.condition-note {
+    display: inline-block;
+    margin: 2px 4px 2px 0;
+    padding: 3px 7px;
+    border: 1px solid #f3a4a4;
+    border-radius: 999px;
+    background: #fff1f1;
+    color: #b42318;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.25;
+    white-space: nowrap;
+}
+
+.notes-clear {
+    color: #98a2b3;
 }
 
 
@@ -8923,15 +9042,172 @@ def dashboard_html():
         else:
             page = health + page
 
+    valuation_tooltip_script = r"""
+<script>
+(function () {
+    const GAP = 8;
+    const EDGE = 12;
+
+    function positionTooltip(wrapper) {
+        const tooltip = wrapper.querySelector(".valuation-tooltip");
+        if (!tooltip) return;
+
+        tooltip.style.left = "0px";
+        tooltip.style.top = "0px";
+
+        const triggerRect = wrapper.getBoundingClientRect();
+        const tipRect = tooltip.getBoundingClientRect();
+
+        let left =
+            triggerRect.left
+            + (triggerRect.width / 2)
+            - (tipRect.width / 2);
+
+        left = Math.max(
+            EDGE,
+            Math.min(
+                left,
+                window.innerWidth - tipRect.width - EDGE
+            )
+        );
+
+        let top = triggerRect.bottom + GAP;
+
+        if (
+            top + tipRect.height
+            > window.innerHeight - EDGE
+        ) {
+            top =
+                triggerRect.top
+                - tipRect.height
+                - GAP;
+        }
+
+        top = Math.max(
+            EDGE,
+            Math.min(
+                top,
+                window.innerHeight - tipRect.height - EDGE
+            )
+        );
+
+        tooltip.style.left =
+            Math.round(left) + "px";
+
+        tooltip.style.top =
+            Math.round(top) + "px";
+    }
+
+    function openTooltip(wrapper) {
+        wrapper.classList.add("tooltip-open");
+
+        requestAnimationFrame(
+            () => positionTooltip(wrapper)
+        );
+    }
+
+    function closeTooltip(wrapper) {
+        wrapper.classList.remove("tooltip-open");
+    }
+
+    document
+        .querySelectorAll(".valuation-hover")
+        .forEach((wrapper) => {
+            wrapper.addEventListener(
+                "mouseenter",
+                () => openTooltip(wrapper)
+            );
+
+            wrapper.addEventListener(
+                "mouseleave",
+                () => closeTooltip(wrapper)
+            );
+
+            wrapper.addEventListener(
+                "focusin",
+                () => openTooltip(wrapper)
+            );
+
+            wrapper.addEventListener(
+                "focusout",
+                () => closeTooltip(wrapper)
+            );
+        });
+
+    window.addEventListener(
+        "resize",
+        () => {
+            document
+                .querySelectorAll(
+                    ".valuation-hover.tooltip-open"
+                )
+                .forEach(positionTooltip);
+        }
+    );
+
+    window.addEventListener(
+        "scroll",
+        () => {
+            document
+                .querySelectorAll(
+                    ".valuation-hover.tooltip-open"
+                )
+                .forEach(positionTooltip);
+        },
+        true
+    );
+
+    try {
+        const key =
+            "laptop-lander-valuation-hint-seen";
+
+        if (!localStorage.getItem(key)) {
+            const info =
+                document.querySelector(
+                    ".valuation-info"
+                );
+
+            if (info) {
+                info.classList.add(
+                    "discovery-pulse"
+                );
+
+                setTimeout(
+                    () => {
+                        info.classList.remove(
+                            "discovery-pulse"
+                        );
+                    },
+                    2200
+                );
+            }
+
+            localStorage.setItem(
+                key,
+                "1"
+            );
+        }
+    } catch (e) {
+        // localStorage unavailable; ignore.
+    }
+})();
+</script>
+"""
+
     if "</body>" in page:
         page = page.replace(
             "</body>",
             _DASHBOARD_UI_ENHANCEMENT
+            + "\n"
+            + valuation_tooltip_script
             + "\n</body>",
             1,
         )
     else:
-        page += _DASHBOARD_UI_ENHANCEMENT
+        page += (
+            _DASHBOARD_UI_ENHANCEMENT
+            + valuation_tooltip_script
+        )
 
     nav = _site_nav("deals")
 
