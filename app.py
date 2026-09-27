@@ -54,6 +54,20 @@ VERSION = "0.8.1"
 
 # eBay short-term rate-limit protection.
 EBAY_429_COOLDOWN_SECONDS = 600
+
+
+class EbayRateLimited(Exception):
+    """Raised when an eBay API request is rate limited."""
+    pass
+
+
+
+def ebay_rate_limit_remaining():
+    return max(
+        0,
+        int(_ebay_rate_limited_until - time.time())
+    )
+
 _ebay_rate_limited_until = 0.0
 
 
