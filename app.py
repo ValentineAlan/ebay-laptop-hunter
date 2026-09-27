@@ -5072,7 +5072,7 @@ def money(value):
     )
 
 
-def dashboard_html():
+def _dashboard_html_base():
     conn = connect_db()
 
     rows = conn.execute("""
@@ -5635,6 +5635,858 @@ class DashboardHandler(
         *args
     ):
         pass
+
+
+def _dashboard_state_age_seconds(value):
+    if not value:
+        return None
+
+    try:
+        stamp = datetime.fromisoformat(
+            str(value).replace("Z", "+00:00")
+        )
+
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(
+                tzinfo=timezone.utc
+            )
+
+        return max(
+            0,
+            (
+                utcnow()
+                - stamp.astimezone(timezone.utc)
+            ).total_seconds()
+        )
+
+    except Exception:
+        return None
+
+
+def _dashboard_health_alert():
+    """
+    Healthy operational state is silent.
+
+    Only return visible UI when something needs attention.
+    """
+    problems = []
+
+    try:
+        session = _read_json_file(
+            PRODUCT_RESEARCH_SESSION_STATE
+        ) or {}
+    except Exception:
+        session = {}
+
+    try:
+        helper = _read_json_file(
+            PRODUCT_RESEARCH_HELPER_STATE
+        ) or {}
+    except Exception:
+        helper = {}
+
+    session_status = normalise(
+        session.get("status")
+    ).upper()
+
+    if session_status != "WORKING":
+        problems.append(
+            "Product Research session is not working"
+        )
+
+    success_age = _dashboard_state_age_seconds(
+        session.get("last_success_at")
+    )
+
+    # Don't alert merely because the app has only just started.
+    if (
+        success_age is not None
+        and success_age > 15 * 60
+    ):
+        problems.append(
+            "No successful Product Research sold search "
+            f"for {int(success_age // 60)} minutes"
+        )
+
+    helper_status = normalise(
+        helper.get("status")
+    ).upper()
+
+    if helper_status and helper_status not in {
+        "CONNECTED",
+        "WORKING",
+    }:
+        problems.append(
+            "Chromium session helper is disconnected"
+        )
+
+    helper_age = _dashboard_state_age_seconds(
+        helper.get("last_seen_at")
+    )
+
+    if (
+        helper_age is not None
+        and helper_age > 5 * 60
+    ):
+        problems.append(
+            "Chromium session helper has not been seen "
+            f"for {int(helper_age // 60)} minutes"
+        )
+
+    # Shared central eBay 429 cooldown, if available.
+    try:
+        remaining = ebay_rate_limit_remaining()
+    except Exception:
+        remaining = 0
+
+    if remaining > 0:
+        minutes, seconds = divmod(
+            int(remaining),
+            60,
+        )
+
+        problems.append(
+            "eBay API rate limit active — "
+            f"detail requests paused for "
+            f"{minutes}m {seconds:02d}s; "
+            "other processing continues"
+        )
+
+    if not problems:
+        return ""
+
+    items = "".join(
+        "<li>"
+        + html.escape(problem)
+        + "</li>"
+        for problem in problems
+    )
+
+    return (
+        "<div id='system-health-alert' "
+        "class='system-health-alert'>"
+        "<strong>SYSTEM HEALTH ALERT</strong>"
+        "<ul>"
+        + items
+        + "</ul>"
+        "</div>"
+    )
+
+
+_DASHBOARD_UI_ENHANCEMENT = r"""
+<style>
+.system-health-alert {
+    margin: 12px;
+    padding: 14px 18px;
+    border: 2px solid #b3261e;
+    border-radius: 8px;
+    background: #fff4f3;
+    color: #7d1712;
+}
+
+.system-health-alert strong {
+    font-size: 18px;
+}
+
+.system-health-alert ul {
+    margin: 7px 0 0 20px;
+    padding: 0;
+}
+
+.sortable-header {
+    cursor: pointer;
+    user-select: none;
+}
+
+.sortable-header:hover {
+    background: #e3e3e3;
+}
+
+.sort-indicator {
+    display: inline-block;
+    width: 1em;
+    margin-left: 4px;
+    font-size: 11px;
+}
+
+.evidence-cell {
+    text-align: center;
+    white-space: nowrap;
+}
+
+.evidence-badge {
+    position: relative;
+    display: inline-block;
+    min-width: 28px;
+    padding: 4px 8px;
+    border: 1px solid #bbb;
+    border-radius: 12px;
+    background: #f5f5f5;
+    font-weight: bold;
+    cursor: help;
+}
+
+.evidence-tooltip {
+    display: none;
+    position: absolute;
+    z-index: 10000;
+    left: 50%;
+    top: calc(100% + 8px);
+    transform: translateX(-50%);
+    width: min(520px, 80vw);
+    max-height: 420px;
+    overflow: auto;
+    white-space: normal;
+    text-align: left;
+    font-weight: normal;
+    font-size: 13px;
+    line-height: 1.35;
+    padding: 12px;
+    border: 1px solid #777;
+    border-radius: 6px;
+    background: white;
+    color: #111;
+    box-shadow: 0 4px 18px rgba(0,0,0,.22);
+}
+
+.evidence-badge:hover .evidence-tooltip {
+    display: block;
+}
+
+.evidence-tooltip .summary {
+    margin-bottom: 8px;
+    font-weight: bold;
+}
+
+.evidence-tooltip .sale {
+    padding: 6px 0;
+    border-top: 1px solid #ddd;
+}
+
+.evidence-tooltip .sale-title {
+    margin-top: 2px;
+    color: #444;
+}
+
+th.sorted-asc,
+th.sorted-desc {
+    background: #dedede;
+}
+</style>
+
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+    // --------------------------------------------------------
+    // Hide implementation/debug cards when everything is healthy.
+    // --------------------------------------------------------
+
+    const unwantedCardText = [
+        "API calls today",
+        "USB-C charging models awaiting verification",
+        "Windows 11 CPUs awaiting verification",
+        "Product Research session",
+        "Since session refresh",
+        "Chromium session helper"
+    ];
+
+    document.querySelectorAll(".card").forEach(card => {
+        const text = card.textContent || "";
+
+        if (
+            unwantedCardText.some(
+                phrase => text.includes(phrase)
+            )
+        ) {
+            card.remove();
+        }
+    });
+
+
+    // --------------------------------------------------------
+    // Locate listings table.
+    // --------------------------------------------------------
+
+    const tables = Array.from(
+        document.querySelectorAll("table")
+    );
+
+    const table = tables.find(t => {
+        const headers = Array.from(
+            t.querySelectorAll("th")
+        ).map(
+            h => h.textContent.trim()
+        );
+
+        return (
+            headers.includes("Listing")
+            && headers.some(
+                x => x.includes("Apparent")
+            )
+            && headers.includes("Score")
+        );
+    });
+
+    if (!table) {
+        return;
+    }
+
+    const headerRow = table.querySelector("thead tr")
+        || table.querySelector("tr");
+
+    if (!headerRow) {
+        return;
+    }
+
+    const headerCells = Array.from(
+        headerRow.children
+    );
+
+    let scoreIndex = headerCells.findIndex(
+        th => th.textContent.trim() === "Score"
+    );
+
+    if (scoreIndex < 0) {
+        scoreIndex = Math.min(
+            6,
+            headerCells.length - 1
+        );
+    }
+
+    // --------------------------------------------------------
+    // Add Sold evidence header after Score.
+    // --------------------------------------------------------
+
+    const evidenceHeader = document.createElement("th");
+    evidenceHeader.textContent = "Sold evidence";
+
+    headerRow.insertBefore(
+        evidenceHeader,
+        headerRow.children[scoreIndex + 1] || null
+    );
+
+
+    // --------------------------------------------------------
+    // Convert current expanded evidence rows into compact cells.
+    // --------------------------------------------------------
+
+    const body = table.tBodies.length
+        ? table.tBodies[0]
+        : table;
+
+    const allRows = Array.from(
+        body.querySelectorAll(":scope > tr")
+    );
+
+    const listingRows = [];
+
+    for (let i = 0; i < allRows.length; i++) {
+
+        const row = allRows[i];
+
+        if (
+            row === headerRow
+            || row.closest("thead")
+        ) {
+            continue;
+        }
+
+        const cells = Array.from(
+            row.children
+        );
+
+        // Evidence rows currently contain the "Show sold evidence"
+        // details element and typically span the entire table.
+        const isEvidenceRow =
+            cells.length === 1
+            && (
+                row.textContent.includes(
+                    "Show sold evidence"
+                )
+                || row.querySelector("details")
+            );
+
+        if (isEvidenceRow) {
+            continue;
+        }
+
+        if (cells.length >= 5) {
+            listingRows.push(row);
+        }
+    }
+
+
+    listingRows.forEach(row => {
+
+        let next = row.nextElementSibling;
+
+        let evidenceRow = null;
+
+        if (
+            next
+            && (
+                next.textContent.includes(
+                    "Show sold evidence"
+                )
+                || next.querySelector("details")
+            )
+        ) {
+            evidenceRow = next;
+        }
+
+        const cell = document.createElement("td");
+        cell.className = "evidence-cell";
+
+        let soldRows = [];
+        let totalSales = 0;
+        let soldListingCount = 0;
+
+        if (evidenceRow) {
+
+            // Nested sold evidence table.
+            const nested = evidenceRow.querySelector("table");
+
+            if (nested) {
+                const nestedRows = Array.from(
+                    nested.querySelectorAll("tr")
+                ).filter(
+                    tr => tr.querySelectorAll("td").length >= 5
+                );
+
+                soldRows = nestedRows.map(tr => {
+
+                    const td = Array.from(
+                        tr.querySelectorAll("td")
+                    );
+
+                    const title =
+                        td[0]?.textContent.trim() || "";
+
+                    // Delivered sold price is column 1 in the
+                    // current evidence table.
+                    const price =
+                        td[1]?.textContent.trim() || "—";
+
+                    // Units sold is column 4.
+                    const unitsText =
+                        td[4]?.textContent.trim() || "1";
+
+                    const units = parseInt(
+                        unitsText.replace(/[^\d]/g, ""),
+                        10
+                    ) || 1;
+
+                    // Last sold is column 5.
+                    const soldDate =
+                        td[5]?.textContent.trim() || "—";
+
+                    totalSales += units;
+
+                    return {
+                        title,
+                        price,
+                        units,
+                        soldDate
+                    };
+                });
+
+                soldListingCount = soldRows.length;
+            }
+
+            evidenceRow.remove();
+        }
+
+
+        // ----------------------------------------------------
+        // Pull Q1 / median / Q3 from the visible value cell.
+        // ----------------------------------------------------
+
+        const currentCells = Array.from(
+            row.children
+        );
+
+        let valueCell = null;
+
+        const headerNow = Array.from(
+            headerRow.children
+        );
+
+        const valueIndex = headerNow.findIndex(
+            th =>
+                th.textContent.includes("Value")
+                || th.textContent.includes(
+                    "asking reference"
+                )
+        );
+
+        if (
+            valueIndex >= 0
+            && currentCells[valueIndex]
+        ) {
+            valueCell = currentCells[valueIndex];
+        }
+
+        const valueText =
+            valueCell?.textContent || "";
+
+        const moneyValues = Array.from(
+            valueText.matchAll(
+                /£\s*([\d,]+(?:\.\d+)?)/g
+            )
+        ).map(
+            m => m[1]
+        );
+
+        const median = moneyValues[0]
+            ? "£" + moneyValues[0]
+            : "—";
+
+        let q1 = "—";
+        let q3 = "—";
+
+        if (moneyValues.length >= 3) {
+            q1 = "£" + moneyValues[1];
+            q3 = "£" + moneyValues[2];
+        }
+
+
+        // Confidence value.
+        const confidenceIndex = headerNow.findIndex(
+            th => th.textContent.trim() === "Confidence"
+        );
+
+        const confidence =
+            confidenceIndex >= 0
+            && currentCells[confidenceIndex]
+                ? currentCells[
+                    confidenceIndex
+                ].textContent.trim().split(/\s+/)[0]
+                : "—";
+
+
+        if (soldListingCount > 0) {
+
+            const badge = document.createElement("span");
+            badge.className = "evidence-badge";
+
+            // Main number = actual sales/units represented.
+            badge.appendChild(
+                document.createTextNode(
+                    String(totalSales)
+                )
+            );
+
+            const tooltip = document.createElement("div");
+            tooltip.className = "evidence-tooltip";
+
+            const summary = document.createElement("div");
+            summary.className = "summary";
+
+            summary.textContent =
+                soldListingCount
+                + (
+                    soldListingCount === 1
+                    ? " sold listing / "
+                    : " sold listings / "
+                )
+                + totalSales
+                + (
+                    totalSales === 1
+                    ? " sale"
+                    : " sales"
+                )
+                + " | Q1 "
+                + q1
+                + " | Median "
+                + median
+                + " | Q3 "
+                + q3
+                + " | Confidence "
+                + confidence;
+
+            tooltip.appendChild(summary);
+
+            soldRows.forEach(sale => {
+
+                const line = document.createElement("div");
+                line.className = "sale";
+
+                const first = document.createElement("div");
+
+                first.textContent =
+                    sale.price
+                    + " — "
+                    + sale.soldDate
+                    + (
+                        sale.units > 1
+                        ? " — " + sale.units + " sales"
+                        : ""
+                    );
+
+                const title = document.createElement("div");
+                title.className = "sale-title";
+                title.textContent = sale.title;
+
+                line.appendChild(first);
+                line.appendChild(title);
+
+                tooltip.appendChild(line);
+            });
+
+            badge.appendChild(tooltip);
+            cell.appendChild(badge);
+
+            cell.dataset.sort = String(totalSales);
+
+        } else {
+
+            cell.textContent = "—";
+            cell.dataset.sort = "0";
+        }
+
+        row.insertBefore(
+            cell,
+            row.children[scoreIndex + 1] || null
+        );
+    });
+
+
+    // Remove any orphaned evidence rows.
+    Array.from(
+        body.querySelectorAll(":scope > tr")
+    ).forEach(row => {
+
+        if (
+            row.textContent.includes(
+                "Show sold evidence"
+            )
+            && row.children.length === 1
+        ) {
+            row.remove();
+        }
+    });
+
+
+    // --------------------------------------------------------
+    // Sorting
+    // --------------------------------------------------------
+
+    const headers = Array.from(
+        headerRow.children
+    );
+
+    const numericNames = new Set([
+        "Delivered",
+        "Value / asking reference",
+        "Apparent undervalue",
+        "Score",
+        "Sold evidence"
+    ]);
+
+    function numericValue(text) {
+
+        const cleaned = String(text)
+            .replace(/,/g, "")
+            .match(/-?\d+(?:\.\d+)?/);
+
+        return cleaned
+            ? parseFloat(cleaned[0])
+            : Number.NEGATIVE_INFINITY;
+    }
+
+    function ageSeconds(text) {
+
+        text = String(text).toLowerCase();
+
+        let seconds = 0;
+
+        const d = text.match(/(\d+)\s*d/);
+        const h = text.match(/(\d+)\s*h/);
+        const m = text.match(/(\d+)\s*m/);
+
+        if (d) seconds += Number(d[1]) * 86400;
+        if (h) seconds += Number(h[1]) * 3600;
+        if (m) seconds += Number(m[1]) * 60;
+
+        return seconds;
+    }
+
+    function confidenceRank(text) {
+
+        const t = String(text).toUpperCase();
+
+        if (t.includes("HIGH")) return 3;
+        if (t.includes("MEDIUM")) return 2;
+        if (t.includes("LOW")) return 1;
+
+        return 0;
+    }
+
+    function sortValue(row, index, name) {
+
+        const td = row.children[index];
+
+        if (!td) {
+            return "";
+        }
+
+        if (td.dataset.sort !== undefined) {
+            return Number(td.dataset.sort);
+        }
+
+        const text = td.textContent.trim();
+
+        if (name === "Listing age") {
+            return ageSeconds(text);
+        }
+
+        if (name === "Confidence") {
+            return confidenceRank(text);
+        }
+
+        if (numericNames.has(name)) {
+            return numericValue(text);
+        }
+
+        return text.toLowerCase();
+    }
+
+
+    headers.forEach((th, index) => {
+
+        const name = th.textContent.trim();
+
+        th.classList.add(
+            "sortable-header"
+        );
+
+        const indicator = document.createElement("span");
+        indicator.className = "sort-indicator";
+
+        th.appendChild(indicator);
+
+        let ascending = true;
+
+        th.addEventListener("click", () => {
+
+            headers.forEach(other => {
+                other.classList.remove(
+                    "sorted-asc",
+                    "sorted-desc"
+                );
+
+                const marker = other.querySelector(
+                    ".sort-indicator"
+                );
+
+                if (marker) {
+                    marker.textContent = "";
+                }
+            });
+
+
+            const rows = Array.from(
+                body.querySelectorAll(":scope > tr")
+            ).filter(
+                r => r.children.length === headers.length
+            );
+
+
+            rows.sort((a, b) => {
+
+                const av = sortValue(
+                    a,
+                    index,
+                    name
+                );
+
+                const bv = sortValue(
+                    b,
+                    index,
+                    name
+                );
+
+                let result;
+
+                if (
+                    typeof av === "number"
+                    && typeof bv === "number"
+                ) {
+                    result = av - bv;
+                } else {
+                    result = String(av).localeCompare(
+                        String(bv),
+                        undefined,
+                        {
+                            numeric: true,
+                            sensitivity: "base"
+                        }
+                    );
+                }
+
+                return ascending
+                    ? result
+                    : -result;
+            });
+
+
+            rows.forEach(
+                r => body.appendChild(r)
+            );
+
+            th.classList.add(
+                ascending
+                ? "sorted-asc"
+                : "sorted-desc"
+            );
+
+            indicator.textContent =
+                ascending ? "▲" : "▼";
+
+            ascending = !ascending;
+        });
+    });
+
+});
+</script>
+"""
+
+
+def dashboard_html():
+    page = _dashboard_html_base()
+
+    health = _dashboard_health_alert()
+
+    if health:
+        body_pos = page.lower().find("<body")
+
+        if body_pos >= 0:
+            close = page.find(
+                ">",
+                body_pos
+            )
+
+            if close >= 0:
+                page = (
+                    page[:close + 1]
+                    + health
+                    + page[close + 1:]
+                )
+        else:
+            page = health + page
+
+    if "</body>" in page:
+        page = page.replace(
+            "</body>",
+            _DASHBOARD_UI_ENHANCEMENT
+            + "\n</body>",
+            1,
+        )
+    else:
+        page += _DASHBOARD_UI_ENHANCEMENT
+
+    return page
+
 
 def start_dashboard():
     server = ThreadingHTTPServer(
