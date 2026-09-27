@@ -1,4 +1,4 @@
-# eBay Laptop Hunter v0.8.1
+# eBay Laptop Hunter v0.9.5
 #
 # Features:
 #   - eBay GB laptop discovery
@@ -50,7 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.3"
+APP_VERSION = "0.9.5"
 CLASSIFIER_VERSION = "0.8.1"
 MIN_UNDERVALUE_GBP = 20.0
 
@@ -5228,6 +5228,17 @@ def _dashboard_html_base():
                 f"{row['storage_gb']}GB"
             )
 
+        identity = " ".join(
+            x for x in [
+                row["brand"],
+                row["model"],
+            ]
+            if x
+        )
+
+        if identity:
+            spec.insert(0, identity)
+
         spec_text = " / ".join(
             spec
         ) or "Specifications incomplete"
@@ -5325,13 +5336,43 @@ def _dashboard_html_base():
             else:
                 sales_wording = f"{count} sold comparables"
 
+        sales_total = sum(
+            int(c["units"] or 1)
+            for c in evidence
+        )
+
+        def compact_mark(value):
+            if value is True or value == 1:
+                return "✓"
+            if value is False or value == 0:
+                return "✗"
+
+            text = normalise(value).lower()
+
+            if text in ("yes", "true", "approved", "supported"):
+                return "✓"
+
+            if text in ("no", "false", "unsupported", "not approved"):
+                return "✗"
+
+            return "?"
+
+        win11_mark = compact_mark(row["win11"])
+        usbc_mark = compact_mark(row["usbc_pd"])
+
+        hover_evidence_html = (
+            evidence_html
+            .replace("<details class='evidence'>", "<div class='evidence'>")
+            .replace("<summary>Show sold evidence</summary>", "")
+            .replace("</details>", "</div>")
+        )
+
         body_rows.append(
             f"""
             <tr>
                 <td>
-                    <a href="{url}"
-                       target="_blank">
-                       {title}
+                    <a href="{url}" target="_blank">
+                        {title}
                     </a>
                     <div class="small">
                         {html.escape(spec_text)}
@@ -5340,134 +5381,69 @@ def _dashboard_html_base():
 
                 <td>
                     {age_html}
-                    <div class="small">{age_label}</div>
                 </td>
 
-                <td>
-                    {html.escape(
-                        row["brand"]
-                        or "?"
-                    )}
-                    <br>
-                    <span class="small">
-                    {html.escape(
-                        row["model"]
-                        or "?"
-                    )}
-                    </span>
-                </td>
-
-                <td class="money">
+                <td class="money"
+                    data-sort="{row['total'] if row['total'] is not None else -1}">
                     {money(row["total"])}
                 </td>
 
-                <td class="money">
-                    {money(
-                        row[
-                            "estimated_value"
-                        ]
-                    )}
-                    <div class="small">
-                    <br>
-                    {
-                        (
-                            money(
-                                row[
-                                    "valuation_q1"
-                                ]
-                            )
-                            + " – "
-                            + money(
-                                row[
-                                    "valuation_q3"
-                                ]
-                            )
-                        )
-                        if row[
-                            "valuation_q1"
-                        ] is not None
-                        else ""
-                    }
-                    </div>
+                <td class="money good"
+                    data-sort="{row['undervaluation_gbp'] if row['undervaluation_gbp'] is not None else -999999}">
+                    <span class="valuation-hover">
+                        {under}
+
+                        <span class="valuation-tooltip">
+                            <div class="valuation-summary">
+                                <strong>Estimated value:</strong>
+                                {money(row["estimated_value"])}
+
+                                {
+                                    (
+                                        "<br>Q1: "
+                                        + money(row["valuation_q1"])
+                                        + " · Median: "
+                                        + money(row["estimated_value"])
+                                        + " · Q3: "
+                                        + money(row["valuation_q3"])
+                                    )
+                                    if row["valuation_q1"] is not None
+                                    else ""
+                                }
+
+                                <br>
+                                {html.escape(sales_wording)}
+                            </div>
+
+                            {hover_evidence_html}
+                        </span>
+                    </span>
                 </td>
 
-                <td class="money good">
-                    {under}
-                </td>
-
-                <td>
+                <td data-sort="{row['deal_score'] if row['deal_score'] is not None else -1}">
                     <span class="big">
-                    {score}
+                        {score}
                     </span>
                 </td>
 
-                <td>
-                    {
-                        html.escape(
-                            row[
-                                "valuation_confidence"
-                            ]
-                            or "—"
-                        )
-                    }
-                    <div class="small">
-                    {html.escape(sales_wording)}
-                    <br>
-                    {
-                        html.escape(
-                            valuation_label(row["valuation_basis"] or "")
-                        )
-                    }
+                <td data-sort="{
+                    3 if row['valuation_confidence'] == 'HIGH'
+                    else 2 if row['valuation_confidence'] == 'MEDIUM'
+                    else 1 if row['valuation_confidence'] == 'LOW'
+                    else 0
+                }">
+                    <strong>
+                        {html.escape(row["valuation_confidence"] or "—")}
+                    </strong>
+
+                    <div class="small confidence-meta">
+                        Win 11: {win11_mark}
+                        · USB-C PD: {usbc_mark}
+                        · Sales: {sales_total}
+                        · Condition: {html.escape(row["status"] or "—")}
                     </div>
-                </td>
-
-                <td>
-                    {
-                        html.escape(
-                            row["status"]
-                            or ""
-                        )
-                    }
-                </td>
-
-                <td>
-                    Windows 11 approved:
-                    {yesno(row["win11"])}
-                    <br>
-                    USB-C charging:
-                    {yesno(row["usbc_pd"])}
-                    <br>
-                    <span class="small">
-                    {html.escape(row["usbc_pd_confidence"] or "UNKNOWN")}
-                    {
-                        " · " + html.escape(row["usbc_pd_source"])
-                        if row["usbc_pd_source"]
-                        else ""
-                    }
-                    {
-                        " · " + str(row["usbc_pd_watts"]) + "W"
-                        if row["usbc_pd_watts"]
-                        else ""
-                    }
-                    </span>
-                    {
-                        "<br><span class='small'>"
-                        + html.escape(row["usbc_pd_evidence"] or "")
-                        + "</span>"
-                        if row["usbc_pd_evidence"]
-                        else ""
-                    }
                 </td>
             </tr>
-            {
-                (
-                    "<tr class='evidence-row'><td colspan='10'>"
-                    + evidence_html
-                    + "</td></tr>"
-                )
-                if evidence_html
-                else ""
-            }
             """
         )
 
@@ -5489,7 +5465,7 @@ def _dashboard_html_base():
     <h1>eBay Laptop Hunter</h1>
 
     <div class="sub">
-        v{CLASSIFIER_VERSION} —
+        v{APP_VERSION} —
         sold-market bargain dashboard
     </div>
 
@@ -5510,56 +5486,6 @@ def _dashboard_html_base():
             Below estimated value
         </div>
 
-        <div class="card">
-            <div class="big">{api_calls}</div>
-            API calls today
-        </div>
-
-        <div class="card">
-            <div class="big">{capability_pending}</div>
-            USB-C charging models awaiting verification
-        </div>
-
-        <div class="card">
-            <div class="big">{win11_pending}</div>
-            Windows 11 CPUs awaiting verification
-        </div>
-
-        <div class="card">
-            <div class="big">{valuation_backlog}</div>
-            <div class="small">
-            Ready but insufficient sales: <strong>{ready_unvalued}</strong>
-             &nbsp;·&nbsp; Incomplete identity/spec: <strong>{incomplete_spec}</strong>
-             &nbsp;·&nbsp; Condition/review: <strong>{condition_review}</strong>
-             &nbsp;·&nbsp; Unknown delivered cost: <strong>{unknown_cost}</strong>
-            </div>
-            Identifiable laptops awaiting valuation
-        </div>
-
-        <div class="card">
-            <div class="big {session_class}">{html.escape(session_status)}</div>
-            Product Research session
-            <div class="small">
-                Checked {html.escape(session_last_checked)} ago<br>
-                {html.escape(session_state.get("message", "No session check yet"))}
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="big">{html.escape(session_last_refresh)}</div>
-            Since session refresh
-            <div class="small">
-                Source: {html.escape(session_state.get("last_refresh_source", "—"))}<br>
-                SID: {html.escape(session_state.get("ebaysid_hash", "—"))}
-            </div>
-        </div>
-
-        <div class="card">
-            <div class="big">{html.escape(helper_status)}</div>
-            Chromium session helper
-            <div class="small">Last seen {html.escape(helper_seen)} ago</div>
-        </div>
-
     </div>
 
     <table>
@@ -5567,15 +5493,11 @@ def _dashboard_html_base():
     <thead>
     <tr>
         <th>Listing</th>
-        <th>Listing age</th>
-        <th>Model</th>
-        <th>Delivered</th>
-        <th>Value / asking reference</th>
-        <th>Apparent undervalue</th>
+        <th>Age</th>
+        <th>Price</th>
+        <th>Undervaluation</th>
         <th>Score</th>
         <th>Confidence</th>
-        <th>Condition</th>
-        <th>Eligibility</th>
     </tr>
     </thead>
 
@@ -5788,1344 +5710,157 @@ _DASHBOARD_UI_ENHANCEMENT = r"""
     color: #7d1712;
 }
 
-.system-health-alert strong {
-    font-size: 18px;
-}
-
-.system-health-alert ul {
-    margin: 7px 0 0 20px;
-    padding: 0;
-}
-
 .sortable-header {
     cursor: pointer;
     user-select: none;
-}
-
-.sortable-header:hover {
-    background: #e3e3e3;
 }
 
 .sort-indicator {
     display: inline-block;
     width: 1em;
     margin-left: 4px;
-    font-size: 11px;
+    font-size: 10px;
 }
 
-.evidence-cell {
-    text-align: center;
-    white-space: nowrap;
-}
-
-.evidence-badge {
+.valuation-hover {
     position: relative;
     display: inline-block;
-    min-width: 28px;
-    padding: 4px 8px;
-    border: 1px solid #bbb;
-    border-radius: 12px;
-    background: #f5f5f5;
-    font-weight: bold;
     cursor: help;
 }
 
-.evidence-tooltip {
+.valuation-tooltip {
     display: none;
     position: absolute;
     z-index: 10000;
     left: 50%;
     top: calc(100% + 8px);
     transform: translateX(-50%);
-    width: min(520px, 80vw);
-    max-height: 420px;
-    overflow: auto;
-    white-space: normal;
-    text-align: left;
-    font-weight: normal;
-    font-size: 13px;
-    line-height: 1.35;
+    width: min(620px, 82vw);
+    max-height: 460px;
+    overflow-y: auto;
     padding: 12px;
     border: 1px solid #777;
     border-radius: 6px;
     background: white;
     color: #111;
+    text-align: left;
+    white-space: normal;
+    font-weight: normal;
+    font-size: 13px;
+    line-height: 1.4;
     box-shadow: 0 4px 18px rgba(0,0,0,.22);
 }
 
-.evidence-badge:hover .evidence-tooltip {
+.valuation-hover:hover .valuation-tooltip {
     display: block;
 }
 
-.evidence-tooltip .summary {
+.valuation-summary {
     margin-bottom: 8px;
-    font-weight: bold;
 }
 
-.evidence-tooltip .sale {
-    padding: 6px 0;
-    border-top: 1px solid #ddd;
+.valuation-tooltip .evidence-table {
+    margin-top: 8px;
+    font-size: 12px;
 }
 
-.evidence-tooltip .sale-title {
-    margin-top: 2px;
-    color: #444;
-}
-
-th.sorted-asc,
-th.sorted-desc {
-    background: #dedede;
+.confidence-meta {
+    white-space: nowrap;
+    margin-top: 3px;
 }
 </style>
 
 <script>
 document.addEventListener("DOMContentLoaded", () => {
 
-    const SORT_KEY = "ebayLaptopHunterSort";
-
-    // --------------------------------------------------------
-    // Hide operational/debug cards when healthy.
-    // --------------------------------------------------------
-
-    const unwantedCardText = [
-        "API calls today",
-        "USB-C charging models awaiting verification",
-        "Windows 11 CPUs awaiting verification",
-        "Product Research session",
-        "Since session refresh",
-        "Chromium session helper"
-    ];
-
-    document.querySelectorAll(".card").forEach(card => {
-        const text = card.textContent || "";
-
-        if (
-            unwantedCardText.some(
-                phrase => text.includes(phrase)
-            )
-        ) {
-            card.remove();
-        }
-    });
-
-
-    // --------------------------------------------------------
-    // Locate listings table.
-    // --------------------------------------------------------
-
-    const tables = Array.from(
+    const table = Array.from(
         document.querySelectorAll("table")
-    );
-
-    const table = tables.find(t => {
-
-        const headers = Array.from(
+    ).find(t => {
+        const h = Array.from(
             t.querySelectorAll("th")
-        ).map(
-            h => h.textContent.trim()
-        );
+        ).map(x => x.textContent.trim());
 
-        return (
-            headers.includes("Listing")
-            && headers.includes("Score")
-        );
+        return h.includes("Listing")
+            && h.includes("Undervaluation")
+            && h.includes("Score");
     });
 
-    if (!table) {
-        return;
-    }
+    if (!table) return;
 
-    const headerRow =
-        table.querySelector("thead tr")
-        || table.querySelector("tr");
+    const head = table.querySelector("thead tr");
+    const body = table.querySelector("tbody");
 
-    if (!headerRow) {
-        return;
-    }
+    if (!head || !body) return;
 
-    const body =
-        table.tBodies.length
-        ? table.tBodies[0]
-        : table;
+    const KEY = "ebayLaptopHunterSort";
+    const headers = Array.from(head.children);
 
-
-    // --------------------------------------------------------
-    // Helpers
-    // --------------------------------------------------------
-
-    function headerIndex(name) {
-
-        return Array.from(
-            headerRow.children
-        ).findIndex(
-            th => th.textContent.trim() === name
-        );
-    }
-
-
-    function findHeaderContaining(text) {
-
-        return Array.from(
-            headerRow.children
-        ).findIndex(
-            th => th.textContent.trim().includes(text)
-        );
-    }
-
-
-    function statusSymbol(text) {
-
-        const t = String(text || "")
-            .trim()
-            .toUpperCase();
-
-        if (
-            t.includes("YES")
-            || t.includes("SUPPORTED")
-            || t.includes("APPROVED")
-            || t.includes("PASS")
-            || t.includes("TRUE")
-            || t.includes("✓")
-        ) {
-            return "✓";
-        }
-
-        if (
-            t.includes("NO")
-            || t.includes("UNSUPPORTED")
-            || t.includes("NOT APPROVED")
-            || t.includes("FAIL")
-            || t.includes("FALSE")
-            || t.includes("✗")
-        ) {
-            return "✗";
-        }
-
-        return "?";
-    }
-
-
-    function numericValue(text) {
-
-        const match = String(text)
+    function numberValue(text) {
+        const m = String(text)
             .replace(/,/g, "")
             .match(/-?\d+(?:\.\d+)?/);
 
-        return match
-            ? parseFloat(match[0])
-            : Number.NEGATIVE_INFINITY;
+        return m ? Number(m[0]) : -Infinity;
     }
 
-
-    function ageSeconds(text) {
-
+    function ageValue(text) {
         text = String(text).toLowerCase();
 
-        let seconds = 0;
+        let value = 0;
 
         const d = text.match(/(\d+)\s*d/);
         const h = text.match(/(\d+)\s*h/);
         const m = text.match(/(\d+)\s*m/);
 
-        if (d) seconds += Number(d[1]) * 86400;
-        if (h) seconds += Number(h[1]) * 3600;
-        if (m) seconds += Number(m[1]) * 60;
+        if (d) value += Number(d[1]) * 86400;
+        if (h) value += Number(h[1]) * 3600;
+        if (m) value += Number(m[1]) * 60;
 
-        return seconds;
+        return value;
     }
 
+    function cellValue(row, index, name) {
+        const cell = row.children[index];
 
-    function confidenceRank(text) {
+        if (!cell) return "";
 
-        const t = String(text).toUpperCase();
-
-        if (t.includes("HIGH")) return 3;
-        if (t.includes("MEDIUM")) return 2;
-        if (t.includes("LOW")) return 1;
-
-        return 0;
-    }
-
-
-    // --------------------------------------------------------
-    // Convert old evidence detail rows into Sold evidence cell
-    // first, if previous enhancement has not already done so.
-    // --------------------------------------------------------
-
-    if (headerIndex("Sold evidence") < 0) {
-
-        let scoreIndex = headerIndex("Score");
-
-        if (scoreIndex < 0) {
-            scoreIndex = Math.min(
-                6,
-                headerRow.children.length - 1
-            );
+        if (
+            cell.dataset.sort !== undefined
+            && cell.dataset.sort !== ""
+        ) {
+            return Number(cell.dataset.sort);
         }
 
-        const evidenceHeader =
-            document.createElement("th");
+        const text = cell.textContent.trim();
 
-        evidenceHeader.textContent =
-            "Sold evidence";
-
-        headerRow.insertBefore(
-            evidenceHeader,
-            headerRow.children[scoreIndex + 1] || null
-        );
-
-
-        const rows = Array.from(
-            body.querySelectorAll(":scope > tr")
-        );
-
-        const listingRows = rows.filter(row => {
-
-            if (
-                row === headerRow
-                || row.closest("thead")
-            ) {
-                return false;
-            }
-
-            if (
-                row.children.length === 1
-                && (
-                    row.textContent.includes(
-                        "Show sold evidence"
-                    )
-                    || row.querySelector("details")
-                )
-            ) {
-                return false;
-            }
-
-            return row.children.length >= 5;
-        });
-
-
-        listingRows.forEach(row => {
-
-            const next = row.nextElementSibling;
-
-            let evidenceRow = null;
-
-            if (
-                next
-                && (
-                    next.textContent.includes(
-                        "Show sold evidence"
-                    )
-                    || next.querySelector("details")
-                )
-            ) {
-                evidenceRow = next;
-            }
-
-            const cell =
-                document.createElement("td");
-
-            cell.className =
-                "evidence-cell";
-
-            let totalSales = 0;
-            let soldListingCount = 0;
-            const soldRows = [];
-
-            if (evidenceRow) {
-
-                const nested =
-                    evidenceRow.querySelector("table");
-
-                if (nested) {
-
-                    const nestedRows = Array.from(
-                        nested.querySelectorAll("tr")
-                    ).filter(
-                        tr =>
-                            tr.querySelectorAll("td").length >= 5
-                    );
-
-                    nestedRows.forEach(tr => {
-
-                        const td = Array.from(
-                            tr.querySelectorAll("td")
-                        );
-
-                        const units =
-                            parseInt(
-                                (
-                                    td[4]?.textContent
-                                    || "1"
-                                ).replace(/[^\d]/g, ""),
-                                10
-                            ) || 1;
-
-                        totalSales += units;
-                        soldListingCount += 1;
-
-                        soldRows.push({
-                            title:
-                                td[0]?.textContent.trim()
-                                || "",
-                            price:
-                                td[1]?.textContent.trim()
-                                || "—",
-                            units,
-                            soldDate:
-                                td[5]?.textContent.trim()
-                                || "—"
-                        });
-                    });
-                }
-
-                evidenceRow.remove();
-            }
-
-            if (soldListingCount > 0) {
-
-                const badge =
-                    document.createElement("span");
-
-                badge.className =
-                    "evidence-badge";
-
-                badge.appendChild(
-                    document.createTextNode(
-                        String(totalSales)
-                    )
-                );
-
-                const tooltip =
-                    document.createElement("div");
-
-                tooltip.className =
-                    "evidence-tooltip";
-
-                const summary =
-                    document.createElement("div");
-
-                summary.className =
-                    "summary";
-
-                summary.textContent =
-                    soldListingCount
-                    + (
-                        soldListingCount === 1
-                        ? " sold listing / "
-                        : " sold listings / "
-                    )
-                    + totalSales
-                    + (
-                        totalSales === 1
-                        ? " sale"
-                        : " sales"
-                    );
-
-                tooltip.appendChild(summary);
-
-                soldRows.forEach(sale => {
-
-                    const line =
-                        document.createElement("div");
-
-                    line.className = "sale";
-
-                    const first =
-                        document.createElement("div");
-
-                    first.textContent =
-                        sale.price
-                        + " — "
-                        + sale.soldDate
-                        + (
-                            sale.units > 1
-                            ? " — "
-                              + sale.units
-                              + " sales"
-                            : ""
-                        );
-
-                    const title =
-                        document.createElement("div");
-
-                    title.className =
-                        "sale-title";
-
-                    title.textContent =
-                        sale.title;
-
-                    line.appendChild(first);
-                    line.appendChild(title);
-
-                    tooltip.appendChild(line);
-                });
-
-                badge.appendChild(tooltip);
-                cell.appendChild(badge);
-
-                cell.dataset.sort =
-                    String(totalSales);
-
-            } else {
-
-                cell.textContent = "—";
-                cell.dataset.sort = "0";
-            }
-
-            row.insertBefore(
-                cell,
-                row.children[scoreIndex + 1] || null
-            );
-        });
-
-
-        Array.from(
-            body.querySelectorAll(":scope > tr")
-        ).forEach(row => {
-
-            if (
-                row.children.length === 1
-                && row.textContent.includes(
-                    "Show sold evidence"
-                )
-            ) {
-                row.remove();
-            }
-        });
-    }
-
-
-    // --------------------------------------------------------
-    // Merge Sold evidence + Condition + Eligibility into
-    // Confidence.
-    // --------------------------------------------------------
-
-    let confidenceIndex =
-        headerIndex("Confidence");
-
-    const evidenceIndex =
-        headerIndex("Sold evidence");
-
-    const conditionIndex =
-        headerIndex("Condition");
-
-    const eligibilityIndex =
-        headerIndex("Eligibility");
-
-
-    if (confidenceIndex >= 0) {
-
-        const rows = Array.from(
-            body.querySelectorAll(":scope > tr")
-        ).filter(
-            row =>
-                row !== headerRow
-                && !row.closest("thead")
-                && row.children.length
-                   === headerRow.children.length
-        );
-
-
-        rows.forEach(row => {
-
-            const cells =
-                Array.from(row.children);
-
-            const confidenceCell =
-                cells[confidenceIndex];
-
-            if (!confidenceCell) {
-                return;
-            }
-
-            const baseConfidence =
-                confidenceCell.textContent
-                    .trim()
-                    .split(/\s+/)[0]
-                || "—";
-
-
-            // Preserve evidence node/tooltip.
-            let evidenceNode = null;
-            let salesCount = 0;
-
-            if (
-                evidenceIndex >= 0
-                && cells[evidenceIndex]
-            ) {
-
-                const evidenceCell =
-                    cells[evidenceIndex];
-
-                salesCount =
-                    Number(
-                        evidenceCell.dataset.sort
-                        || numericValue(
-                            evidenceCell.textContent
-                        )
-                        || 0
-                    );
-
-                const badge =
-                    evidenceCell.querySelector(
-                        ".evidence-badge"
-                    );
-
-                if (badge) {
-                    evidenceNode =
-                        badge.cloneNode(true);
-                }
-            }
-
-
-            const conditionText =
-                conditionIndex >= 0
-                && cells[conditionIndex]
-                    ? cells[
-                        conditionIndex
-                    ].textContent.trim()
-                    : "";
-
-
-            const eligibilityText =
-                eligibilityIndex >= 0
-                && cells[eligibilityIndex]
-                    ? cells[
-                        eligibilityIndex
-                    ].textContent.trim()
-                    : "";
-
-
-            // The current Eligibility cell contains the
-            // Windows 11 / USB-C capability status text.
-            const win11 =
-                statusSymbol(
-                    eligibilityText.match(
-                        /win(?:dows)?\s*11[^|,;]*/i
-                    )?.[0]
-                    || eligibilityText
-                );
-
-            const usbc =
-                statusSymbol(
-                    eligibilityText.match(
-                        /usb[- ]?c[^|,;]*/i
-                    )?.[0]
-                    || eligibilityText
-                );
-
-
-            confidenceCell.innerHTML = "";
-
-            const main =
-                document.createElement("div");
-
-            main.style.fontWeight = "bold";
-            main.textContent =
-                baseConfidence;
-
-            confidenceCell.appendChild(main);
-
-
-            const meta =
-                document.createElement("div");
-
-            meta.className = "small";
-            meta.style.whiteSpace = "nowrap";
-
-            meta.appendChild(
-                document.createTextNode(
-                    "Win 11: "
-                    + win11
-                    + "  USB-C PD: "
-                    + usbc
-                    + "  Sales: "
-                )
-            );
-
-            if (evidenceNode) {
-
-                // Make the evidence badge compact inside
-                // Confidence.
-                evidenceNode.style.padding =
-                    "0 4px";
-
-                evidenceNode.style.minWidth =
-                    "auto";
-
-                meta.appendChild(
-                    evidenceNode
-                );
-
-            } else {
-
-                meta.appendChild(
-                    document.createTextNode(
-                        String(salesCount)
-                    )
-                );
-            }
-
-
-            if (
-                conditionText
-                && conditionText !== "—"
-            ) {
-
-                const cond =
-                    document.createElement("div");
-
-                cond.className = "small";
-                cond.textContent =
-                    "Condition: "
-                    + conditionText;
-
-                confidenceCell.appendChild(
-                    meta
-                );
-
-                confidenceCell.appendChild(
-                    cond
-                );
-
-            } else {
-
-                confidenceCell.appendChild(
-                    meta
-                );
-            }
-
-            confidenceCell.dataset.sort =
-                String(
-                    confidenceRank(
-                        baseConfidence
-                    )
-                );
-        });
-
-
-        // Remove old columns right-to-left so indexes don't move.
-        const indexesToRemove = [
-            evidenceIndex,
-            conditionIndex,
-            eligibilityIndex
-        ]
-        .filter(
-            i => i >= 0
-        )
-        .sort(
-            (a, b) => b - a
-        );
-
-
-        indexesToRemove.forEach(index => {
-
-            if (
-                headerRow.children[index]
-            ) {
-                headerRow.children[index].remove();
-            }
-
-            Array.from(
-                body.querySelectorAll(":scope > tr")
-            ).forEach(row => {
-
-                if (
-                    row !== headerRow
-                    && !row.closest("thead")
-                    && row.children[index]
-                ) {
-                    row.children[index].remove();
-                }
-            });
-        });
-    }
-
-
-
-    // --------------------------------------------------------
-    // Compact table presentation
-    // --------------------------------------------------------
-
-    function cleanHeaderText() {
-        Array.from(headerRow.children).forEach(th => {
-
-            const text = th.textContent.trim();
-
-            if (text === "Delivered") {
-                th.textContent = "Price";
-            }
-
-            if (
-                text === "Apparent undervalue"
-                || text === "Apparent undervaluation"
-            ) {
-                th.textContent = "Undervaluation";
-            }
-        });
-    }
-
-    cleanHeaderText();
-
-
-    // --------------------------------------------------------
-    // Remove "eBay listed" repetition from Listing age.
-    // --------------------------------------------------------
-
-    let ageIndex = Array.from(
-        headerRow.children
-    ).findIndex(
-        th =>
-            th.textContent.trim() === "Listing age"
-            || th.textContent.trim() === "Age"
-    );
-
-    if (ageIndex >= 0) {
-
-        const ageHeader =
-            headerRow.children[ageIndex];
-
-        ageHeader.textContent = "Age";
-
-        Array.from(
-            body.querySelectorAll(":scope > tr")
-        ).forEach(row => {
-
-            const cell =
-                row.children[ageIndex];
-
-            if (!cell) {
-                return;
-            }
-
-            // Keep the visible relative age / NEW marker,
-            // remove repetitive label text.
-            cell.innerHTML =
-                cell.innerHTML
-                    .replace(
-                        /eBay listed\s*/gi,
-                        ""
-                    )
-                    .replace(
-                        /First seen\s*/gi,
-                        ""
-                    );
-        });
-    }
-
-
-    // --------------------------------------------------------
-    // Merge Model into specs line in Listing column.
-    // --------------------------------------------------------
-
-    let headersNow =
-        Array.from(headerRow.children);
-
-    const listingIndex =
-        headersNow.findIndex(
-            th =>
-                th.textContent.trim() === "Listing"
-        );
-
-    const modelIndex =
-        headersNow.findIndex(
-            th =>
-                th.textContent.trim() === "Model"
-        );
-
-    if (
-        listingIndex >= 0
-        && modelIndex >= 0
-    ) {
-
-        Array.from(
-            body.querySelectorAll(":scope > tr")
-        ).forEach(row => {
-
-            if (
-                row.children.length
-                !== headerRow.children.length
-            ) {
-                return;
-            }
-
-            const listingCell =
-                row.children[listingIndex];
-
-            const modelCell =
-                row.children[modelIndex];
-
-            if (
-                !listingCell
-                || !modelCell
-            ) {
-                return;
-            }
-
-            const model =
-                modelCell.textContent.trim();
-
-            if (
-                model
-                && model !== "—"
-            ) {
-
-                // Locate the existing specification line.
-                const smalls =
-                    listingCell.querySelectorAll(
-                        ".small"
-                    );
-
-                let specLine = null;
-
-                for (const el of smalls) {
-
-                    const text =
-                        el.textContent || "";
-
-                    if (
-                        /GB|RAM|SSD|HDD|NVMe|i[3579]-|Ryzen/i.test(
-                            text
-                        )
-                    ) {
-                        specLine = el;
-                        break;
-                    }
-                }
-
-                if (specLine) {
-
-                    const existing =
-                        specLine.textContent.trim();
-
-                    if (
-                        !existing
-                            .toLowerCase()
-                            .includes(
-                                model.toLowerCase()
-                            )
-                    ) {
-                        specLine.textContent =
-                            model
-                            + " / "
-                            + existing;
-                    }
-
-                } else {
-
-                    const line =
-                        document.createElement(
-                            "div"
-                        );
-
-                    line.className =
-                        "small";
-
-                    line.textContent =
-                        model;
-
-                    listingCell.appendChild(
-                        line
-                    );
-                }
-            }
-        });
-
-
-        // Remove Model column after copying its contents.
-        headerRow.children[
-            modelIndex
-        ].remove();
-
-        Array.from(
-            body.querySelectorAll(":scope > tr")
-        ).forEach(row => {
-
-            if (
-                row.children[modelIndex]
-            ) {
-                row.children[
-                    modelIndex
-                ].remove();
-            }
-        });
-    }
-
-
-    // --------------------------------------------------------
-    // Merge Value/reference + sold evidence tooltip into
-    // Undervaluation.
-    // --------------------------------------------------------
-
-    headersNow =
-        Array.from(headerRow.children);
-
-    let valueIndex =
-        headersNow.findIndex(
-            th =>
-                th.textContent.trim()
-                    .includes("Value")
-                || th.textContent.trim()
-                    .includes(
-                        "asking reference"
-                    )
-        );
-
-    let undervalueIndex =
-        headersNow.findIndex(
-            th =>
-                th.textContent.trim()
-                    === "Undervaluation"
-                || th.textContent.trim()
-                    .includes("undervalue")
-        );
-
-    let confidenceIndex =
-        headersNow.findIndex(
-            th =>
-                th.textContent.trim()
-                    === "Confidence"
-        );
-
-
-    if (
-        valueIndex >= 0
-        && undervalueIndex >= 0
-    ) {
-
-        Array.from(
-            body.querySelectorAll(":scope > tr")
-        ).forEach(row => {
-
-            if (
-                row.children.length
-                !== headerRow.children.length
-            ) {
-                return;
-            }
-
-            const valueCell =
-                row.children[valueIndex];
-
-            const underCell =
-                row.children[
-                    undervalueIndex
-                ];
-
-            const confidenceCell =
-                confidenceIndex >= 0
-                    ? row.children[
-                        confidenceIndex
-                    ]
-                    : null;
-
-            if (
-                !valueCell
-                || !underCell
-            ) {
-                return;
-            }
-
-
-            // Build one clean hover panel.
-            const hover =
-                document.createElement(
-                    "div"
-                );
-
-            hover.className =
-                "evidence-tooltip";
-
-
-            const valueText =
-                valueCell.textContent
-                    .replace(
-                        /Comparable middle 50%[^£]*/gi,
-                        ""
-                    )
-                    .replace(
-                        /not a confidence interval/gi,
-                        ""
-                    )
-                    .trim();
-
-
-            const valueBlock =
-                document.createElement(
-                    "div"
-                );
-
-            valueBlock.className =
-                "summary";
-
-            valueBlock.textContent =
-                valueText;
-
-            hover.appendChild(
-                valueBlock
-            );
-
-
-            // Move existing sold-evidence tooltip out of Confidence.
-            if (confidenceCell) {
-
-                const oldBadge =
-                    confidenceCell.querySelector(
-                        ".evidence-badge"
-                    );
-
-                if (oldBadge) {
-
-                    const oldTooltip =
-                        oldBadge.querySelector(
-                            ".evidence-tooltip"
-                        );
-
-                    if (oldTooltip) {
-
-                        Array.from(
-                            oldTooltip.children
-                        ).forEach(child => {
-
-                            hover.appendChild(
-                                child.cloneNode(
-                                    true
-                                )
-                            );
-                        });
-                    }
-
-
-                    // Replace "Sales: [badge]" with plain sales count.
-                    const count =
-                        oldBadge.childNodes.length
-                            ? (
-                                oldBadge.childNodes[0]
-                                    .textContent
-                                || "0"
-                            ).trim()
-                            : "0";
-
-                    oldBadge.replaceWith(
-                        document.createTextNode(
-                            count
-                        )
-                    );
-                }
-            }
-
-
-            // Wrap existing undervaluation text with hover trigger.
-            const wrapper =
-                document.createElement(
-                    "span"
-                );
-
-            wrapper.className =
-                "evidence-badge";
-
-            wrapper.style.minWidth =
-                "auto";
-
-            wrapper.style.padding =
-                "2px 6px";
-
-            wrapper.style.whiteSpace =
-                "nowrap";
-
-
-            while (
-                underCell.firstChild
-            ) {
-                wrapper.appendChild(
-                    underCell.firstChild
-                );
-            }
-
-            wrapper.appendChild(
-                hover
-            );
-
-            underCell.appendChild(
-                wrapper
-            );
-        });
-
-
-        // Remove standalone Value/reference column.
-        headerRow.children[
-            valueIndex
-        ].remove();
-
-        Array.from(
-            body.querySelectorAll(":scope > tr")
-        ).forEach(row => {
-
-            if (
-                row.children[valueIndex]
-            ) {
-                row.children[
-                    valueIndex
-                ].remove();
-            }
-        });
-    }
-
-
-    // --------------------------------------------------------
-    // Final header labels after column removal.
-    // --------------------------------------------------------
-
-    Array.from(
-        headerRow.children
-    ).forEach(th => {
-
-        const text =
-            th.textContent.trim();
-
-        if (text === "Delivered") {
-            th.textContent = "Price";
+        if (name === "Age") {
+            return ageValue(text);
         }
 
         if (
-            text === "Apparent undervalue"
-            || text === "Apparent undervaluation"
+            name === "Price"
+            || name === "Undervaluation"
+            || name === "Score"
         ) {
-            th.textContent =
-                "Undervaluation";
-        }
-
-        if (text === "Listing age") {
-            th.textContent = "Age";
-        }
-    });
-
-    // --------------------------------------------------------
-    // Sorting
-    // --------------------------------------------------------
-
-    const headers =
-        Array.from(
-            headerRow.children
-        );
-
-    const numericNames = new Set([
-        "Delivered",
-        "Value / asking reference",
-        "Apparent undervalue",
-        "Score"
-    ]);
-
-
-    function sortValue(
-        row,
-        index,
-        name
-    ) {
-
-        const td =
-            row.children[index];
-
-        if (!td) {
-            return "";
-        }
-
-        if (
-            td.dataset.sort !== undefined
-        ) {
-            return Number(
-                td.dataset.sort
-            );
-        }
-
-        const text =
-            td.textContent.trim();
-
-        if (name === "Listing age") {
-            return ageSeconds(text);
-        }
-
-        if (name === "Confidence") {
-            return confidenceRank(text);
-        }
-
-        if (numericNames.has(name)) {
-            return numericValue(text);
+            return numberValue(text);
         }
 
         return text.toLowerCase();
     }
 
+    function sort(index, direction, save=true) {
+        const th = headers[index];
+        if (!th) return;
 
-    function applySort(
-        index,
-        direction,
-        save=true
-    ) {
+        const name = th.dataset.sortName;
 
-        const headersNow =
-            Array.from(
-                headerRow.children
-            );
-
-        const th =
-            headersNow[index];
-
-        if (!th) {
-            return;
-        }
-
-        const name =
-            th.dataset.sortName
-            || th.childNodes[0]?.textContent?.trim()
-            || th.textContent.trim();
-
-        headersNow.forEach(other => {
-
-            other.classList.remove(
-                "sorted-asc",
-                "sorted-desc"
-            );
-
-            const marker =
-                other.querySelector(
-                    ".sort-indicator"
-                );
-
-            if (marker) {
-                marker.textContent = "";
-            }
-        });
-
-
-        const rows =
-            Array.from(
-                body.querySelectorAll(
-                    ":scope > tr"
-                )
-            ).filter(
-                row =>
-                    row.children.length
-                    === headersNow.length
-            );
-
+        const rows = Array.from(
+            body.querySelectorAll(":scope > tr")
+        );
 
         rows.sort((a, b) => {
-
-            const av =
-                sortValue(
-                    a,
-                    index,
-                    name
-                );
-
-            const bv =
-                sortValue(
-                    b,
-                    index,
-                    name
-                );
+            const av = cellValue(a, index, name);
+            const bv = cellValue(b, index, name);
 
             let result;
 
@@ -7134,18 +5869,15 @@ document.addEventListener("DOMContentLoaded", () => {
                 && typeof bv === "number"
             ) {
                 result = av - bv;
-
             } else {
-
-                result =
-                    String(av).localeCompare(
-                        String(bv),
-                        undefined,
-                        {
-                            numeric: true,
-                            sensitivity: "base"
-                        }
-                    );
+                result = String(av).localeCompare(
+                    String(bv),
+                    undefined,
+                    {
+                        numeric: true,
+                        sensitivity: "base"
+                    }
+                );
             }
 
             return direction === "asc"
@@ -7153,35 +5885,34 @@ document.addEventListener("DOMContentLoaded", () => {
                 : -result;
         });
 
+        rows.forEach(row => body.appendChild(row));
 
-        rows.forEach(
-            row => body.appendChild(row)
-        );
+        headers.forEach(h => {
+            h.classList.remove(
+                "sorted-asc",
+                "sorted-desc"
+            );
 
+            const indicator =
+                h.querySelector(".sort-indicator");
+
+            if (indicator) {
+                indicator.textContent = "";
+            }
+        });
 
         th.classList.add(
             direction === "asc"
-            ? "sorted-asc"
-            : "sorted-desc"
+                ? "sorted-asc"
+                : "sorted-desc"
         );
 
-        const marker =
-            th.querySelector(
-                ".sort-indicator"
-            );
-
-        if (marker) {
-            marker.textContent =
-                direction === "asc"
-                ? "▲"
-                : "▼";
-        }
-
+        th.querySelector(".sort-indicator").textContent =
+            direction === "asc" ? "▲" : "▼";
 
         if (save) {
-
             localStorage.setItem(
-                SORT_KEY,
+                KEY,
                 JSON.stringify({
                     name,
                     direction
@@ -7190,111 +5921,55 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-
     headers.forEach((th, index) => {
+        const name = th.textContent.trim();
 
-        const name =
-            th.textContent.trim();
+        th.dataset.sortName = name;
+        th.classList.add("sortable-header");
 
-        th.dataset.sortName =
-            name;
+        const indicator =
+            document.createElement("span");
 
-        th.classList.add(
-            "sortable-header"
-        );
+        indicator.className = "sort-indicator";
 
-        let indicator =
-            th.querySelector(
-                ".sort-indicator"
-            );
+        th.appendChild(indicator);
 
-        if (!indicator) {
+        th.addEventListener("click", () => {
+            const direction =
+                th.classList.contains("sorted-asc")
+                    ? "desc"
+                    : "asc";
 
-            indicator =
-                document.createElement(
-                    "span"
-                );
-
-            indicator.className =
-                "sort-indicator";
-
-            th.appendChild(
-                indicator
-            );
-        }
-
-
-        th.addEventListener(
-            "click",
-            () => {
-
-                let direction = "asc";
-
-                if (
-                    th.classList.contains(
-                        "sorted-asc"
-                    )
-                ) {
-                    direction = "desc";
-                }
-
-                applySort(
-                    index,
-                    direction,
-                    true
-                );
-            }
-        );
+            sort(index, direction, true);
+        });
     });
 
-
-    // --------------------------------------------------------
-    // Restore selected ordering after auto-refresh.
-    // --------------------------------------------------------
-
     try {
+        const saved = JSON.parse(
+            localStorage.getItem(KEY) || "null"
+        );
 
-        const saved =
-            JSON.parse(
-                localStorage.getItem(
-                    SORT_KEY
-                )
-                || "null"
+        if (saved?.name && saved?.direction) {
+            const index = headers.findIndex(
+                th =>
+                    th.dataset.sortName
+                    === saved.name
             );
 
-        if (
-            saved
-            && saved.name
-            && saved.direction
-        ) {
-
-            const index =
-                Array.from(
-                    headerRow.children
-                ).findIndex(
-                    th =>
-                        th.dataset.sortName
-                        === saved.name
-                );
-
             if (index >= 0) {
-
-                applySort(
+                sort(
                     index,
                     saved.direction,
                     false
                 );
             }
         }
-
     } catch (e) {
-
         console.warn(
-            "Could not restore dashboard sort",
+            "Unable to restore dashboard sort",
             e
         );
     }
-
 });
 </script>
 """
@@ -7882,7 +6557,7 @@ def main():
 
     print(
         f"eBay Laptop Hunter "
-        f"v{CLASSIFIER_VERSION}"
+        f"v{APP_VERSION}"
     )
 
     if not os.path.exists(PRODUCT_RESEARCH_SESSION_STATE):
