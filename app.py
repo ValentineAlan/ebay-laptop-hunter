@@ -50,7 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.17"
+APP_VERSION = "0.9.18"
 CLASSIFIER_VERSION = "0.8.2"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -113,6 +113,7 @@ PRODUCT_RESEARCH_LIMIT = 50
 PRODUCT_RESEARCH_MAX_PAGES = 2
 PRODUCT_RESEARCH_SEARCHES_PER_CYCLE = 12
 ACTIVE_BIN_RECHECKS_PER_CYCLE = 40
+ACTIVE_BIN_RECHECKS_DURING_REANALYSIS = 5
 ACTIVE_BIN_RECHECK_MIN_AGE_MINUTES = 10
 ACTIVE_BIN_RECHECK_INTERVAL_MINUTES = 15
 
@@ -9084,6 +9085,30 @@ def drain_reanalysis_queue(
     return completed
 
 
+def active_bin_rechecks_for_cycle(conn):
+    """
+    Prioritise classifier reanalysis over routine BIN availability checks.
+
+    While any active listings still use an old classifier version, perform
+    only a small number of ordinary BIN checks per cycle. Automatically
+    restore the normal rate once reanalysis completes.
+    """
+    remaining = conn.execute("""
+        SELECT COUNT(*) AS n
+        FROM listings
+        WHERE COALESCE(active, 1)=1
+          AND (
+                classifier_version IS NULL
+                OR classifier_version<>?
+              )
+    """, (CLASSIFIER_VERSION,)).fetchone()["n"]
+
+    if remaining:
+        return ACTIVE_BIN_RECHECKS_DURING_REANALYSIS
+
+    return ACTIVE_BIN_RECHECKS_PER_CYCLE
+
+
 def recheck_active_bin_listings(conn, token, maximum=ACTIVE_BIN_RECHECKS_PER_CYCLE):
     """
     Recheck a rotating set of active BIN/Best Offer listings.
@@ -9591,7 +9616,7 @@ def run_cycle(
     recheck_active_bin_listings(
         conn,
         token,
-        ACTIVE_BIN_RECHECKS_PER_CYCLE
+        active_bin_rechecks_for_cycle(conn)
     )
 
     repair_v078_model_and_sold_cache(conn)
