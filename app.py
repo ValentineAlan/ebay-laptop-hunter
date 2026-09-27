@@ -668,7 +668,7 @@ def get_token():
         method="POST"
     )
 
-    with urllib.request.urlopen(
+    with ebay_urlopen(
         req,
         timeout=30
     ) as response:
@@ -697,7 +697,6 @@ def get_token():
 # ============================================================
 # EBAY API
 # ============================================================
-
 def api_get(
     conn,
     token,
@@ -757,7 +756,7 @@ def api_get(
         operation
     )
 
-    with urllib.request.urlopen(
+    with ebay_urlopen(
         request,
         timeout=30
     ) as response:
@@ -765,6 +764,38 @@ def api_get(
         return json.load(
             response
         )
+
+
+def ebay_urlopen(*args, **kwargs):
+    """
+    Central wrapper for eBay HTTP requests.
+
+    HTTP 429 activates a shared cooldown and becomes EbayRateLimited.
+    Other HTTP errors retain their original behaviour.
+    """
+    remaining = ebay_rate_limit_remaining()
+
+    if remaining > 0:
+        raise EbayRateLimited(
+            f"eBay API cooldown active ({remaining}s remaining)"
+        )
+
+    try:
+        return urllib.request.urlopen(
+            *args,
+            **kwargs
+        )
+
+    except urllib.error.HTTPError as exc:
+
+        if exc.code == 429:
+            mark_ebay_rate_limited()
+
+            raise EbayRateLimited(
+                "eBay returned HTTP 429 Too Many Requests"
+            ) from exc
+
+        raise
 
 
 def ebay_search(
@@ -3178,9 +3209,8 @@ def _product_research_fetch(url, cookie):
             "X-Requested-With": "XMLHttpRequest",
         },
     )
-    with urllib.request.urlopen(req, timeout=45) as response:
+    with ebay_urlopen(req, timeout=45) as response:
         return response.read().decode("utf-8", errors="replace")
-
 
 def _decode_json_modules(raw):
     decoder = json.JSONDecoder()
@@ -4808,12 +4838,20 @@ def backfill_from_search_results(
         ):
             break
 
-        item = analyse_listing(
-            conn,
-            token,
-            summary,
-            fetch_detail=True
-        )
+        try:
+            item = analyse_listing(
+                conn,
+                token,
+                summary,
+                fetch_detail=True
+            )
+
+        except EbayRateLimited as exc:
+            print(
+                "Backfill: eBay API cooldown; "
+                f"{exc}"
+            )
+            break
 
         if item:
 
@@ -5630,7 +5668,7 @@ def ebay_get_item(token, item_id):
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with ebay_urlopen(request, timeout=20) as response:
             return "ACTIVE", json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
@@ -5651,7 +5689,6 @@ def ebay_get_item(token, item_id):
         return "ERROR", f"HTTP {exc.code}: {body[:300]}"
     except Exception as exc:
         return "ERROR", repr(exc)
-
 
 def is_fixed_price_listing(row):
     options = normalise(row["buying_options"]).upper()
@@ -5729,18 +5766,14 @@ def recheck_active_bin_listings(conn, token, maximum=ACTIVE_BIN_RECHECKS_PER_CYC
                 row["item_id"]
             )
 
-        except urllib.error.HTTPError as exc:
+        except EbayRateLimited as exc:
+            print(
+                "Listing housekeeping: "
+                f"{exc}; stopping detail calls for this cycle"
+            )
+            break
 
-            if exc.code == 429:
-                mark_ebay_rate_limited()
-
-                print(
-                    "Listing housekeeping: received HTTP 429; "
-                    "stopping detail calls for this cycle"
-                )
-
-                break
-
+        except urllib.error.HTTPError:
             raise
 
         checked += 1
