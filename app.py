@@ -7164,6 +7164,12 @@ def run_cycle(
             )
 
     mark_ended_listings(conn)
+    # Prioritise thumbnails for visible Laptop Lander deals.
+    backfill_dashboard_images(
+        conn,
+        token
+    )
+
     recheck_active_bin_listings(
         conn,
         token,
@@ -7195,12 +7201,7 @@ def run_cycle(
         conn
     )
 
-    backfill_dashboard_images(
-        conn,
-        token
-    )
-
-    total_api = browse_usage_today(
+total_api = browse_usage_today(
         conn
     )
 
