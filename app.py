@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.30"
+APP_VERSION = "0.9.31"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -933,7 +933,11 @@ def init_db():
         )
     """)
 
-    for name, sql_type in {"evidence_version": "TEXT", "currency": "TEXT"}.items():
+    for name, sql_type in {
+        "evidence_version": "TEXT",
+        "currency": "TEXT",
+        "extended_title": "TEXT",
+    }.items():
         ensure_column(conn, "sold_comparables", name, sql_type)
 
     conn.execute("""
@@ -5678,15 +5682,65 @@ def _parse_sold_result(result):
         # Stable enough for a cached research row when eBay omits itemId.
         item_id = "title:" + research_query_key(title)[:180]
 
-    cpu = parse_cpu(title, "SOLD_TITLE") or cpu_result()
+    # Product Research does not expose structured item specifics here, but
+    # listing.extendedTitle contains a flattened form of those specifics.
+    # Keep brand/model tied to the visible title to avoid contamination from
+    # noisy/multiple model names in extendedTitle, while allowing the extended
+    # data to fill missing CPU/RAM/storage evidence.
+    extended_title = _research_text(
+        listing.get("extendedTitle")
+    )
+
+    title_cpu = (
+        parse_cpu(title, "SOLD_TITLE")
+        if title
+        else None
+    )
+
+    extended_cpu = (
+        parse_cpu(extended_title, "SOLD_TITLE")
+        if extended_title
+        else None
+    )
+
+    if (
+        title_cpu
+        and title_cpu.get("confidence") == "EXACT"
+    ):
+        cpu = title_cpu
+    elif (
+        extended_cpu
+        and extended_cpu.get("confidence") == "EXACT"
+    ):
+        cpu = extended_cpu
+    else:
+        cpu = (
+            title_cpu
+            or extended_cpu
+            or cpu_result()
+        )
+
     brand = identify_brand(title, {})
     model = identify_model(title, {})
+
     ram = identify_ram(title, {})
+    if ram is None and extended_title:
+        ram = identify_ram(
+            extended_title,
+            {}
+        )
+
     storage = identify_storage(title, {})
+    if storage is None and extended_title:
+        storage = identify_storage(
+            extended_title,
+            {}
+        )
 
     return {
         "item_id": item_id,
         "title": title,
+        "extended_title": extended_title,
         "brand": brand,
         "model": model,
         "cpu": cpu.get("name"),
@@ -5743,13 +5797,14 @@ def collect_sold_search(conn, keywords):
         for row in parsed:
             conn.execute(
                 """INSERT OR REPLACE INTO sold_comparables(
-                    query_key,item_id,title,brand,model,cpu,cpu_generation,
+                    query_key,item_id,title,extended_title,brand,model,cpu,cpu_generation,
                     ram_gb,storage_gb,avg_sold_price,avg_postage,delivered_price,
                     units_sold,total_sales,last_sold,formats,collected_at,currency,evidence_version,source
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'EBAY_PRODUCT_RESEARCH')""",
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'EBAY_PRODUCT_RESEARCH')""",
                 (
-                    key, row["item_id"], row["title"], row["brand"], row["model"],
-                    row["cpu"], row["cpu_generation"], row["ram_gb"],
+                    key, row["item_id"], row["title"], row["extended_title"],
+                    row["brand"], row["model"], row["cpu"], row["cpu_generation"],
+                    row["ram_gb"],
                     row["storage_gb"], row["avg_sold_price"], row["avg_postage"],
                     row["delivered_price"], row["units_sold"], row["total_sales"],
                     row["last_sold"], row["formats"], iso_now(), row["currency"], SOLD_EVIDENCE_VERSION,
