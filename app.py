@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.23"
+APP_VERSION = "0.9.24"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -12179,6 +12179,148 @@ def is_fixed_price_listing(row):
 
 
 
+
+DYNAMIC_REANALYSIS_MIN_PER_CYCLE = 5
+DYNAMIC_REANALYSIS_MAX_PER_CYCLE = 200
+
+
+def dynamic_reanalysis_allowance(
+    conn,
+    backlog=None
+):
+    """
+    Pace classifier/detail backlog work across the remainder of eBay's
+    actual Browse quota window.
+
+    The calculation only uses quota that is currently available to detail
+    work after protecting:
+      - the emergency reserve
+      - the current search reserve
+
+    It therefore cannot deliberately consume capacity reserved for search.
+    can_detail() remains the final hard stop inside the worker.
+    """
+
+    if backlog is None:
+        backlog = conn.execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM listings
+            WHERE COALESCE(active,1)=1
+              AND (
+                    classifier_version IS NULL
+                    OR classifier_version<>?
+                  )
+            """,
+            (
+                CLASSIFIER_VERSION,
+            )
+        ).fetchone()["n"]
+
+    backlog = max(
+        0,
+        int(backlog or 0)
+    )
+
+    if backlog <= 0:
+        return 0
+
+    status = browse_budget_status(
+        conn
+    )
+
+    used = int(
+        status.get("used")
+        or 0
+    )
+
+    reset_seconds = status.get(
+        "reset_seconds"
+    )
+
+    if reset_seconds is None:
+        # Conservative fallback: one normal batch.
+        return min(
+            backlog,
+            MAX_BACKFILL_DETAILS_PER_CYCLE
+        )
+
+    reserve = current_search_reserve()
+
+    detail_cutoff = (
+        DAILY_SAFETY_LIMIT
+        - EMERGENCY_RESERVE
+        - reserve
+    )
+
+    usable_calls = max(
+        0,
+        detail_cutoff
+        - used
+    )
+
+    if usable_calls <= 0:
+        return 0
+
+    # Work out how many normal polling opportunities remain before
+    # eBay resets the quota. Always count the current cycle.
+    cycle_seconds = max(
+        60,
+        int(POLL_NORMAL)
+    )
+
+    cycles_remaining = max(
+        1,
+        (
+            int(reset_seconds)
+            + cycle_seconds
+            - 1
+        )
+        // cycle_seconds
+    )
+
+    # Spread currently usable quota evenly over the remaining cycles.
+    paced = max(
+        1,
+        (
+            usable_calls
+            + cycles_remaining
+            - 1
+        )
+        // cycles_remaining
+    )
+
+    # A very large backlog benefits from modest acceleration, but never
+    # more than 25% above the even-pacing figure. This lets unused quota
+    # actually drain stale work without exhausting the day early.
+    if backlog >= 1000:
+        paced = max(
+            paced,
+            int(
+                round(
+                    paced * 1.25
+                )
+            )
+        )
+
+    allowance = max(
+        DYNAMIC_REANALYSIS_MIN_PER_CYCLE,
+        paced
+    )
+
+    allowance = min(
+        DYNAMIC_REANALYSIS_MAX_PER_CYCLE,
+        allowance,
+        usable_calls,
+        backlog
+    )
+
+    return max(
+        0,
+        int(allowance)
+    )
+
+
 def drain_reanalysis_queue(
     conn,
     token,
@@ -12223,7 +12365,7 @@ def drain_reanalysis_queue(
 
     if not can_detail(conn):
         print(
-            "Reanalysis queue: paused — daily detail budget reserve reached; "
+            "Reanalysis queue: paused — detail budget reserve reached; "
             f"{remaining_before} remaining"
         )
         return 0
@@ -12240,15 +12382,20 @@ def drain_reanalysis_queue(
               )
         ORDER BY
             CASE
+                WHEN estimated_value IS NULL
+                THEN 0
+                ELSE 1
+            END,
+            CASE
                 WHEN valuation_basis='REANALYSIS_REQUIRED'
                 THEN 0
                 ELSE 1
             END,
+            first_seen ASC,
             COALESCE(
                 availability_checked_at,
                 '1970-01-01'
-            ) ASC,
-            first_seen ASC
+            ) ASC
         LIMIT ?
         """,
         (
@@ -12964,11 +13111,55 @@ def run_cycle(
 
     # Drain old classifier versions before ordinary availability
     # housekeeping consumes the remaining detail-call budget.
-    drain_reanalysis_queue(
-        conn,
-        token,
-        MAX_BACKFILL_DETAILS_PER_CYCLE
+    #
+    # Pace this work against eBay's real remaining quota window rather
+    # than using a fixed 40-call ceiling every cycle.
+    reanalysis_remaining = conn.execute(
+        """
+        SELECT COUNT(*) AS n
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND (
+                classifier_version IS NULL
+                OR classifier_version<>?
+              )
+        """,
+        (
+            CLASSIFIER_VERSION,
+        )
+    ).fetchone()["n"]
+
+    reanalysis_allowance = (
+        dynamic_reanalysis_allowance(
+            conn,
+            reanalysis_remaining
+        )
     )
+
+    budget_status = browse_budget_status(
+        conn
+    )
+
+    print(
+        "Dynamic reanalysis budget: "
+        f"{reanalysis_allowance} this cycle; "
+        f"{reanalysis_remaining} queued; "
+        f"{budget_status['used']} used; "
+        f"{current_search_reserve()} search reserve; "
+        f"{_format_quota_countdown(budget_status['reset_seconds']) if budget_status.get('reset_seconds') is not None else 'unknown'} until reset"
+    )
+
+    if reanalysis_allowance > 0:
+        drain_reanalysis_queue(
+            conn,
+            token,
+            reanalysis_allowance
+        )
+    elif reanalysis_remaining:
+        print(
+            "Reanalysis queue: paused — "
+            "no safely allocatable detail quota this cycle"
+        )
 
     recheck_active_bin_listings(
         conn,
