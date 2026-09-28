@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.35"
+APP_VERSION = "0.9.36"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -8757,7 +8757,7 @@ def _dashboard_html_base():
         )
 
         hero_pct_text = (
-            f"{hero_pct:.0f}% below estimate"
+            f"{hero_pct:.0f}% under market"
             if hero_pct is not None
             else "Below estimate"
         )
@@ -8859,7 +8859,7 @@ def _dashboard_html_base():
                             </div>
 
                             <span class="hero-deal-saving">
-                                Save {hero_saving}
+                                {hero_saving} under market
                             </span>
 
                             <span class="hero-deal-arrow"
@@ -8917,7 +8917,7 @@ def _dashboard_html_base():
             </div>
 
             <p class="hero-subtitle">
-                Find great eBay UK laptop deals.
+                Find underpriced laptops on eBay UK.
             </p>
 
             <div class="hero-benefits">
@@ -8951,7 +8951,7 @@ def _dashboard_html_base():
                         class="hero-benefit-image">
 
                     <span>
-                        Spots the bargains
+                        Finds underpriced laptops
                     </span>
                 </div>
 
@@ -9153,24 +9153,31 @@ def _dashboard_html_base():
         }}
 
         .hero-benefit-image {{
-            display: block;
+    display: block;
 
-            width: 52px;
-            height: 52px;
+    width: 58px;
+    height: 58px;
 
-            margin-bottom: 9px;
+    margin: -3px 0 6px -3px;
 
-            border-radius: 14px;
-            object-fit: cover;
+    border-radius: 16px;
 
-            box-shadow:
-                0 6px 16px
-                rgba(30, 55, 112, .08);
+    object-fit: cover;
 
-            filter:
-                saturate(.92)
-                contrast(.98);
-        }}
+    /*
+       The source images contain some empty white canvas.
+       Zooming them slightly crops that out.
+    */
+    transform: scale(1.15);
+
+    box-shadow:
+        0 6px 16px
+        rgba(30, 55, 112, .06);
+
+    filter:
+        saturate(1.02)
+        contrast(1.02);
+}}
 
         /* ----------------------------
            Featured live deal cards
@@ -9433,24 +9440,18 @@ def _dashboard_html_base():
                 margin-top: 23px;
             }}
 
-            .hero-benefit {{
-                display: flex;
-                align-items: center;
-                gap: 11px;
-
-                max-width: none;
-            }}
-
             .hero-benefit-image {{
-                flex: 0 0 48px;
+    flex: 0 0 52px;
 
-                width: 48px;
-                height: 48px;
+    width: 52px;
+    height: 52px;
 
-                margin: 0;
+    margin: 0;
 
-                border-radius: 13px;
-            }}
+    border-radius: 14px;
+
+    transform: scale(1.12);
+}}
 
             .hero-deals,
             .hero-deals-1,
@@ -10513,7 +10514,9 @@ def _dashboard_html_base():
             <th title="Overall CPU performance. Higher is better.">CPU rating</th>
             <th>Listing age</th>
             <th>Price</th>
-            <th title="Compared with similar laptops recently sold.">Saving</th>
+            <th title="Difference between the listing price and estimated market value based on recent sold prices.">
+    Under market
+</th>
             <th title="Deal score out of 100. Higher means a stronger deal.">Deal score</th>
             <th>Notes</th>
         </tr>
