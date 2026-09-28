@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.31"
+APP_VERSION = "0.9.32"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -2702,6 +2702,9 @@ MODEL_PATTERNS = [
     # Examples: XPS 13 L322X, XPS 13 9320, XPS 15 9520.
     r"\bXPS\s+(?:13|15|17)\s+(?:L\d{3,4}X|\d{4})\b",
 
+    # Hyphenated seller form, e.g. "XPS 15-7590".
+    r"\bXPS\s+(?:13|15|17)-\d{4}\b",
+
     # Family-only XPS is retained only as a discovery identity; it is never
     # precise enough for exact-model valuation.
     r"\bXPS\s+(?:13|15|17)\b",
@@ -2727,6 +2730,30 @@ MODEL_PATTERNS = [
 
     r"\bHP\s+"
     r"\d{3}\s+G\d{1,2}\b",
+
+    # Narrow seller-title variants recovered from Product Research.
+
+    # HP frequently inserts "Laptop" before the numbered business model.
+    r"\bHP\s+Laptop\s+(?:240|245|250|255|340|348|430|440|450|455|470)\s+G\d{1,2}\b",
+
+    # Dell XPS forms where screen family/model are separated inconsistently.
+    r"\bXPS\s+Laptop\s+(?:13|15|17)\s+\d{4}\b",
+    r"\bXPS\s+(?:13|15|17)-\d{4}\b",
+
+    # 2024 XPS 13 platform often advertised simply as "XPS 9340".
+    r"\bXPS\s+9340\b",
+
+    # Specific Inspiron 7559 seller variants.
+    r"\bInspiron\s+15[- ]7559\b",
+
+    # Latitude model number may appear after "Laptop"/screen-size wording.
+    r"\bLatitude(?:\s+i[3579])?\s+Laptop(?:\s+\d{2}(?:\.\d)?(?:\s*inch)?)?\s*[- ]+\s*5400\b",
+
+    # ASUS sellers frequently omit "VivoBook" for this platform.
+    r"\bASUS\s+E510MA\b",
+
+    # Lenovo generation spacing variants: "Gen1", "Gen2".
+    r"\bThinkPad\s+P15\s+Gen\s*[12]\b",
 
     # Lenovo
     r"\bThinkPad\s+"
@@ -2848,6 +2875,68 @@ def clean_model(model):
         flags=re.I,
     )
     model = re.sub(r"(Surface\s+Pro\s+\d+)\s+Plus$", r"\1+", model, flags=re.I)
+
+    # HP "Laptop 255 G7" -> "255 G7".
+    model = re.sub(
+        r"^Laptop\s+((?:240|245|250|255|340|348|430|440|450|455|470)\s+G\d{1,2})$",
+        r"\1",
+        model,
+        flags=re.I,
+    )
+
+    # Dell XPS seller formatting.
+    model = re.sub(
+        r"^XPS\s+Laptop\s+(13|15|17)\s+(\d{4})$",
+        r"XPS \1 \2",
+        model,
+        flags=re.I,
+    )
+    model = re.sub(
+        r"^XPS\s+(13|15|17)-(\d{4})$",
+        r"XPS \1 \2",
+        model,
+        flags=re.I,
+    )
+
+    # XPS 9340 is the XPS 13 9340 platform.
+    model = re.sub(
+        r"^XPS\s+9340$",
+        r"XPS 13 9340",
+        model,
+        flags=re.I,
+    )
+
+    # Dell Inspiron screen-size prefix is not part of model identity.
+    model = re.sub(
+        r"^Inspiron\s+15[- ]7559$",
+        r"Inspiron 7559",
+        model,
+        flags=re.I,
+    )
+
+    # ASUS E510MA belongs to the VivoBook E510MA platform.
+    model = re.sub(
+        r"^(?:ASUS\s+)?E510MA$",
+        r"VivoBook E510MA",
+        model,
+        flags=re.I,
+    )
+
+    # Lenovo commonly omits the space in generation names.
+    model = re.sub(
+        r"^(ThinkPad\s+P15)\s+Gen\s*([12])$",
+        r"\1 Gen \2",
+        model,
+        flags=re.I,
+    )
+
+    # Narrow Latitude 5400 seller-title forms.
+    if re.search(r"\b5400$", model, re.I) and re.match(
+        r"^Latitude\b",
+        model,
+        re.I,
+    ):
+        model = "Latitude 5400"
     # Canonical Lenovo platform-code identities.
     # Seller titles often append screen size or the word "Laptop".
     model = re.sub(
