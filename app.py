@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.33"
+APP_VERSION = "0.9.34"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -2023,8 +2023,9 @@ def cpu_benchmark_for_cpu(conn, cpu):
     if not key:
         return None
 
-    return conn.execute("""
+    row = conn.execute("""
         SELECT
+            lookup_key,
             cpu_name,
             cpu_mark,
             cpu_rank,
@@ -2036,6 +2037,47 @@ def cpu_benchmark_for_cpu(conn, cpu):
     """, (
         key,
     )).fetchone()
+
+    if row:
+        return row
+
+    rows = conn.execute("""
+        SELECT
+            lookup_key,
+            cpu_name,
+            cpu_mark,
+            cpu_rank,
+            source_url,
+            updated_at
+        FROM cpu_benchmarks
+        WHERE lookup_key LIKE ?
+        ORDER BY cpu_rank
+        LIMIT 20
+    """, (
+        key + " %",
+    )).fetchall()
+
+    matches = []
+
+    for candidate in rows:
+        candidate_key = candidate["lookup_key"] or ""
+
+        if not candidate_key.startswith(key + " "):
+            continue
+
+        suffix = candidate_key[len(key):].strip()
+
+        if re.fullmatch(
+            r"\d+(?:\s+\d+)?ghz",
+            suffix,
+            re.I
+        ):
+            matches.append(candidate)
+
+    if len(matches) == 1:
+        return matches[0]
+
+    return None
 
 
 def cpu_benchmark_refresh_worker():
@@ -8373,8 +8415,14 @@ def _dashboard_html_base():
 
     <body>
 
-    <header class="public-topbar">
-        <a href="/"
+
+
+    <section class="home-hero">
+
+        <div class="hero-copy">
+
+            <div class="hero-brand">
+                <a href="/"
            class="public-logo"
            aria-label="Laptop Lander home">
             <img
@@ -8382,13 +8430,9 @@ def _dashboard_html_base():
                 alt=""
                 class="public-logo-image">
         </a>
-    </header>
 
-    <section class="home-hero">
-
-        <div class="hero-copy">
-
-            <h1>Laptop Lander</h1>
+                <h1>Laptop Lander</h1>
+            </div>
 
             <p class="hero-subtitle">
                 Find great eBay UK laptop deals.
@@ -9241,7 +9285,122 @@ def _dashboard_html_base():
         .deal-section th:last-child {{
             border-top-right-radius: 8px;
         }}
-    </style>
+
+        .hero-brand {{
+            display: flex;
+            align-items: center;
+            gap: 18px;
+        }}
+
+        .hero-brand .public-logo {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 auto;
+            width: 96px;
+            height: 72px;
+            overflow: visible;
+            border-radius: 0;
+            background: transparent;
+            box-shadow: none;
+        }}
+
+        .hero-brand .public-logo-image {{
+            display: block;
+            width: 92px;
+            height: auto;
+        }}
+
+        .hero-copy h1 {{
+            margin: 0;
+        }}
+
+        .hero-deals {{
+            position: relative;
+            display: grid;
+            grid-template-columns: 1fr;
+            align-content: center;
+            gap: 12px;
+            width: 100%;
+            max-width: 400px;
+            min-height: 0;
+            justify-self: end;
+        }}
+
+        .hero-deal-card {{
+            position: relative !important;
+            inset: auto !important;
+            width: 100% !important;
+            max-width: none !important;
+            transform: none !important;
+            border-radius: 15px;
+            box-shadow:
+                0 9px 24px
+                rgba(28, 48, 90, .09);
+        }}
+
+        .hero-deal-card:nth-child(n+3) {{
+            display: none !important;
+        }}
+
+        .hero-deal-card-inner {{
+            grid-template-columns:
+                72px minmax(0, 1fr);
+            gap: 12px;
+            padding: 11px 13px;
+        }}
+
+        .hero-deal-image {{
+            width: 72px;
+            height: 56px;
+            border-radius: 9px;
+        }}
+
+        .hero-deal-card a,
+        .hero-deal-card-title {{
+            display: -webkit-box;
+            overflow: hidden;
+            -webkit-box-orient: vertical;
+            -webkit-line-clamp: 2;
+        }}
+
+        @media (max-width: 980px) {{
+            .home-hero {{
+                grid-template-columns: 1fr;
+                gap: 26px;
+            }}
+
+            .hero-deals {{
+                max-width: none;
+                justify-self: stretch;
+            }}
+        }}
+
+        @media (max-width: 620px) {{
+            .home-hero {{
+                padding: 26px 22px;
+            }}
+
+            .hero-brand {{
+                gap: 12px;
+            }}
+
+            .hero-brand .public-logo {{
+                width: 72px;
+                height: 54px;
+            }}
+
+            .hero-brand .public-logo-image {{
+                width: 70px;
+            }}
+
+            .hero-benefits {{
+                grid-template-columns: 1fr;
+                gap: 14px;
+            }}
+        }}
+
+</style>
 
     <section class="deal-section">
 
@@ -10451,7 +10610,7 @@ def diagnostics_html():
                 grid-template-columns: 1fr;
             }}
         }}
-    
+
         .queue-section {{
             margin-bottom: 18px;
         }}
