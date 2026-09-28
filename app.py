@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.34"
+APP_VERSION = "0.9.35"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -777,6 +777,9 @@ def init_db():
         "win11_confidence": "TEXT",
         "win11_source": "TEXT",
         "win11_evidence": "TEXT",
+        "win11_state": "TEXT",
+        "win11_official": "INTEGER",
+        "win11_cpu_mark": "INTEGER",
 
         "valuation_research_at": "TEXT",
 
@@ -4018,14 +4021,51 @@ def identify_cpu(
 
     if exact:
 
+        def exact_cpu_specificity(cpu):
+            """
+            Prefer a complete SKU over a truncated processor aspect.
+
+            Examples:
+                Ryzen 5 3500U > Ryzen 5 3500
+                i7-1185G7     > i7-1185
+
+            Source priority is used only after SKU specificity.
+            """
+            name = normalise(
+                cpu.get("name")
+                or ""
+            )
+
+            ryzen = re.search(
+                r"\bRyzen\s+[3579]\s+"
+                r"(\d{4})([A-Z]{1,3})\b",
+                name,
+                re.I
+            )
+
+            if ryzen:
+                return 2
+
+            intel = re.search(
+                r"\bi[3579]-\d{4,5}"
+                r"([A-Z]+\d*[A-Z]*)\b",
+                name,
+                re.I
+            )
+
+            if intel:
+                return 2
+
+            return 1
+
         exact.sort(
-            key=lambda cpu:
+            key=lambda cpu: (
+                -exact_cpu_specificity(cpu),
                 source_priority.get(
-                    cpu.get(
-                        "source"
-                    ),
+                    cpu.get("source"),
                     99
                 )
+            )
         )
 
         return exact[0]
@@ -4074,166 +4114,397 @@ def identify_cpu(
 # WINDOWS 11
 # ============================================================
 
-def windows11_assessment(cpu):
-    manufacturer = cpu.get(
-        "manufacturer"
+WIN11_OFFICIAL = "OFFICIAL"
+WIN11_UNOFFICIAL_OK = "UNOFFICIAL_OK"
+WIN11_UNSUITABLE = "UNSUITABLE"
+WIN11_UNKNOWN = "UNKNOWN"
+
+WIN11_UNOFFICIAL_MIN_CPU_MARK = 5000
+WIN11_MICROSOFT_VERSION = "25H2"
+
+
+def _stored_cpu_descriptor(name, generation=None):
+    """
+    Reconstruct enough CPU metadata from an existing listings row
+    to run the Windows 11 classifier without another eBay API call.
+    """
+    name = normalise(name)
+
+    if not name:
+        return cpu_result()
+
+    manufacturer = None
+    family = ""
+
+    if re.search(r"\b(?:Intel|Core|i[3579]-)", name, re.I):
+        manufacturer = "Intel"
+
+    elif re.search(r"\b(?:AMD|Ryzen)\b", name, re.I):
+        manufacturer = "AMD"
+
+    elif re.search(
+        r"\b(?:Qualcomm|Snapdragon|Microsoft SQ)\b",
+        name,
+        re.I
+    ):
+        manufacturer = "Qualcomm"
+
+    m = re.search(r"\b(i[3579])[-\s]", name, re.I)
+
+    if m:
+        family = "Core " + m.group(1).lower()
+
+    elif re.search(r"\bCore\s+Ultra\b", name, re.I):
+        family = "Core Ultra"
+
+    else:
+        m = re.search(r"\bRyzen\s+([3579])\b", name, re.I)
+
+        if m:
+            family = "Ryzen " + m.group(1)
+
+    return cpu_result(
+        name,
+        manufacturer,
+        family,
+        generation,
+        "STORED",
+        "DATABASE"
     )
 
-    family = (
-        cpu.get(
-            "family"
-        )
-        or ""
-    )
 
-    generation = cpu.get(
-        "generation"
-    )
+def microsoft_windows11_cpu_status(cpu):
+    """
+    Processor-only Windows 11 support assessment using Microsoft's
+    Windows 11 25H2 supported processor families.
 
-    name = (
-        cpu.get(
-            "name"
-        )
-        or ""
-    )
+    True  = CPU family is officially supported.
+    False = recognised CPU family is outside Microsoft's supported set.
+    None  = identity is insufficient to determine safely.
+    """
+    if not cpu:
+        return None
+
+    name = normalise(cpu.get("name") or "")
+    manufacturer = cpu.get("manufacturer") or ""
+    family = cpu.get("family") or ""
+    generation = cpu.get("generation")
+
+    if not name:
+        return None
 
     if manufacturer == "Intel":
 
-        if family.startswith(
-            "Core Ultra"
+        if (
+            family.startswith("Core Ultra")
+            or re.search(r"\bCore\s+Ultra\b", name, re.I)
         ):
             return True
 
         if (
-            family.startswith(
-                "Core i"
-            )
-            or family == "Core"
+            family.startswith("Core i")
+            or re.search(r"\bi[3579]-\d", name, re.I)
         ):
+            if generation is None:
+                return None
 
-            if generation is not None:
-                return generation >= 8
+            return generation >= 8
 
-        if (
-            "N95" in name
-            or "N97" in name
-            or "N100" in name
-            or "N150" in name
-            or "N200" in name
-            or "N250" in name
-            or "N300" in name
-            or "N305" in name
+        if re.search(
+            r"\bN(?:90|95|97|100|150|200|250|300|305|355)\b",
+            name,
+            re.I
         ):
             return True
+
+        if re.search(
+            r"\bCeleron\s+[NJ](?:4|5)\d{3}\b",
+            name,
+            re.I
+        ):
+            return True
+
+        if re.search(
+            r"\bPentium(?:\s+Silver)?\s+"
+            r"(?:J5\d{3}|N6\d{3})\b",
+            name,
+            re.I
+        ):
+            return True
+
+        if generation is not None and generation < 8:
+            return False
+
+        return None
 
     if manufacturer == "AMD":
 
-        match = re.search(
-            r"Ryzen\s+[3579]\s+"
-            r"(\d{4})",
+        if re.search(r"\bRyzen\s+AI\b", name, re.I):
+            return True
+
+        m = re.search(
+            r"\bRyzen\s+[3579]"
+            r"(?:\s+PRO)?\s+"
+            r"(\d{4})"
+            r"([A-Z]{0,3})\b",
             name,
             re.I
         )
 
-        if match:
+        if not m:
+            return None
 
-            # This remains deliberately a broad preliminary
-            # family assessment. Exact Microsoft SKU-list
-            # matching should replace it later.
-            return (
-                int(
-                    match.group(1)
-                )
-                >= 3000
-            )
+        number = int(m.group(1))
+        suffix = m.group(2).upper()
+
+        series = (
+            number // 1000
+        )
+
+        if series >= 4:
+            return True
+
+        if series == 3:
+            return suffix in ("G", "GE")
+
+        return False
+
+    if manufacturer == "Qualcomm":
+
+        if re.search(
+            r"\b(?:Snapdragon\s+X|X1E-|X1P-|Microsoft\s+SQ[123])",
+            name,
+            re.I
+        ):
+            return True
+
+        return None
 
     return None
 
 
+def unofficial_windows11_family_ok(cpu):
+    """
+    Laptop Lander's deliberately conservative unsupported-CPU policy.
+
+    This says the CPU family is a reasonable Windows 11 bypass candidate.
+    Performance is checked separately using CPU Mark.
+    """
+    if not cpu:
+        return False
+
+    name = normalise(cpu.get("name") or "")
+    manufacturer = cpu.get("manufacturer") or ""
+    generation = cpu.get("generation")
+
+    if manufacturer == "Intel":
+
+        return (
+            generation is not None
+            and 4 <= generation <= 7
+            and bool(
+                re.search(
+                    r"\bi[3579]-\d",
+                    name,
+                    re.I
+                )
+            )
+        )
+
+    if manufacturer == "AMD":
+
+        m = re.search(
+            r"\bRyzen\s+[3579]"
+            r"(?:\s+PRO)?\s+"
+            r"(\d{4})"
+            r"([A-Z]{0,3})\b",
+            name,
+            re.I
+        )
+
+        if not m:
+            return False
+
+        number = int(m.group(1))
+        suffix = m.group(2).upper()
+
+        if 1000 <= number < 3000:
+            return True
+
+        # Ryzen 3000 mobile/non-G parts are not in Microsoft's
+        # current 25H2 supported Ryzen 3000 G/GE group.
+        if 3000 <= number < 4000:
+            return suffix not in ("G", "GE")
+
+        return False
+
+    return False
+
+
+def windows11_cpu_assessment(conn, cpu):
+    """
+    Classify processor suitability separately from whole-device
+    requirements such as TPM 2.0 and Secure Boot.
+    """
+    name = cpu.get("name") if cpu else None
+
+    if not name:
+        return {
+            "state": WIN11_UNKNOWN,
+            "value": None,
+            "official": None,
+            "cpu_mark": None,
+            "confidence": "UNKNOWN",
+            "source": "CPU_NOT_IDENTIFIED",
+            "evidence":
+                "CPU identity is insufficient for Windows 11 classification",
+        }
+
+    official = microsoft_windows11_cpu_status(cpu)
+
+    benchmark = cpu_benchmark_for_cpu(
+        conn,
+        name
+    )
+
+    cpu_mark = (
+        int(benchmark["cpu_mark"])
+        if benchmark
+        else None
+    )
+
+    if official is True:
+        return {
+            "state": WIN11_OFFICIAL,
+            "value": True,
+            "official": True,
+            "cpu_mark": cpu_mark,
+            "confidence": "HIGH",
+            "source": "MICROSOFT_WIN11_25H2_CPU_RULE",
+            "evidence":
+                "CPU falls within Microsoft's Windows 11 25H2 supported processor families",
+        }
+
+    if official is None:
+        return {
+            "state": WIN11_UNKNOWN,
+            "value": None,
+            "official": None,
+            "cpu_mark": cpu_mark,
+            "confidence": "UNKNOWN",
+            "source": "CPU_SUPPORT_UNRESOLVED",
+            "evidence":
+                "CPU identity is not precise enough for Windows 11 classification",
+        }
+
+    family_ok = unofficial_windows11_family_ok(cpu)
+
+    if (
+        family_ok
+        and cpu_mark is not None
+        and cpu_mark >= WIN11_UNOFFICIAL_MIN_CPU_MARK
+    ):
+        return {
+            "state": WIN11_UNOFFICIAL_OK,
+            "value": True,
+            "official": False,
+            "cpu_mark": cpu_mark,
+            "confidence": "HIGH",
+            "source": "LAPTOP_LANDER_UNOFFICIAL_POLICY",
+            "evidence":
+                (
+                    "CPU is not officially supported by Microsoft, "
+                    "but is from a known practical Windows 11 family "
+                    "and has CPU Mark "
+                    f"{cpu_mark:,}, above the "
+                    f"{WIN11_UNOFFICIAL_MIN_CPU_MARK:,} threshold"
+                ),
+        }
+
+    if family_ok and cpu_mark is None:
+        return {
+            "state": WIN11_UNKNOWN,
+            "value": None,
+            "official": False,
+            "cpu_mark": None,
+            "confidence": "UNKNOWN",
+            "source": "PASSMARK_UNAVAILABLE",
+            "evidence":
+                "Unsupported CPU family may be suitable, but no CPU Mark is available",
+        }
+
+    return {
+        "state": WIN11_UNSUITABLE,
+        "value": False,
+        "official": False,
+        "cpu_mark": cpu_mark,
+        "confidence": "HIGH",
+        "source": "LAPTOP_LANDER_UNSUPPORTED_CPU_POLICY",
+        "evidence":
+            "CPU is not officially supported and does not meet Laptop Lander's unofficial-good policy",
+    }
+
+
+def windows11_assessment(cpu):
+    """
+    Legacy compatibility wrapper.
+    """
+    return microsoft_windows11_cpu_status(cpu)
+
+
+def win11_approved_assessment(conn, cpu):
+    return windows11_cpu_assessment(
+        conn,
+        cpu
+    )
 
 
 def cpu_capability_key(cpu_name):
     if not cpu_name:
         return None
-    return re.sub(r"\s+", "", normalise(cpu_name).lower())
+
+    return re.sub(
+        r"\s+",
+        "",
+        normalise(cpu_name).lower()
+    )
 
 
 def cached_win11_capability(conn, cpu_name):
     key = cpu_capability_key(cpu_name)
+
     if not key:
         return None
+
     row = conn.execute("""
-        SELECT win11_approved, confidence, source, evidence
+        SELECT
+            win11_approved,
+            confidence,
+            source,
+            evidence
         FROM cpu_capabilities
         WHERE cpu_key=?
-    """, (key,)).fetchone()
-    if not row or row["win11_approved"] is None:
+    """, (
+        key,
+    )).fetchone()
+
+    if (
+        not row
+        or row["win11_approved"] is None
+    ):
         return None
+
     return {
         "value": bool(row["win11_approved"]),
         "confidence": row["confidence"] or "VERIFIED",
         "source": row["source"] or "CPU_CAPABILITY_CACHE",
-        "evidence": row["evidence"] or "Previously verified Windows 11 CPU eligibility",
+        "evidence": row["evidence"] or "Stored CPU capability",
     }
-
 
 
 def queue_win11_verification(conn, cpu):
-    """
-    Retained as a compatibility no-op.
-
-    Windows 11 suitability is determined from the detected CPU. We no longer
-    require a separate verification queue for this application's purpose.
-    """
     return
 
-
-
-def win11_approved_assessment(conn, cpu):
-    """
-    Determine whether the detected CPU is modern enough for this application.
-
-    Existing exact cached CPU determinations are accepted when available.
-    Otherwise the local CPU support rule is authoritative; no verification
-    queue is created.
-    """
-    name = cpu.get("name") if cpu else None
-
-    cached = cached_win11_capability(
-        conn,
-        name
-    )
-
-    if cached:
-        return cached
-
-    inferred = windows11_assessment(cpu)
-
-    if inferred is True:
-        return {
-            "value": True,
-            "confidence": "HIGH",
-            "source": "CPU_SUPPORT_RULE",
-            "evidence":
-                "Detected CPU family/generation is considered Windows 11 capable",
-        }
-
-    if inferred is False:
-        return {
-            "value": False,
-            "confidence": "HIGH",
-            "source": "CPU_SUPPORT_RULE",
-            "evidence":
-                "Detected CPU family/generation is outside the Windows 11 capable range",
-        }
-
-    return {
-        "value": None,
-        "confidence": "UNKNOWN",
-        "source": "CPU_NOT_IDENTIFIED_OR_UNRESOLVED",
-        "evidence":
-            "Windows 11 capability could not be inferred from the detected CPU",
-    }
 
 
 def set_cpu_win11_capability(
@@ -4815,6 +5086,15 @@ def analyse_listing(
         "win11":
             win11,
 
+        "win11_state":
+            win11_assessment["state"],
+
+        "win11_official":
+            win11_assessment["official"],
+
+        "win11_cpu_mark":
+            win11_assessment["cpu_mark"],
+
         "win11_confidence":
             win11_assessment["confidence"],
 
@@ -4988,6 +5268,19 @@ def save_listing(
             else int(
                 item["win11"]
             ),
+
+        "win11_state":
+            item.get("win11_state"),
+
+        "win11_official":
+            (
+                None
+                if item.get("win11_official") is None
+                else int(bool(item.get("win11_official")))
+            ),
+
+        "win11_cpu_mark":
+            item.get("win11_cpu_mark"),
 
         "win11_confidence":
             item.get("win11_confidence"),
@@ -6444,19 +6737,91 @@ def exact_spec_identity(row):
         and storage
     )
 
+VALUATION_COSMETIC_REASONS = {
+    "scratch",
+    "scratches",
+    "scratched",
+    "dent",
+    "dents",
+    "dented",
+    "grade b",
+    "grade c",
+}
+
+
+def valuation_condition_requires_review(target):
+    """
+    Allow cosmetic-only condition notes through valuation, while
+    continuing to block functional faults, missing components and
+    high-risk listings.
+    """
+    if not ordinary_laptop(
+        row_value(target, "title"),
+        row_value(target, "condition")
+    ):
+        return True
+
+    status = row_value(target, "status")
+
+    if status in (None, "", "NORMAL"):
+        return False
+
+    if status != "MODERATE":
+        return True
+
+    raw_reasons = row_value(
+        target,
+        "fault_reasons"
+    ) or ""
+
+    try:
+        reasons = json.loads(raw_reasons)
+    except Exception:
+        reasons = [
+            part.strip()
+            for part in re.split(
+                r"[,;|]",
+                str(raw_reasons)
+            )
+            if part.strip()
+        ]
+
+    if isinstance(reasons, str):
+        reasons = [reasons]
+
+    if not isinstance(reasons, (list, tuple)):
+        return True
+
+    reasons = {
+        normalise(reason).lower()
+        for reason in reasons
+        if normalise(reason)
+    }
+
+    if not reasons:
+        return True
+
+    return not reasons.issubset(
+        VALUATION_COSMETIC_REASONS
+    )
+
+
 def target_valuation_problem(target, conn=None):
     if row_value(target, "classifier_version") != CLASSIFIER_VERSION:
         return "REANALYSIS_REQUIRED"
+
     if int(row_value(target, "rules_revision") or 0) != current_rules_revision(conn):
         return "REANALYSIS_REQUIRED"
-    if row_value(target, "status") != "NORMAL" or not ordinary_laptop(
-        row_value(target, "title"), row_value(target, "condition")
-    ):
+
+    if valuation_condition_requires_review(target):
         return "CONDITION_REQUIRES_REVIEW"
+
     if not exact_spec_identity(target):
         return "INCOMPLETE_IDENTITY_OR_SPEC"
+
     if not row_value(target, "total") or row_value(target, "postage") is None:
         return "UNKNOWN_DELIVERED_COST"
+
     return None
 
 
@@ -8125,6 +8490,17 @@ def _dashboard_html_base():
             + "</span>"
             for reason in clean_notes
         )
+
+        if (
+            "win11_state" in row.keys()
+            and row["win11_state"] == WIN11_UNOFFICIAL_OK
+        ):
+            notes_html += (
+                "<span class='win11-ok-note' "
+                "title='Runs Windows 11 well, but the CPU is not officially supported by Microsoft.'>"
+                "Win11-OK"
+                "</span>"
+            )
 
         hover_evidence_html = (
             evidence_html
@@ -10066,14 +10442,52 @@ def diagnostics_html():
             )
 
 
-    win11_unresolved = safe_scalar(
+    win11_state_rows = safe_rows(
         """
-        SELECT COUNT(*)
+        SELECT
+            COALESCE(win11_state, 'UNCLASSIFIED') AS state,
+            COUNT(*) AS n
         FROM listings
         WHERE COALESCE(active,1)=1
-          AND win11 IS NULL
+        GROUP BY COALESCE(win11_state, 'UNCLASSIFIED')
+        ORDER BY n DESC
         """
     )
+
+    win11_counts = {
+        row["state"]: row["n"]
+        for row in win11_state_rows
+    }
+
+    win11_items = [
+        (
+            "Officially supported",
+            win11_counts.get(WIN11_OFFICIAL, 0)
+        ),
+        (
+            "Runs well, unsupported CPU",
+            win11_counts.get(WIN11_UNOFFICIAL_OK, 0)
+        ),
+        (
+            "Not recommended",
+            win11_counts.get(WIN11_UNSUITABLE, 0)
+        ),
+        (
+            "Unknown",
+            (
+                win11_counts.get(WIN11_UNKNOWN, 0)
+                + win11_counts.get("UNCLASSIFIED", 0)
+            )
+        ),
+        (
+            "Unofficial CPU Mark minimum",
+            f"{WIN11_UNOFFICIAL_MIN_CPU_MARK:,}"
+        ),
+        (
+            "Microsoft processor rule",
+            WIN11_MICROSOFT_VERSION
+        ),
+    ]
 
 
 
@@ -10744,34 +11158,6 @@ def diagnostics_html():
             )}
 
             {queue_card(
-                "Windows 11 CPU status",
-                win11_unresolved,
-                (
-                    (
-                        (active_total - win11_unresolved)
-                        / active_total
-                    ) * 100.0
-                    if active_total
-                    else 100.0
-                ),
-                (
-                    "Complete"
-                    if win11_unresolved == 0
-                    else "Resolved as listings are reanalysed"
-                ),
-                (
-                    f"{win11_unresolved:,} active listings do not yet have "
-                    f"a Windows 11 capability result from their detected CPU. "
-                    f"No separate verification queue is required."
-                ),
-                (
-                    "Complete"
-                    if win11_unresolved == 0
-                    else "Waiting"
-                )
-            )}
-
-            {queue_card(
                 "Dashboard image backfill",
                 image_queue_remaining,
                 image_progress_pct,
@@ -10817,6 +11203,17 @@ def diagnostics_html():
             <h2>Classifier versions — active listings</h2>
             <table>
                 {table_rows(classifier_items)}
+            </table>
+        </section>
+
+        <section class="panel">
+            <h2>Windows 11 CPU classification</h2>
+            <div class="status-line">
+                CPU-only assessment; TPM, Secure Boot and other
+                machine-level requirements are assessed separately.
+            </div>
+            <table>
+                {table_rows(win11_items)}
             </table>
         </section>
 
@@ -11816,6 +12213,21 @@ _DASHBOARD_UI_ENHANCEMENT = r"""
     font-weight: 700;
     line-height: 1.25;
     white-space: nowrap;
+}
+
+.win11-ok-note {
+    display: inline-block;
+    margin: 2px 4px 2px 0;
+    padding: 3px 7px;
+    border: 1px solid #f59e0b;
+    border-radius: 999px;
+    background: #fff7ed;
+    color: #b45309;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.25;
+    white-space: nowrap;
+    cursor: help;
 }
 
 .notes-clear {
