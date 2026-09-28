@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.36"
+APP_VERSION = "0.9.37"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -8554,22 +8554,51 @@ def _dashboard_html_base():
             row["cpu"]
         )
 
-        if cpu_benchmark:
-            cpu_rating_value = int(
+        delivered_price = safe_float(
+            row["total"]
+        )
+
+        if (
+            cpu_benchmark
+            and delivered_price is not None
+            and delivered_price > 0
+        ):
+            cpu_mark = int(
                 cpu_benchmark["cpu_mark"]
             )
 
-            cpu_rating_html = (
-                f'<a href="{html.escape(cpu_benchmark["source_url"] or "#", quote=True)}" '
+            power_per_pound_value = (
+                cpu_mark
+                / delivered_price
+            )
+
+            benchmark_url = html.escape(
+                cpu_benchmark["source_url"]
+                or "#",
+                quote=True
+            )
+
+            price_text = money(
+                delivered_price
+            )
+
+            power_per_pound_html = (
+                f'<a href="{benchmark_url}" '
                 f'target="_blank" '
-                f'title="CPU Rating: {cpu_rating_value:,}&#10;Click for CPU details">'
-                f'{cpu_rating_value:,}'
+                f'rel="noopener noreferrer" '
+                f'title="Power/£: {power_per_pound_value:.1f}&#10;'
+                f'CPU Mark: {cpu_mark:,}&#10;'
+                f'Delivered price: {price_text}&#10;'
+                f'CPU Mark ÷ delivered price&#10;'
+                f'Higher is better&#10;'
+                f'Click for CPU benchmark details">'
+                f'{power_per_pound_value:.1f}'
                 f'</a>'
             )
 
         else:
-            cpu_rating_value = -1
-            cpu_rating_html = "—"
+            power_per_pound_value = -1
+            power_per_pound_html = "—"
 
         target_rows.append(
             f"""
@@ -8587,9 +8616,9 @@ def _dashboard_html_base():
                     </div>
                 </td>
 
-                <td class="cpu-rating"
-                    data-sort="{cpu_rating_value}">
-                    {cpu_rating_html}
+                <td class="power-per-pound"
+                    data-sort="{power_per_pound_value}">
+                    {power_per_pound_html}
                 </td>
 
                 <td>
@@ -8689,7 +8718,7 @@ def _dashboard_html_base():
         <tr>
             <th class="image-header" aria-label="Product image"></th>
             <th>Listing</th>
-            <th title="Overall CPU performance. Higher is better.">CPU rating</th>
+            <th title="PassMark CPU Mark points per £1 of delivered price. Higher is better.">Power/£</th>
             <th>Time left</th>
             <th>Current bid</th>
             <th title="Estimated saving if the current bid wins.">Potential saving</th>
@@ -9620,18 +9649,18 @@ def _dashboard_html_base():
             border-right: 1px solid rgba(15, 23, 42, 0.05);
         }}
 
-        .cpu-rating {{
+        .power-per-pound {{
             font-variant-numeric: tabular-nums;
-            font-weight: 700;
+            font-weight: 800;
         }}
 
-        .cpu-rating a {{
-            color: #344054;
+        .power-per-pound a {{
+            color: #176b3a;
             text-decoration: none;
         }}
 
-        .cpu-rating a:hover {{
-            color: #2563eb;
+        .power-per-pound a:hover {{
+            color: #15803d;
             text-decoration: underline;
         }}
 
@@ -9684,7 +9713,7 @@ def _dashboard_html_base():
             overflow: hidden;
         }}
 
-        .cpu-rating a {{
+        .power-per-pound a {{
             cursor: pointer;
         }}
 
@@ -9712,14 +9741,14 @@ def _dashboard_html_base():
             font-variant-numeric: tabular-nums;
         }}
 
-        /* CPU rating is useful but secondary to the saving. */
-        .cpu-rating a {{
-            color: #344054;
-            font-weight: 700;
+        /* Power/£ shows PassMark CPU performance relative to delivered price. */
+        .power-per-pound a {{
+            color: #176b3a;
+            font-weight: 800;
         }}
 
-        .cpu-rating a:hover {{
-            color: #2563eb;
+        .power-per-pound a:hover {{
+            color: #15803d;
         }}
 
         /* Keep the green saving treatment as the main visual emphasis. */
@@ -10511,7 +10540,7 @@ def _dashboard_html_base():
         <tr>
             <th class="image-header" aria-label="Product image"></th>
             <th>Listing</th>
-            <th title="Overall CPU performance. Higher is better.">CPU rating</th>
+            <th title="PassMark CPU Mark points per £1 of delivered price. Higher is better.">Power/£</th>
             <th>Listing age</th>
             <th>Price</th>
             <th title="Difference between the listing price and estimated market value based on recent sold prices.">
