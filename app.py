@@ -6019,12 +6019,12 @@ def target_valuation_problem(target, conn=None):
         return "REANALYSIS_REQUIRED"
     if int(row_value(target, "rules_revision") or 0) != current_rules_revision(conn):
         return "REANALYSIS_REQUIRED"
-    if not exact_spec_identity(target):
-        return "INCOMPLETE_IDENTITY_OR_SPEC"
     if row_value(target, "status") != "NORMAL" or not ordinary_laptop(
         row_value(target, "title"), row_value(target, "condition")
     ):
         return "CONDITION_REQUIRES_REVIEW"
+    if not exact_spec_identity(target):
+        return "INCOMPLETE_IDENTITY_OR_SPEC"
     if not row_value(target, "total") or row_value(target, "postage") is None:
         return "UNKNOWN_DELIVERED_COST"
     return None
