@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.32"
+APP_VERSION = "0.9.33"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -7117,15 +7117,30 @@ def calculate_sold_valuation(conn, target):
             1
         )
 
-    exact_count = sum(
+    variant_exact_count = sum(
         candidate["tier"] == "EXACT"
         for candidate in selected
     )
 
-    compatible_count = (
+    variant_compatible_count = (
         len(selected)
-        - exact_count
+        - variant_exact_count
     )
+
+    spec_counts = {
+        "EXACT": 0,
+        "RAM_NEAR": 0,
+        "STORAGE_NEAR": 0,
+    }
+
+    for candidate in selected:
+        spec_tier, _ = sold_spec_evidence_tier(
+            target,
+            candidate["row"]
+        )
+
+        if spec_tier in spec_counts:
+            spec_counts[spec_tier] += 1
 
     return dict(
         estimated_value=round(
@@ -7149,8 +7164,11 @@ def calculate_sold_valuation(conn, target):
             "SOLD_MODEL_SPEC_WEIGHTED:"
             f"{len(selected)}_ROWS/"
             f"{sum(c['units'] for c in selected)}_SALES/"
-            f"EXACT={exact_count}/"
-            f"COMPAT={compatible_count}/"
+            f"SPEC_EXACT={spec_counts['EXACT']}/"
+            f"SPEC_RAM_NEAR={spec_counts['RAM_NEAR']}/"
+            f"SPEC_STORAGE_NEAR={spec_counts['STORAGE_NEAR']}/"
+            f"VAR_EXACT={variant_exact_count}/"
+            f"VAR_COMPAT={variant_compatible_count}/"
             f"NEFF={effective_n:.1f}"
         )
     )
