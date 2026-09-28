@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.24"
+APP_VERSION = "0.9.25"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -6014,10 +6014,10 @@ def exact_spec_identity(row):
         and storage
     )
 
-def target_valuation_problem(target):
+def target_valuation_problem(target, conn=None):
     if row_value(target, "classifier_version") != CLASSIFIER_VERSION:
         return "REANALYSIS_REQUIRED"
-    if int(row_value(target, "rules_revision") or 0) != current_rules_revision():
+    if int(row_value(target, "rules_revision") or 0) != current_rules_revision(conn):
         return "REANALYSIS_REQUIRED"
     if not exact_spec_identity(target):
         return "INCOMPLETE_IDENTITY_OR_SPEC"
@@ -6343,7 +6343,7 @@ def canonical_sold_item_id(value):
     return text
 
 def sold_candidates(conn, target):
-    if target_valuation_problem(target):
+    if target_valuation_problem(target, conn):
         return []
 
     rows = conn.execute(
@@ -6662,7 +6662,7 @@ def fixed_price_listing(row):
 
 
 def comparable_candidates(conn, target):
-    if target_valuation_problem(target):
+    if target_valuation_problem(target, conn):
         return []
     rows = conn.execute("""SELECT * FROM listings
         WHERE item_id != ? AND brand = ? AND LOWER(model) = LOWER(?)
@@ -6724,7 +6724,7 @@ def deal_score(
     confidence
 ):
     if (
-        target_valuation_problem(target)
+        target_valuation_problem(target, conn)
         or not fixed_price_listing(target)
     ):
         return None
@@ -6787,7 +6787,7 @@ def valuation_label(basis):
 
 
 def calculate_valuation(conn, target):
-    problem = target_valuation_problem(target)
+    problem = target_valuation_problem(target, conn)
     if problem:
         return insufficient_valuation(problem)
     sold = calculate_sold_valuation(conn, target)
@@ -7276,7 +7276,8 @@ def _dashboard_html_base():
             continue
 
         problem = target_valuation_problem(
-            pipeline_row
+            pipeline_row,
+            conn
         )
 
         if problem is None:
