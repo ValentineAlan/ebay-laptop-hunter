@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.27"
+APP_VERSION = "0.9.28"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -3397,13 +3397,28 @@ def parse_cpu(
         number = match.group(2)
         suffix = match.group(3).upper()
 
+        # Marketing-series descriptions such as "Ryzen 5 7000" or
+        # "Ryzen 7 4000" do not identify an exact processor. Exact mobile
+        # SKUs such as 7520U, 7540U and 7940HS retain EXACT confidence.
+        generic_series = (
+            not suffix
+            and number in {
+                "4000",
+                "5000",
+                "6000",
+                "7000",
+                "8000",
+                "9000",
+            }
+        )
+
         return cpu_result(
             f"AMD Ryzen {tier} "
             f"{number}{suffix}",
             "AMD",
             f"Ryzen {tier}",
             int(number[0]),
-            "EXACT",
+            "MODEL" if generic_series else "EXACT",
             source
         )
 
