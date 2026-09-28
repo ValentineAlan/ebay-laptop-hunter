@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.37"
+APP_VERSION = "0.9.38"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -9182,31 +9182,29 @@ def _dashboard_html_base():
         }}
 
         .hero-benefit-image {{
-    display: block;
+            display: block;
 
-    width: 58px;
-    height: 58px;
+            width: 56px;
+            height: 56px;
 
-    margin: -3px 0 6px -3px;
+            margin: 0 0 7px;
 
-    border-radius: 16px;
+            border-radius: 14px;
+            object-fit: cover;
 
-    object-fit: cover;
+            /*
+               The embedded icon artwork has a white canvas. Multiply lets
+               that canvas merge into the hero background instead of showing
+               as a separate white square around each icon.
+            */
+            mix-blend-mode: multiply;
 
-    /*
-       The source images contain some empty white canvas.
-       Zooming them slightly crops that out.
-    */
-    transform: scale(1.15);
+            box-shadow: none;
 
-    box-shadow:
-        0 6px 16px
-        rgba(30, 55, 112, .06);
-
-    filter:
-        saturate(1.02)
-        contrast(1.02);
-}}
+            filter:
+                saturate(1.05)
+                contrast(1.03);
+        }}
 
         /* ----------------------------
            Featured live deal cards
@@ -9470,17 +9468,16 @@ def _dashboard_html_base():
             }}
 
             .hero-benefit-image {{
-    flex: 0 0 52px;
+                flex: 0 0 50px;
 
-    width: 52px;
-    height: 52px;
+                width: 50px;
+                height: 50px;
 
-    margin: 0;
+                margin: 0;
 
-    border-radius: 14px;
-
-    transform: scale(1.12);
-}}
+                border-radius: 13px;
+                mix-blend-mode: multiply;
+            }}
 
             .hero-deals,
             .hero-deals-1,
@@ -10307,10 +10304,14 @@ def _dashboard_html_base():
         }}
 
         .hero-deal-bottom {{
-            display: flex;
+            display: grid;
+            grid-template-columns:
+                minmax(0, 1fr) auto;
+            grid-template-areas:
+                "pricing saving";
             align-items: end;
 
-            gap: 8px;
+            gap: 8px 12px;
 
             min-width: 0;
 
@@ -10318,10 +10319,12 @@ def _dashboard_html_base():
         }}
 
         .hero-deal-pricing {{
-            display: flex;
-            align-items: baseline;
+            grid-area: pricing;
 
-            gap: 7px;
+            display: grid;
+            grid-template-columns: 1fr;
+
+            gap: 3px;
 
             min-width: 0;
         }}
@@ -10342,19 +10345,28 @@ def _dashboard_html_base():
         }}
 
         .hero-deal-estimate {{
+            min-width: 0;
+            overflow: hidden;
+
             color: #8a96aa;
 
             font-size: 9px;
             font-weight: 700;
 
             white-space: nowrap;
+            text-overflow: ellipsis;
         }}
 
         .hero-deal-track
         .hero-deal-saving {{
-            margin: 0 0 0 auto;
+            grid-area: saving;
+            justify-self: end;
 
+            max-width: 100%;
+            margin: 0;
             padding: 5px 7px;
+
+            overflow: hidden;
 
             border-radius: 999px;
 
@@ -10367,6 +10379,7 @@ def _dashboard_html_base():
             font-weight: 900;
 
             white-space: nowrap;
+            text-overflow: ellipsis;
         }}
 
         .hero-deal-arrow {{
@@ -10480,8 +10493,15 @@ def _dashboard_html_base():
                 font-size: 13px;
             }}
 
+            .hero-deal-bottom {{
+                grid-template-columns: 1fr;
+                grid-template-areas:
+                    "pricing"
+                    "saving";
+            }}
+
             .hero-deal-pricing {{
-                display: block;
+                display: grid;
             }}
 
             .hero-deal-track
@@ -10491,7 +10511,12 @@ def _dashboard_html_base():
             }}
 
             .hero-deal-estimate {{
-                margin-top: 3px;
+                margin-top: 0;
+            }}
+
+            .hero-deal-track
+            .hero-deal-saving {{
+                justify-self: start;
             }}
         }}
 
@@ -13809,27 +13834,11 @@ tbody td {
 <script>
 document.addEventListener("DOMContentLoaded", () => {
 
-    const table = Array.from(
-        document.querySelectorAll("table")
-    ).find(t => {
-        const h = Array.from(
-            t.querySelectorAll("th")
-        ).map(x => x.textContent.trim());
+    const tables = Array.from(
+        document.querySelectorAll(".deal-section table")
+    );
 
-        return h.includes("Listing")
-            && h.includes("Undervaluation")
-            && h.includes("Score");
-    });
-
-    if (!table) return;
-
-    const head = table.querySelector("thead tr");
-    const body = table.querySelector("tbody");
-
-    if (!head || !body) return;
-
-    const KEY = "ebayLaptopHunterSort";
-    const headers = Array.from(head.children);
+    if (!tables.length) return;
 
     function numberValue(text) {
         const m = String(text)
@@ -13839,7 +13848,7 @@ document.addEventListener("DOMContentLoaded", () => {
         return m ? Number(m[0]) : -Infinity;
     }
 
-    function ageValue(text) {
+    function durationValue(text) {
         text = String(text).toLowerCase();
 
         let value = 0;
@@ -13847,165 +13856,223 @@ document.addEventListener("DOMContentLoaded", () => {
         const d = text.match(/(\d+)\s*d/);
         const h = text.match(/(\d+)\s*h/);
         const m = text.match(/(\d+)\s*m/);
+        const s = text.match(/(\d+)\s*s/);
 
         if (d) value += Number(d[1]) * 86400;
         if (h) value += Number(h[1]) * 3600;
         if (m) value += Number(m[1]) * 60;
+        if (s) value += Number(s[1]);
 
         return value;
     }
 
-    function cellValue(row, index, name) {
-        const cell = row.children[index];
+    tables.forEach((table, tableIndex) => {
+        const head = table.querySelector("thead tr");
+        const body = table.querySelector("tbody");
 
-        if (!cell) return "";
+        if (!head || !body) return;
 
-        if (
-            cell.dataset.sort !== undefined
-            && cell.dataset.sort !== ""
-        ) {
-            return Number(cell.dataset.sort);
-        }
+        const headers = Array.from(head.children);
+        const section = table.closest(".deal-section");
+        const sectionTitle = section?.querySelector("h2")
+            ?.textContent.trim() || `table-${tableIndex}`;
+        const storageKey =
+            `laptopLanderSort:${sectionTitle}`;
 
-        const text = cell.textContent.trim();
+        function cellValue(row, index, name) {
+            const cell = row.children[index];
 
-        if (name === "Age") {
-            return ageValue(text);
-        }
-
-        if (
-            name === "Price"
-            || name === "Undervaluation"
-            || name === "Score"
-        ) {
-            return numberValue(text);
-        }
-
-        return text.toLowerCase();
-    }
-
-    function sort(index, direction, save=true) {
-        const th = headers[index];
-        if (!th) return;
-
-        const name = th.dataset.sortName;
-
-        const rows = Array.from(
-            body.querySelectorAll(":scope > tr")
-        );
-
-        rows.sort((a, b) => {
-            const av = cellValue(a, index, name);
-            const bv = cellValue(b, index, name);
-
-            let result;
+            if (!cell) return "";
 
             if (
-                typeof av === "number"
-                && typeof bv === "number"
+                cell.dataset.sort !== undefined
+                && cell.dataset.sort !== ""
             ) {
-                result = av - bv;
-            } else {
-                result = String(av).localeCompare(
-                    String(bv),
-                    undefined,
-                    {
-                        numeric: true,
-                        sensitivity: "base"
-                    }
-                );
+                const value = Number(cell.dataset.sort);
+                return Number.isFinite(value)
+                    ? value
+                    : -Infinity;
             }
 
-            return direction === "asc"
-                ? result
-                : -result;
-        });
+            const text = cell.textContent.trim();
 
-        rows.forEach(row => body.appendChild(row));
+            if (
+                name === "Listing age"
+                || name === "Time left"
+            ) {
+                return durationValue(text);
+            }
 
-        headers.forEach(h => {
-            h.classList.remove(
-                "sorted-asc",
-                "sorted-desc"
+            if (
+                name === "Power/£"
+                || name === "Price"
+                || name === "Current bid"
+                || name === "Under market"
+                || name === "Potential saving"
+                || name === "Deal score"
+            ) {
+                return numberValue(text);
+            }
+
+            return text.toLowerCase();
+        }
+
+        function sort(index, direction, save=true) {
+            const th = headers[index];
+            if (!th) return;
+
+            const name = th.dataset.sortName;
+            const rows = Array.from(
+                body.querySelectorAll(":scope > tr")
+            );
+
+            rows.sort((a, b) => {
+                const av = cellValue(a, index, name);
+                const bv = cellValue(b, index, name);
+
+                let result;
+
+                if (
+                    typeof av === "number"
+                    && typeof bv === "number"
+                ) {
+                    result = av - bv;
+                } else {
+                    result = String(av).localeCompare(
+                        String(bv),
+                        undefined,
+                        {
+                            numeric: true,
+                            sensitivity: "base"
+                        }
+                    );
+                }
+
+                return direction === "asc"
+                    ? result
+                    : -result;
+            });
+
+            rows.forEach(row => body.appendChild(row));
+
+            headers.forEach(h => {
+                h.classList.remove(
+                    "sorted-asc",
+                    "sorted-desc"
+                );
+
+                h.setAttribute("aria-sort", "none");
+
+                const indicator =
+                    h.querySelector(".sort-indicator");
+
+                if (indicator) {
+                    indicator.textContent = "";
+                }
+            });
+
+            th.classList.add(
+                direction === "asc"
+                    ? "sorted-asc"
+                    : "sorted-desc"
+            );
+
+            th.setAttribute(
+                "aria-sort",
+                direction === "asc"
+                    ? "ascending"
+                    : "descending"
             );
 
             const indicator =
-                h.querySelector(".sort-indicator");
+                th.querySelector(".sort-indicator");
 
             if (indicator) {
-                indicator.textContent = "";
+                indicator.textContent =
+                    direction === "asc" ? "▲" : "▼";
             }
-        });
 
-        th.classList.add(
-            direction === "asc"
-                ? "sorted-asc"
-                : "sorted-desc"
-        );
-
-        th.querySelector(".sort-indicator").textContent =
-            direction === "asc" ? "▲" : "▼";
-
-        if (save) {
-            localStorage.setItem(
-                KEY,
-                JSON.stringify({
-                    name,
-                    direction
-                })
-            );
-        }
-    }
-
-    headers.forEach((th, index) => {
-        const name = th.textContent.trim();
-
-        th.dataset.sortName = name;
-        th.classList.add("sortable-header");
-
-        const indicator =
-            document.createElement("span");
-
-        indicator.className = "sort-indicator";
-
-        th.appendChild(indicator);
-
-        th.addEventListener("click", () => {
-            const direction =
-                th.classList.contains("sorted-asc")
-                    ? "desc"
-                    : "asc";
-
-            sort(index, direction, true);
-        });
-    });
-
-    try {
-        const saved = JSON.parse(
-            localStorage.getItem(KEY) || "null"
-        );
-
-        if (saved?.name && saved?.direction) {
-            const index = headers.findIndex(
-                th =>
-                    th.dataset.sortName
-                    === saved.name
-            );
-
-            if (index >= 0) {
-                sort(
-                    index,
-                    saved.direction,
-                    false
+            if (save) {
+                localStorage.setItem(
+                    storageKey,
+                    JSON.stringify({
+                        name,
+                        direction
+                    })
                 );
             }
         }
-    } catch (e) {
-        console.warn(
-            "Unable to restore dashboard sort",
-            e
-        );
-    }
+
+        headers.forEach((th, index) => {
+            const name = th.textContent.trim();
+
+            /* The image column has no useful sort value. */
+            if (!name && th.classList.contains("image-header")) {
+                return;
+            }
+
+            th.dataset.sortName = name;
+            th.classList.add("sortable-header");
+            th.setAttribute("tabindex", "0");
+            th.setAttribute("aria-sort", "none");
+
+            const indicator =
+                document.createElement("span");
+
+            indicator.className = "sort-indicator";
+            indicator.setAttribute("aria-hidden", "true");
+
+            th.appendChild(indicator);
+
+            const activate = () => {
+                const direction =
+                    th.classList.contains("sorted-asc")
+                        ? "desc"
+                        : "asc";
+
+                sort(index, direction, true);
+            };
+
+            th.addEventListener("click", activate);
+
+            th.addEventListener("keydown", event => {
+                if (
+                    event.key === "Enter"
+                    || event.key === " "
+                ) {
+                    event.preventDefault();
+                    activate();
+                }
+            });
+        });
+
+        try {
+            const saved = JSON.parse(
+                localStorage.getItem(storageKey) || "null"
+            );
+
+            if (saved?.name && saved?.direction) {
+                const index = headers.findIndex(
+                    th =>
+                        th.dataset.sortName
+                        === saved.name
+                );
+
+                if (index >= 0) {
+                    sort(
+                        index,
+                        saved.direction,
+                        false
+                    );
+                }
+            }
+        } catch (e) {
+            console.warn(
+                "Unable to restore table sort",
+                e
+            );
+        }
+    });
 });
 </script>
 """
