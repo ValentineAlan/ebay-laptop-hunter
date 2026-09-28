@@ -6563,6 +6563,7 @@ def calculate_sold_valuation(conn, target):
     )
 
     score = deal_score(
+        conn,
         target,
         estimate,
         under,
@@ -6717,6 +6718,7 @@ def deal_confidence_multiplier(confidence):
 
 
 def deal_score(
+    conn,
     target,
     value,
     undervalue,
