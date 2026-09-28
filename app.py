@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.25"
+APP_VERSION = "0.9.26"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -623,21 +623,64 @@ def classifier_rule_values(category, fallback=None):
 
 
 def _seed_classifier_rules(conn):
+    """
+    Seed built-in classifier rules without overwriting user configuration.
+
+    Existing rules, including disabled rules, are retained. Newly-added
+    built-in defaults are appended only when that exact rule does not already
+    exist in the category.
+    """
     for category, values in DEFAULT_RULE_GROUPS.items():
-        count = conn.execute(
-            "SELECT COUNT(*) AS n FROM classifier_rules WHERE category=?",
+        existing_rows = conn.execute(
+            """
+            SELECT value, position
+            FROM classifier_rules
+            WHERE category=?
+            ORDER BY position,id
+            """,
             (category,),
-        ).fetchone()["n"]
-        if count:
-            continue
-        for position, value in enumerate(values):
+        ).fetchall()
+
+        existing = {
+            row["value"]
+            for row in existing_rows
+        }
+
+        next_position = (
+            max(
+                (row["position"] or 0)
+                for row in existing_rows
+            ) + 1
+            if existing_rows
+            else 0
+        )
+
+        for value in values:
+            if value in existing:
+                continue
+
             conn.execute(
                 """
-                INSERT INTO classifier_rules(category,position,value,enabled,updated_at)
+                INSERT INTO classifier_rules(
+                    category,
+                    position,
+                    value,
+                    enabled,
+                    updated_at
+                )
                 VALUES (?,?,?,?,?)
                 """,
-                (category, position, value, 1, iso_now()),
+                (
+                    category,
+                    next_position,
+                    value,
+                    1,
+                    iso_now(),
+                ),
             )
+
+            existing.add(value)
+            next_position += 1
 
 
 def _bump_rules_revision(conn):
@@ -2699,6 +2742,64 @@ MODEL_PATTERNS = [
     r"[A-Za-z0-9-]+"
     r"(?:\s+[A-Za-z0-9-]+)?\b",
 
+    # Lenovo Legion - require the machine/platform code.
+    # Examples: Legion 7 16IRX9, Legion 5 15IRX10.
+    r"\bLegion\s+\d(?:i)?(?:\s+Pro)?\s+"
+    r"\d{2}[A-Z]{2,5}\d{1,2}\b",
+
+    # Toshiba / Dynabook - require the platform code.
+    # Examples: Satellite Pro C660, R50-B-12V, Tecra A40-E.
+    r"\bSatellite\s+Pro\s+"
+    r"[A-Z]\d{2,3}(?:-[A-Z0-9]+){0,3}\b",
+
+    r"\bTecra\s+"
+    r"[A-Z]\d{2,3}(?:-[A-Z0-9]+){0,3}\b",
+
+    r"\bPortege\s+"
+    r"[A-Z]\d{2,3}(?:-[A-Z0-9]+){0,3}\b",
+
+    # ASUS - retain the useful family where present and require an ASUS
+    # platform code such as UX433FN, X1504ZA, FX517ZM, G834.
+    r"\bZenBook(?:\s+\d{2})?\s+"
+    r"[A-Z]{1,3}\d{3,4}[A-Z0-9-]*\b",
+
+    r"\bVivoBook(?:\s+\d{2})?\s+"
+    r"[A-Z]{1,3}\d{3,4}[A-Z0-9-]*\b",
+
+    r"\bTUF(?:\s+Gaming)?(?:\s+[AF]\d{2})?\s+"
+    r"[A-Z]{2}\d{3}[A-Z0-9-]*\b",
+
+    r"\bROG(?:\s+(?:Strix|Zephyrus|Scar))*\s+"
+    r"[A-Z]{1,3}\d{3,4}[A-Z0-9-]*\b",
+
+    # ASUS bare machine codes when the family is absent.
+    r"\b(?:UX|UM|X|K|F|G|GL|GU|GX|FX|FA)\d{3,4}[A-Z0-9-]*\b",
+
+    # Acer - family plus real platform code.
+    # Examples: Aspire V7-581, Aspire A515-55, Swift 5 SF514-52T.
+    r"\bAspire\s+"
+    r"(?:V\d-\d{3}[A-Z]?|A\d{3}-\d{2}[A-Z0-9-]*)\b",
+
+    r"\bSwift(?:\s+\d)?\s+"
+    r"SF\d{3}-\d{2}[A-Z0-9-]*\b",
+
+    r"\bTravelMate\s+"
+    r"[A-Z]\d{3,4}[A-Z0-9-]*\b",
+
+    # MSI - require GE/GS/GP/etc platform code rather than just Raider,
+    # Stealth, Katana, etc.
+    r"\b(?:Raider|Stealth|Katana|Pulse|Prestige|Modern)\s+"
+    r"[A-Z]{2}\d{2,3}[A-Z]*(?:-[A-Z0-9]+)?\b",
+
+    # HP consumer product codes.
+    # Examples: 15s-fq2037na, 15-fc0049na, 14-ce3600na.
+    r"\b(?:HP\s+)?"
+    r"\d{2}s?-[a-z]{2}\d{4}[a-z]{0,2}\b",
+
+    # Geo machines where a numbered model is explicitly stated.
+    r"\bGeoBook\s+[A-Za-z0-9-]+\b",
+    r"\bGeoFlex\s+\d+[A-Za-z0-9-]*\b",
+
     # Microsoft
     r"\bSurface\s+Pro\s+\d{1,2}(?:\+|\s+Plus)?(?!\w)",
 
@@ -2715,6 +2816,11 @@ MODEL_PATTERNS = [
     r"\bLG\s+Gram\s+"
     r"\d{2,4}[A-Za-z0-9-]*\b",
 ]
+
+# MODEL_PATTERNS is the canonical built-in list.  The settings/runtime rule
+# system persists these values in classifier_rules, so keep its defaults in
+# sync with the parser automatically.
+DEFAULT_RULE_GROUPS["model_patterns"] = list(MODEL_PATTERNS)
 
 
 def clean_model(model):
@@ -2786,6 +2892,40 @@ def precise_model_for_valuation(brand, model):
         r"^ThinkPad\s+(?:(?:T|X|E|L|P)\d{2,3}[A-Za-z]?|X1\s+(?:Carbon|Yoga))(?:\s+Gen\s+\d+)?$",
         r"^IdeaPad\s+(?:Slim\s+)?[A-Za-z0-9-]+(?:\s+[A-Za-z0-9-]+)?$",
         r"^Surface\s+(?:Pro|Laptop)\s+\d{1,2}\+?$",
+
+        # Lenovo Legion with explicit platform code.
+        r"^Legion\s+\d(?:i)?(?:\s+Pro)?\s+\d{2}[A-Z]{2,5}\d{1,2}$",
+
+        # Toshiba / Dynabook platform identities.
+        r"^(?:Satellite\s+Pro|Tecra|Portege)\s+"
+        r"[A-Z]\d{2,3}(?:-[A-Z0-9]+){0,3}$",
+
+        # ASUS identities require a platform/model code.
+        r"^(?:ZenBook|VivoBook)(?:\s+\d{2})?\s+"
+        r"[A-Z]{1,3}\d{3,4}[A-Z0-9-]*$",
+
+        r"^TUF(?:\s+Gaming)?(?:\s+[AF]\d{2})?\s+"
+        r"[A-Z]{2}\d{3}[A-Z0-9-]*$",
+
+        r"^ROG(?:\s+(?:Strix|Zephyrus|Scar))*\s+"
+        r"[A-Z]{1,3}\d{3,4}[A-Z0-9-]*$",
+
+        r"^(?:UX|UM|X|K|F|G|GL|GU|GX|FX|FA)\d{3,4}[A-Z0-9-]*$",
+
+        # Acer identities require the actual platform code.
+        r"^Aspire\s+(?:V\d-\d{3}[A-Z]?|A\d{3}-\d{2}[A-Z0-9-]*)$",
+        r"^Swift(?:\s+\d)?\s+SF\d{3}-\d{2}[A-Z0-9-]*$",
+        r"^TravelMate\s+[A-Z]\d{3,4}[A-Z0-9-]*$",
+
+        # MSI platform identities.
+        r"^(?:Raider|Stealth|Katana|Pulse|Prestige|Modern)\s+"
+        r"[A-Z]{2}\d{2,3}[A-Z]*(?:-[A-Z0-9]+)?$",
+
+        # HP consumer product numbers.
+        r"^\d{2}s?-[a-z]{2}\d{4}[a-z]{0,2}$",
+
+        r"^GeoBook\s+[A-Za-z0-9-]+$",
+        r"^GeoFlex\s+\d+[A-Za-z0-9-]*$",
     )
     if any(re.fullmatch(p, value, re.I) for p in patterns):
         return True
@@ -3283,6 +3423,49 @@ def parse_cpu(
             f"Intel Celeron {model}",
             "Intel",
             "Celeron",
+            None,
+            "EXACT",
+            source
+        )
+
+    # Intel Pentium N/J-series processors.
+    # Examples: Pentium N3700, N4200, N5000, N5030, N6000.
+    match = re.search(
+        r"\b(?:Intel\s+)?Pentium"
+        r"(?:\s+(?:Silver|Gold))?\s+"
+        r"([NJ]\d{4})\b",
+        text,
+        re.I
+    )
+
+    if match:
+        model = match.group(1).upper()
+
+        return cpu_result(
+            f"Intel Pentium {model}",
+            "Intel",
+            "Pentium",
+            None,
+            "EXACT",
+            source
+        )
+
+    # Common older Intel N-series listings sometimes omit the Pentium name,
+    # e.g. "Intel N3700". Only accept the explicit Intel + Nxxxx form.
+    match = re.search(
+        r"\bIntel\s+"
+        r"(N(?:3700|4200|5000|5030|6000|6005))\b",
+        text,
+        re.I
+    )
+
+    if match:
+        model = match.group(1).upper()
+
+        return cpu_result(
+            f"Intel Pentium {model}",
+            "Intel",
+            "Pentium",
             None,
             "EXACT",
             source
