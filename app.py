@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.28"
+APP_VERSION = "0.9.29"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -6330,6 +6330,105 @@ def advertised_variants_compatible(left, right):
 
 
 
+def sold_spec_evidence_tier(target, comp):
+    """
+    Match sold evidence conservatively.
+
+    Brand/model are already constrained by sold_candidates().
+    CPU remains an exact hard requirement.
+
+    RAM/storage:
+      - exact RAM + exact storage: full evidence
+      - exactly one differing: usable with reduced weight
+      - both differing: reject
+      - missing RAM/storage: reject
+
+    Large configuration jumps are also rejected.
+    """
+    target_cpu = normalise(
+        row_value(target, "cpu")
+    ).lower()
+
+    comp_cpu = normalise(
+        row_value(comp, "cpu")
+    ).lower()
+
+    if not target_cpu or not comp_cpu:
+        return "INCOMPATIBLE", 0.0
+
+    if target_cpu != comp_cpu:
+        return "INCOMPATIBLE", 0.0
+
+    parsed_comp_cpu = parse_cpu(
+        row_value(comp, "cpu"),
+        "VALUATION"
+    )
+
+    if (
+        not parsed_comp_cpu
+        or parsed_comp_cpu.get("confidence") != "EXACT"
+    ):
+        return "INCOMPATIBLE", 0.0
+
+    target_ram, target_storage = effective_ram_storage(
+        target
+    )
+
+    comp_ram, comp_storage = effective_ram_storage(
+        comp
+    )
+
+    if (
+        target_ram is None
+        or target_storage is None
+        or comp_ram is None
+        or comp_storage is None
+    ):
+        return "INCOMPATIBLE", 0.0
+
+    ram_exact = target_ram == comp_ram
+    storage_exact = target_storage == comp_storage
+
+    if ram_exact and storage_exact:
+        return "EXACT", 1.0
+
+    # Do not combine evidence where both major configurable
+    # specifications differ from the target.
+    if not ram_exact and not storage_exact:
+        return "INCOMPATIBLE", 0.0
+
+    if not ram_exact:
+        # Do not value a lower-RAM target from a better-equipped
+        # sold machine. Lower-spec sold evidence is conservative.
+        if comp_ram > target_ram:
+            return "INCOMPATIBLE", 0.0
+
+        ram_ratio = (
+            target_ram
+            / comp_ram
+        )
+
+        if ram_ratio > 2:
+            return "INCOMPATIBLE", 0.0
+
+        return "RAM_NEAR", 0.65
+
+    # Same principle for storage: a sold machine with more storage
+    # must not establish the value of a lower-storage target.
+    if comp_storage > target_storage:
+        return "INCOMPATIBLE", 0.0
+
+    storage_ratio = (
+        target_storage
+        / comp_storage
+    )
+
+    if storage_ratio > 4:
+        return "INCOMPATIBLE", 0.0
+
+    return "STORAGE_NEAR", 0.75
+
+
 def variant_evidence_tier(target, comp):
     """
     Rate the quality of optional advertised variant evidence.
@@ -6500,8 +6599,27 @@ def advertised_variants(row):
     return markers
 
 def select_sold_evidence(conn, target):
-    selected = remove_price_outliers(sold_candidates(conn, target))
-    return selected if len(selected) >= MIN_COMPARABLES else []
+    selected = remove_price_outliers(
+        sold_candidates(conn, target)
+    )
+
+    if len(selected) < MIN_COMPARABLES:
+        return []
+
+    # If relaxed RAM/storage evidence is used, anchor the valuation
+    # with at least one exact RAM+storage sold comparable.
+    uses_relaxed_spec = any(
+        candidate.get("spec_tier") != "EXACT"
+        for candidate in selected
+    )
+
+    if uses_relaxed_spec and not any(
+        candidate.get("spec_tier") == "EXACT"
+        for candidate in selected
+    ):
+        return []
+
+    return selected
 
 
 
@@ -6620,10 +6738,19 @@ def sold_candidates(conn, target):
         ):
             continue
 
-        if (
-            not same_spec(target, row)
-            or not ordinary_laptop(row["title"])
+        if not ordinary_laptop(
+            row["title"]
         ):
+            continue
+
+        spec_tier, spec_weight = (
+            sold_spec_evidence_tier(
+                target,
+                row
+            )
+        )
+
+        if spec_tier == "INCOMPATIBLE":
             continue
 
         if (
@@ -6672,10 +6799,16 @@ def sold_candidates(conn, target):
             total=price,
             similarity=(
                 100
-                if tier == "EXACT"
-                else 75
+                if (
+                    spec_tier == "EXACT"
+                    and tier == "EXACT"
+                )
+                else 85
+                if spec_tier == "EXACT"
+                else 70
             ),
             tier=tier,
+            spec_tier=spec_tier,
             units=max(
                 1,
                 int(row["units_sold"] or 1)
@@ -6683,6 +6816,7 @@ def sold_candidates(conn, target):
             weight=(
                 recency_weight
                 * variant_weight
+                * spec_weight
             )
         )
 
