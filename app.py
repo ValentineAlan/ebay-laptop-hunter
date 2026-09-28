@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.26"
+APP_VERSION = "0.9.27"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -2772,9 +2772,6 @@ MODEL_PATTERNS = [
     r"\bROG(?:\s+(?:Strix|Zephyrus|Scar))*\s+"
     r"[A-Z]{1,3}\d{3,4}[A-Z0-9-]*\b",
 
-    # ASUS bare machine codes when the family is absent.
-    r"\b(?:UX|UM|X|K|F|G|GL|GU|GX|FX|FA)\d{3,4}[A-Z0-9-]*\b",
-
     # Acer - family plus real platform code.
     # Examples: Aspire V7-581, Aspire A515-55, Swift 5 SF514-52T.
     r"\bAspire\s+"
@@ -2882,6 +2879,18 @@ def precise_model_for_valuation(brand, model):
     if re.match(r"IdeaPad\s+(?:Slim\s+)?[13579](?:\s|$)", value, re.I):
         return False
 
+    # ASUS machine/platform codes are specific when the brand itself is ASUS.
+    if (
+        normalise(brand).upper() == "ASUS"
+        and re.fullmatch(
+            r"(?:UX|UM|X|K|F|G|GL|GU|GX|FX|FA)"
+            r"\d{3,4}[A-Z0-9-]*",
+            value,
+            re.I,
+        )
+    ):
+        return True
+
     # Strong known-specific shapes.
     patterns = (
         r"^Latitude\s+(?:E)?\d{4}(?:\s+Detachable)?$",
@@ -2909,8 +2918,6 @@ def precise_model_for_valuation(brand, model):
 
         r"^ROG(?:\s+(?:Strix|Zephyrus|Scar))*\s+"
         r"[A-Z]{1,3}\d{3,4}[A-Z0-9-]*$",
-
-        r"^(?:UX|UM|X|K|F|G|GL|GU|GX|FX|FA)\d{3,4}[A-Z0-9-]*$",
 
         # Acer identities require the actual platform code.
         r"^Aspire\s+(?:V\d-\d{3}[A-Z]?|A\d{3}-\d{2}[A-Z0-9-]*)$",
@@ -2960,6 +2967,19 @@ def identify_model(
             return clean_model(
                 match.group(0)
             )
+
+    # Some ASUS titles contain only the machine/platform code rather than a
+    # family-qualified model. Restrict these codes to ASUS so GPU names such
+    # as NVIDIA K2100M cannot be mistaken for laptop models.
+    if identify_brand(title, detail) == "ASUS":
+        match = re.search(
+            r"\b(?:UX|UM|X|K|F|G|GL|GU|GX|FX|FA)"
+            r"\d{3,4}[A-Z0-9-]*\b",
+            title,
+            re.I,
+        )
+        if match:
+            return clean_model(match.group(0))
 
     if aspect_model:
 
