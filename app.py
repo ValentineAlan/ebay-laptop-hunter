@@ -8709,10 +8709,31 @@ def _dashboard_html_base():
 
     hero_cards = []
 
-    for hero_row in buy_now_rows[:3]:
-        hero_title = html.escape(
+    for hero_index, hero_row in enumerate(buy_now_rows[:8]):
+        hero_url_raw = normalise(
+            hero_row["url"] or ""
+        )
+
+        if not hero_url_raw:
+            continue
+
+        hero_url = html.escape(
+            hero_url_raw,
+            quote=True
+        )
+
+        hero_title_raw = (
             hero_row["title"]
             or "Laptop deal"
+        )
+
+        hero_title = html.escape(
+            hero_title_raw
+        )
+
+        hero_title_attr = html.escape(
+            hero_title_raw,
+            quote=True
         )
 
         hero_price = money(
@@ -8723,52 +8744,135 @@ def _dashboard_html_base():
             hero_row["undervaluation_gbp"]
         )
 
+        hero_estimate = money(
+            hero_row["estimated_value"]
+        )
+
+        hero_pct = safe_float(
+            hero_row["undervaluation_pct"]
+        )
+
+        hero_score = safe_float(
+            hero_row["deal_score"]
+        )
+
+        hero_pct_text = (
+            f"{hero_pct:.0f}% below estimate"
+            if hero_pct is not None
+            else "Below estimate"
+        )
+
+        hero_score_text = (
+            f"{hero_score:.0f}"
+            if hero_score is not None
+            else "—"
+        )
+
         hero_image_url = (
             hero_row["image_url"]
             or ""
         )
 
         if hero_image_url:
+            loading = (
+                "eager"
+                if hero_index < 2
+                else "lazy"
+            )
+
             hero_image = (
                 '<img src="'
                 + html.escape(
                     hero_image_url,
                     quote=True
                 )
-                + '" alt="" loading="lazy">'
+                + f'" alt="" loading="{loading}">'
             )
+
         else:
             hero_image = """
                 <svg viewBox="0 0 64 48"
                      aria-hidden="true">
                     <rect x="11" y="7"
-                          width="42" height="28"
+                          width="42"
+                          height="28"
                           rx="3"></rect>
                     <path d="M6 40h52"></path>
                 </svg>
             """
 
+        top_badge = (
+            '<span class="hero-deal-top-badge">'
+            'Top deal'
+            '</span>'
+            if hero_index == 0
+            else ""
+        )
+
+        top_class = (
+            " hero-deal-card-top"
+            if hero_index == 0
+            else ""
+        )
+
         hero_cards.append(
             f"""
-            <div class="hero-deal-card">
-                <div class="hero-deal-image">
-                    {hero_image}
+            <a class="hero-deal-card{top_class}"
+               href="{hero_url}"
+               target="_blank"
+               rel="noopener noreferrer"
+               aria-label="{hero_title_attr}. {hero_price}. Open eBay listing">
+
+                <div class="hero-deal-card-inner">
+
+                    <div class="hero-deal-image">
+                        {hero_image}
+                        {top_badge}
+                    </div>
+
+                    <div class="hero-deal-copy">
+
+                        <div class="hero-deal-meta">
+                            <span class="hero-deal-score">
+                                Score {hero_score_text}
+                            </span>
+
+                            <span class="hero-deal-percent">
+                                {hero_pct_text}
+                            </span>
+                        </div>
+
+                        <div class="hero-deal-title">
+                            {hero_title}
+                        </div>
+
+                        <div class="hero-deal-bottom">
+
+                            <div class="hero-deal-pricing">
+                                <span class="hero-deal-price">
+                                    {hero_price}
+                                </span>
+
+                                <span class="hero-deal-estimate">
+                                    Est. value {hero_estimate}
+                                </span>
+                            </div>
+
+                            <span class="hero-deal-saving">
+                                Save {hero_saving}
+                            </span>
+
+                            <span class="hero-deal-arrow"
+                                  aria-hidden="true">
+                                ↗
+                            </span>
+
+                        </div>
+
+                    </div>
+
                 </div>
-
-                <div class="hero-deal-copy">
-                    <div class="hero-deal-title">
-                        {hero_title}
-                    </div>
-
-                    <div class="hero-deal-price">
-                        {hero_price}
-                    </div>
-
-                    <div class="hero-deal-saving">
-                        Save {hero_saving}
-                    </div>
-                </div>
-            </div>
+            </a>
             """
         )
 
@@ -8776,7 +8880,9 @@ def _dashboard_html_base():
         hero_cards
     )
 
-    hero_card_count = len(hero_cards)
+    hero_card_count = len(
+        hero_cards
+    )
 
     return f"""
     <!doctype html>
@@ -8852,11 +8958,55 @@ def _dashboard_html_base():
             </div>
         </div>
 
-        <div class="hero-deals hero-deals-{hero_card_count}"
-             aria-label="Current laptop deals">
-            {hero_cards_html}
-        </div>
+        <div class="hero-deals"
+             data-hero-carousel
+             role="region"
+             aria-roledescription="carousel"
+             aria-label="Current standout laptop deals">
 
+            <div class="hero-deal-carousel-head">
+
+                <div class="hero-deal-carousel-live">
+                    <span class="hero-live-dot"
+                          aria-hidden="true"></span>
+                    Live standout deals
+                </div>
+
+                <div class="hero-deal-carousel-controls">
+
+                    <span class="hero-deal-carousel-count">
+                        1 / {hero_card_count}
+                    </span>
+
+                    <button type="button"
+                            class="hero-deal-prev"
+                            aria-label="Previous deal">
+                        ‹
+                    </button>
+
+                    <button type="button"
+                            class="hero-deal-next"
+                            aria-label="Next deal">
+                        ›
+                    </button>
+
+                </div>
+
+            </div>
+
+            <div class="hero-deal-viewport">
+
+                <div class="hero-deal-track">
+                    {hero_cards_html}
+                </div>
+
+            </div>
+
+            <div class="hero-deal-carousel-hint">
+                Auto-scrolls · swipe on mobile · hover to pause
+            </div>
+
+        </div>
     </section>
 
     <style>
@@ -9775,7 +9925,572 @@ def _dashboard_html_base():
                 gap: 14px;
             }}
         }}
+        /* ======================================================
+           Laptop Lander scrolling hero deals
+           ====================================================== */
 
+        .hero-deals[data-hero-carousel] {{
+            position: relative;
+            display: block;
+            width: 100%;
+            max-width: 520px;
+            min-height: 0;
+            justify-self: end;
+            z-index: 2;
+        }}
+
+        .hero-deal-carousel-head {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 10px;
+        }}
+
+        .hero-deal-carousel-live {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+
+            color: #26395f;
+
+            font-size: 13px;
+            font-weight: 850;
+        }}
+
+        .hero-live-dot {{
+            width: 9px;
+            height: 9px;
+            flex: 0 0 9px;
+
+            border-radius: 50%;
+
+            background: #22c55e;
+
+            box-shadow:
+                0 0 0 4px
+                rgba(34, 197, 94, .12);
+        }}
+
+        .hero-deal-carousel-controls {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }}
+
+        .hero-deal-carousel-count {{
+            margin-right: 3px;
+
+            color: #7b879b;
+
+            font-size: 10px;
+            font-weight: 750;
+
+            font-variant-numeric:
+                tabular-nums;
+        }}
+
+        .hero-deal-prev,
+        .hero-deal-next {{
+            display: grid;
+            place-items: center;
+
+            width: 31px;
+            height: 31px;
+            padding: 0;
+
+            border:
+                1px solid
+                rgba(58, 83, 145, .13);
+            border-radius: 10px;
+
+            background:
+                rgba(255, 255, 255, .92);
+
+            color: #29426f;
+
+            box-shadow:
+                0 5px 14px
+                rgba(28, 48, 90, .07);
+
+            cursor: pointer;
+
+            font: inherit;
+            font-size: 22px;
+            line-height: 1;
+
+            transition:
+                transform 150ms ease,
+                border-color 150ms ease,
+                box-shadow 150ms ease;
+        }}
+
+        .hero-deal-prev:hover,
+        .hero-deal-next:hover {{
+            transform: translateY(-1px);
+
+            border-color:
+                rgba(37, 99, 235, .28);
+
+            box-shadow:
+                0 7px 18px
+                rgba(28, 48, 90, .11);
+        }}
+
+        .hero-deal-viewport {{
+            height: 304px;
+
+            overflow: hidden;
+
+            border-radius: 20px;
+
+            scroll-behavior: smooth;
+        }}
+
+        .hero-deal-track {{
+            display: flex;
+            flex-direction: column;
+
+            gap: 12px;
+
+            width: 100%;
+        }}
+
+        .hero-deal-track
+        .hero-deal-card,
+        .hero-deal-track
+        .hero-deal-card:nth-child(n) {{
+            position: relative !important;
+
+            inset: auto !important;
+
+            display: block !important;
+
+            flex: 0 0 146px;
+
+            width: 100% !important;
+            max-width: none !important;
+            height: 146px;
+
+            margin: 0 !important;
+
+            overflow: hidden;
+
+            border:
+                1px solid
+                rgba(72, 99, 166, .13);
+
+            border-radius: 19px;
+
+            background:
+                radial-gradient(
+                    circle at 100% 0%,
+                    rgba(78, 119, 255, .11),
+                    transparent 34%
+                ),
+                linear-gradient(
+                    145deg,
+                    #ffffff,
+                    #f7faff
+                );
+
+            box-shadow:
+                0 13px 29px
+                rgba(28, 48, 90, .10);
+
+            color: inherit;
+            text-decoration: none;
+
+            transform: none !important;
+
+            scroll-snap-align: start;
+
+            transition:
+                transform 180ms ease,
+                border-color 180ms ease,
+                box-shadow 180ms ease;
+        }}
+
+        .hero-deal-track
+        .hero-deal-card:hover {{
+            transform:
+                translateY(-3px) !important;
+
+            border-color:
+                rgba(37, 99, 235, .28);
+
+            box-shadow:
+                0 18px 38px
+                rgba(28, 48, 90, .15);
+        }}
+
+        .hero-deal-track
+        .hero-deal-card-top {{
+            border-color:
+                rgba(37, 99, 235, .25);
+        }}
+
+        .hero-deal-track
+        .hero-deal-card-inner {{
+            display: grid;
+
+            grid-template-columns:
+                116px minmax(0, 1fr);
+
+            align-items: center;
+
+            gap: 15px;
+
+            height: 100%;
+
+            box-sizing: border-box;
+
+            padding: 14px;
+        }}
+
+        .hero-deal-track
+        .hero-deal-image {{
+            position: relative;
+
+            display: grid;
+            place-items: center;
+
+            width: 116px;
+            height: 116px;
+
+            overflow: hidden;
+
+            border:
+                1px solid
+                rgba(15, 23, 42, .06);
+
+            border-radius: 14px;
+
+            background: #f2f5fa;
+        }}
+
+        .hero-deal-track
+        .hero-deal-image img {{
+            width: 100%;
+            height: 100%;
+
+            object-fit: cover;
+
+            transition:
+                transform 200ms ease;
+        }}
+
+        .hero-deal-track
+        .hero-deal-card:hover
+        .hero-deal-image img {{
+            transform: scale(1.035);
+        }}
+
+        .hero-deal-track
+        .hero-deal-image svg {{
+            width: 70px;
+            height: 52px;
+
+            fill: none;
+            stroke: #8290aa;
+            stroke-width: 2.1;
+        }}
+
+        .hero-deal-top-badge {{
+            position: absolute;
+
+            top: 7px;
+            left: 7px;
+
+            padding: 4px 7px;
+
+            border-radius: 999px;
+
+            background:
+                rgba(17, 35, 72, .92);
+
+            color: #fff;
+
+            font-size: 9px;
+            font-weight: 900;
+            letter-spacing: .05em;
+
+            text-transform: uppercase;
+        }}
+
+        .hero-deal-track
+        .hero-deal-copy {{
+            display: flex;
+            flex-direction: column;
+
+            min-width: 0;
+            height: 100%;
+        }}
+
+        .hero-deal-meta {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+
+            margin-bottom: 6px;
+        }}
+
+        .hero-deal-score,
+        .hero-deal-percent {{
+            padding: 5px 7px;
+
+            border-radius: 999px;
+
+            white-space: nowrap;
+
+            font-size: 10px;
+            line-height: 1;
+            font-weight: 850;
+        }}
+
+        .hero-deal-score {{
+            background: #edf3ff;
+            color: #315ba9;
+        }}
+
+        .hero-deal-percent {{
+            background: #ebf8ef;
+            color: #17743c;
+        }}
+
+        .hero-deal-track
+        .hero-deal-title {{
+            display: -webkit-box;
+
+            overflow: hidden;
+
+            -webkit-box-orient: vertical;
+            -webkit-line-clamp: 2;
+
+            color: #16213f;
+
+            font-size: 14px;
+            line-height: 1.24;
+            font-weight: 850;
+
+            letter-spacing: -.01em;
+        }}
+
+        .hero-deal-bottom {{
+            display: flex;
+            align-items: end;
+
+            gap: 8px;
+
+            min-width: 0;
+
+            margin-top: auto;
+        }}
+
+        .hero-deal-pricing {{
+            display: flex;
+            align-items: baseline;
+
+            gap: 7px;
+
+            min-width: 0;
+        }}
+
+        .hero-deal-track
+        .hero-deal-price {{
+            margin: 0;
+
+            color: #111c39;
+
+            font-size: 23px;
+            line-height: 1;
+            font-weight: 900;
+
+            letter-spacing: -.025em;
+
+            white-space: nowrap;
+        }}
+
+        .hero-deal-estimate {{
+            color: #8a96aa;
+
+            font-size: 9px;
+            font-weight: 700;
+
+            white-space: nowrap;
+        }}
+
+        .hero-deal-track
+        .hero-deal-saving {{
+            margin: 0 0 0 auto;
+
+            padding: 5px 7px;
+
+            border-radius: 999px;
+
+            background: #e8f8ee;
+
+            color: #14803c;
+
+            font-size: 10px;
+            line-height: 1;
+            font-weight: 900;
+
+            white-space: nowrap;
+        }}
+
+        .hero-deal-arrow {{
+            display: grid;
+            place-items: center;
+
+            flex: 0 0 28px;
+
+            width: 28px;
+            height: 28px;
+
+            border-radius: 9px;
+
+            background: #2563eb;
+
+            color: #fff;
+
+            box-shadow:
+                0 6px 13px
+                rgba(37, 99, 235, .22);
+
+            font-size: 15px;
+            font-weight: 900;
+        }}
+
+        .hero-deal-carousel-hint {{
+            margin-top: 8px;
+
+            color: #8792a5;
+
+            font-size: 10px;
+            font-weight: 650;
+        }}
+
+        .hero-deal-card:focus-visible,
+        .hero-deal-prev:focus-visible,
+        .hero-deal-next:focus-visible {{
+            outline:
+                3px solid
+                rgba(37, 99, 235, .28);
+
+            outline-offset: 3px;
+        }}
+
+        @media (max-width: 980px) {{
+            .hero-deals[data-hero-carousel] {{
+                max-width: none;
+                justify-self: stretch;
+            }}
+        }}
+
+        @media (max-width: 680px) {{
+
+            .hero-deal-viewport {{
+                height: auto;
+
+                margin-right: -19px;
+                padding-right: 19px;
+
+                overflow-x: auto;
+                overflow-y: hidden;
+
+                scroll-snap-type:
+                    x mandatory;
+
+                scrollbar-width: none;
+
+                -webkit-overflow-scrolling:
+                    touch;
+            }}
+
+            .hero-deal-viewport::-webkit-scrollbar {{
+                display: none;
+            }}
+
+            .hero-deal-track {{
+                flex-direction: row;
+
+                width: max-content;
+            }}
+
+            .hero-deal-track
+            .hero-deal-card {{
+                flex:
+                    0 0 min(84vw, 370px);
+
+                width:
+                    min(84vw, 370px) !important;
+
+                height: 164px;
+            }}
+
+            .hero-deal-track
+            .hero-deal-card-inner {{
+                grid-template-columns:
+                    96px minmax(0, 1fr);
+
+                gap: 12px;
+
+                padding: 13px;
+            }}
+
+            .hero-deal-track
+            .hero-deal-image {{
+                width: 96px;
+                height: 136px;
+            }}
+
+            .hero-deal-track
+            .hero-deal-title {{
+                font-size: 13px;
+            }}
+
+            .hero-deal-pricing {{
+                display: block;
+            }}
+
+            .hero-deal-track
+            .hero-deal-price,
+            .hero-deal-estimate {{
+                display: block;
+            }}
+
+            .hero-deal-estimate {{
+                margin-top: 3px;
+            }}
+        }}
+
+        @media (max-width: 420px) {{
+
+            .hero-deal-percent,
+            .hero-deal-estimate {{
+                display: none;
+            }}
+
+            .hero-deal-track
+            .hero-deal-card {{
+                flex-basis: 86vw;
+
+                width: 86vw !important;
+            }}
+        }}
+
+        @media (prefers-reduced-motion: reduce) {{
+
+            .hero-deal-viewport {{
+                scroll-behavior: auto;
+            }}
+
+            .hero-deal-card,
+            .hero-deal-image img {{
+                transition: none;
+            }}
+        }}
 </style>
 
     <section class="deal-section">
@@ -9814,7 +10529,251 @@ def _dashboard_html_base():
 
 
     {auction_section_html}
+    <script>
+    (() => {{
+        const root = document.querySelector(
+            "[data-hero-carousel]"
+        );
 
+        if (!root) return;
+
+        const viewport = root.querySelector(
+            ".hero-deal-viewport"
+        );
+
+        const cards = Array.from(
+            root.querySelectorAll(
+                ".hero-deal-card"
+            )
+        );
+
+        const count = root.querySelector(
+            ".hero-deal-carousel-count"
+        );
+
+        const prev = root.querySelector(
+            ".hero-deal-prev"
+        );
+
+        const next = root.querySelector(
+            ".hero-deal-next"
+        );
+
+        if (!cards.length) {{
+            root.hidden = true;
+            return;
+        }}
+
+        const mobile = window.matchMedia(
+            "(max-width: 680px)"
+        );
+
+        const reduced = window.matchMedia(
+            "(prefers-reduced-motion: reduce)"
+        ).matches;
+
+        let index = 0;
+        let timer = null;
+        let paused = false;
+        let scrollTimer = null;
+
+        const visible = () =>
+            mobile.matches ? 1 : 2;
+
+        const maxIndex = () =>
+            Math.max(
+                0,
+                cards.length - visible()
+            );
+
+        function schedule() {{
+            if (
+                reduced
+                || paused
+                || cards.length <= visible()
+            ) {{
+                return;
+            }}
+
+            clearTimeout(timer);
+
+            timer = setTimeout(
+                () => go(index + 1),
+                4300
+            );
+        }}
+
+        function go(target) {{
+            clearTimeout(timer);
+
+            const max = maxIndex();
+
+            index = (
+                target > max
+                ? 0
+                : target < 0
+                ? max
+                : target
+            );
+
+            const card = cards[index];
+
+            const behavior = (
+                reduced
+                ? "auto"
+                : "smooth"
+            );
+
+            viewport.scrollTo(
+                mobile.matches
+                ? {{
+                    left: card.offsetLeft,
+                    top: 0,
+                    behavior
+                }}
+                : {{
+                    left: 0,
+                    top: card.offsetTop,
+                    behavior
+                }}
+            );
+
+            count.textContent =
+                `${{index + 1}} / ${{cards.length}}`;
+
+            schedule();
+        }}
+
+        function pause(value) {{
+            paused = value;
+
+            clearTimeout(timer);
+
+            if (!paused) {{
+                schedule();
+            }}
+        }}
+
+        prev.addEventListener(
+            "click",
+            () => go(index - 1)
+        );
+
+        next.addEventListener(
+            "click",
+            () => go(index + 1)
+        );
+
+        root.addEventListener(
+            "mouseenter",
+            () => pause(true)
+        );
+
+        root.addEventListener(
+            "mouseleave",
+            () => pause(false)
+        );
+
+        root.addEventListener(
+            "focusin",
+            () => pause(true)
+        );
+
+        root.addEventListener(
+            "focusout",
+            event => {{
+                if (
+                    !root.contains(
+                        event.relatedTarget
+                    )
+                ) {{
+                    pause(false);
+                }}
+            }}
+        );
+
+        viewport.addEventListener(
+            "pointerdown",
+            () => pause(true),
+            {{ passive: true }}
+        );
+
+        viewport.addEventListener(
+            "pointerup",
+            () => {{
+                setTimeout(
+                    () => pause(false),
+                    700
+                );
+            }},
+            {{ passive: true }}
+        );
+
+        viewport.addEventListener(
+            "scroll",
+            () => {{
+                if (!mobile.matches) return;
+
+                clearTimeout(scrollTimer);
+
+                scrollTimer = setTimeout(
+                    () => {{
+                        let nearest = 0;
+                        let distance = Infinity;
+
+                        cards.forEach(
+                            (card, i) => {{
+                                const d = Math.abs(
+                                    card.offsetLeft
+                                    - viewport.scrollLeft
+                                );
+
+                                if (d < distance) {{
+                                    nearest = i;
+                                    distance = d;
+                                }}
+                            }}
+                        );
+
+                        index = nearest;
+
+                        count.textContent =
+                            `${{index + 1}} / ${{cards.length}}`;
+                    }},
+                    80
+                );
+            }},
+            {{ passive: true }}
+        );
+
+        mobile.addEventListener(
+            "change",
+            () => {{
+                index = Math.min(
+                    index,
+                    maxIndex()
+                );
+
+                requestAnimationFrame(
+                    () => go(index)
+                );
+            }}
+        );
+
+        document.addEventListener(
+            "visibilitychange",
+            () => pause(document.hidden)
+        );
+
+        if (cards.length <= visible()) {{
+            root.querySelector(
+                ".hero-deal-carousel-controls"
+            ).style.display = "none";
+        }}
+
+        schedule();
+    }})();
+    </script>
     </body>
     </html>
     """
