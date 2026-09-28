@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.29"
+APP_VERSION = "0.9.30"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -2629,7 +2629,8 @@ BRANDS = {
     "huawei": "Huawei",
     "honor": "Honor",
     "razer": "Razer",
-    "fujitsu": "Fujitsu"
+    "fujitsu": "Fujitsu",
+    "geo": "Geo"
 }
 
 
@@ -2737,6 +2738,13 @@ MODEL_PATTERNS = [
     r"X1\s+Yoga"
     r"(?:\s+Gen\s+\d+)?\b",
 
+    # Lenovo platform-coded IdeaPads. Keep screen-size / Laptop text
+    # out of the canonical model identity.
+    r"\bIdeaPad\s+\d{3}[A-Za-z]?-\d{2}[A-Za-z]{3}\b",
+
+    # Older ThinkPad Edge models are conventionally matched as ThinkPad E###.
+    r"\bThinkPad\s+Edge\s+E\d{3}\b",
+
     r"\bIdeaPad\s+"
     r"(?:Slim\s+)?"
     r"[A-Za-z0-9-]+"
@@ -2835,7 +2843,24 @@ def clean_model(model):
         model,
         flags=re.I,
     )
-    model = re.sub(r"(Surface\s+Pro\s+\d+)\s+Plus$", r"+", model, flags=re.I)
+    model = re.sub(r"(Surface\s+Pro\s+\d+)\s+Plus$", r"\1+", model, flags=re.I)
+    # Canonical Lenovo platform-code identities.
+    # Seller titles often append screen size or the word "Laptop".
+    model = re.sub(
+        r"^(IdeaPad\s+\d{3}[A-Za-z]?-\d{2}[A-Za-z]{3})(?:\s+(?:Laptop|\d{1,2}(?:in)?))?$",
+        r"\1",
+        model,
+        flags=re.I,
+    )
+
+    # ThinkPad Edge E### is the same platform identity as ThinkPad E###.
+    model = re.sub(
+        r"^ThinkPad\s+Edge\s+(E\d{3})$",
+        r"ThinkPad \1",
+        model,
+        flags=re.I,
+    )
+
     return model.strip()
 
 
@@ -2901,6 +2926,7 @@ def precise_model_for_valuation(brand, model):
         r"^ThinkPad\s+(?:(?:T|X|E|L|P)\d{2,3}[A-Za-z]?|X1\s+(?:Carbon|Yoga))(?:\s+Gen\s+\d+)?$",
         r"^IdeaPad\s+(?:Slim\s+)?[A-Za-z0-9-]+(?:\s+[A-Za-z0-9-]+)?$",
         r"^Surface\s+(?:Pro|Laptop)\s+\d{1,2}\+?$",
+        r"^GeoBook\\s+[A-Za-z0-9-]+$",
 
         # Lenovo Legion with explicit platform code.
         r"^Legion\s+\d(?:i)?(?:\s+Pro)?\s+\d{2}[A-Z]{2,5}\d{1,2}$",
