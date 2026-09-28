@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.38"
+APP_VERSION = "0.9.39"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -8952,10 +8952,27 @@ def _dashboard_html_base():
             <div class="hero-benefits">
 
                 <div class="hero-benefit">
-                    <img
-                        src="data:image/webp;base64,UklGRtoDAABXRUJQVlA4IM4DAADQFgCdASpaAFoAPlUmkUYjoiGhKBcYmHAKiWIAyFSdVIGS+H/AHROW/zsvEM/y+6A/Xr9cuxb6AH7IdYZ+wHsAfsB6ZPsf/tH+4ftUUflL/JnPkt+nx1IIC5+E9heaFpwunDoPu6pjn5/FKfgTU0WfCWaoEqCryRTHas+JmU9MWISt5EvxsR/5a/YByh30g/aDp1rOhhX4mQp437ruccGY7f68KwcBlb7W9otUpihthvRI7CtbLwpqBRZMy0CQAAD+/JYc5RtkB+qW1bDBQCN2KIet/CUIgTBBoP7pqrGTM4ocei/IaJZR10s6eZUYOol1pnFoqkCsPCNMkBt35Gtk8xXeuNrf5T2KGA29DJSYQlPIYbRCbyeosiSaDIEcCwRj/7u/GvMV79LUWE05nOw+90pZUqeJy4Dgtmk3PtRXVm78VkywDre0oIW3cH/KJ1i+d/cfQAZFAdPQxIVdJ7SxUN6uqoDfGc/3HElfEsNOJqP3vx9KQTLmPTD2qK9yo20nE4aNeCPEnd4PUHufjToqBJboM9dtF8dpnmAfDv6bn5XjyT5n6kD9VBeY9MPz53Y2YhxRQn7wfW8+8ps55m0EIT8Eo6QqDQpNO4MRwvYIdeiAjmWW96fbjTVUX999KG+jc7AXlBxCMWTWp+jgB/qqHFM9hReE5Q5LnowS+aAHLsbWZw9RC9QUmp+CEMV6ayz8Gx0jTpTGkz2ucNfrTRnaWqph6SFt2dr/7qg+2avxCUI6aXN1E7Ym65yb08O/MC35unUMsxYF/egrIUSgb0Ha+9sfp7TzmHkMMk6GtKbklJdHptSqcqSy/sT3dKf47RdcOp5zw24hOZiHnLLQ8XDKMuwsmg/YTzPWJ+6/wsmpoD9B0nI/rpoI+B85dk+PNSUV9tOL2ttbWr53nzt52JKWpWCyQIC+PYF+nn7gtkz55JOzy2Vxktk/vZGc7PbxogaGBGVb4YHk59/1Voycn0XcC+yQbq/XLDfl4z0XrBgItbU+3lZB60g0DFch3sC59lIwqSIRZyi79ZY/smLXZrH/71F5aseiBxkI8XkBTfYgg2izcTn5XiE4hj+XBzPrymu7uWKJyfL4h+ACcPEAv6qU8Om+kL7JXpJpXlX76Ko8UkgrVITTAO6BepF9JOkUJuIx4UY7L3GoHKX6lVYMhp2kMl+wrifLDZn6uamC3f9+H/eyvHv7IZglNLJWfM5Bv2bdOUsf0r5vGW77rszMjL+/vUbAUklGjxpkC8PJXKSWZJ6nObWsZsOyyQLKz6NazdG0IdisLWFphXSBMQAAAA=="
-                        alt=""
-                        class="hero-benefit-image">
+                    <svg class="hero-benefit-icon"
+                         viewBox="0 0 64 64"
+                         aria-hidden="true"
+                         focusable="false">
+                        <circle cx="32" cy="32" r="29"
+                                fill="#eef7ff"/>
+                        <circle cx="32" cy="32" r="28.5"
+                                fill="none"
+                                stroke="#dbeafe"
+                                stroke-width="1"/>
+                        <circle cx="27.5" cy="27.5" r="11.5"
+                                fill="none"
+                                stroke="#1769e0"
+                                stroke-width="5"
+                                stroke-linecap="round"/>
+                        <path d="M36 36 L47 47"
+                              fill="none"
+                              stroke="#1769e0"
+                              stroke-width="5"
+                              stroke-linecap="round"/>
+                    </svg>
 
                     <span>
                         Scours all new listings
@@ -8963,10 +8980,23 @@ def _dashboard_html_base():
                 </div>
 
                 <div class="hero-benefit">
-                    <img
-                        src="data:image/webp;base64,UklGRoACAABXRUJQVlA4IHQCAABQEACdASpaAFoAPlUqkUajoqGhJlbYSHAKiWMAxUKgfhzVAfMB9s+3euQP8R/QPUA/t3qAcAB+vfWqESMKs3ICMejzEn+rvRLr7zKBzjoTpfTiDkqochRQNGz72xW2g5we7g83jb+pJtqH3DgoEfmNuBm85xWs065/0pdXmpQ3lK5ioZZ21q9H4FgAAP78/Vhk2OiPH0wJRiMMIkgG98ojsbkZgiDlwYV6pCNWJG+6HxGKEBXwRw6zAapkXXO5MnJMJLW9eEaqrgZEF35QKkzac2BubnhtImYNiPBfCFd8MPHF3fmv9w/9cu/aS84+L/S3fX5A2PQgYQlQvBf5pdsyYztea1e/Wz6zvffyKpuG7o1jkbu62DceAFSRnJTAIMH0JMtWNW3G4giXmIi6HQe0ccUoCHozX/GaPbvw+z7+VodTFQa3WKirYT/89pDn/3cP/L56Uj8qZSf/HmysVP7u/w1Xrr5PuMojbGXnK+/eJrTVh5Oag2rof4cLUt8/Rpfz924gGXUYIh6/EMvaWUK+Cu4E7/Uvm8pGQkP6taiiE8kCR8FFA9ZA4iFu7eYobfg93q31dvqvDp20GBDOXGzlgBdSDJC+U5yduCbLOBCJAc7GYBaLowKhIECiNaEK0tAe/tWMZxzT+WffS86U+8e3W8PaOX7VmKkLHPoLYebBJqv3hh/QK5/slb9Czkyoe9HYC52zjrdDp1m+AOpxN3GF5hbcELrWzyGOgMXYXAgtUK742JYOFTISXEO//yqscy/pzB72bHtWn66EhHPpAG/q53Vf//6bslxTykKRlX8FFMIGN+mo0iHvTXfV5imAFz9vwAAA"
-                        alt=""
-                        class="hero-benefit-image">
+                    <svg class="hero-benefit-icon"
+                         viewBox="0 0 64 64"
+                         aria-hidden="true"
+                         focusable="false">
+                        <circle cx="32" cy="32" r="29"
+                                fill="#eef7ff"/>
+                        <circle cx="32" cy="32" r="28.5"
+                                fill="none"
+                                stroke="#dbeafe"
+                                stroke-width="1"/>
+                        <rect x="16.5" y="36" width="7.5" height="12"
+                              rx="2.75" fill="#1769e0"/>
+                        <rect x="28.25" y="27" width="7.5" height="21"
+                              rx="2.75" fill="#1769e0"/>
+                        <rect x="40" y="17" width="7.5" height="31"
+                              rx="2.75" fill="#1769e0"/>
+                    </svg>
 
                     <span>
                         Compares previous sold prices
@@ -8974,10 +9004,19 @@ def _dashboard_html_base():
                 </div>
 
                 <div class="hero-benefit">
-                    <img
-                        src="data:image/webp;base64,UklGRhYDAABXRUJQVlA4IAoDAACwEgCdASpaAFoAPlUqkkYjoqGhJXqo0HAKiWMAxRJPXzJGdor/u/Ve8wH6wdTn0AP2M6zf0AP1A9Lz9mfg9/cj0izABTIvIggkw3uOCmBRZfDgMHMdYACjowBeitR5kccqfM4H1opIYPP4QsROgX7T+nIYuwtfE7EnZlk4M/WH6od52YTmqEZBfntHXrocm5S+5j4hSzUcWH7NXGCQwAD+/IeKtGoNJolzpwPjpdeU4H6BsllBcGUSXowLRq+ZrZ+AHOh6525DybajOH6G740G+7Ve/D6/Wx/63wZXUxz4fL0q74jsEzZJ5k1YsRvAZ5dX/8VT1Zo1+ENAfpCTv8xXKoIlrQTg08uolQoAl8JPcsk8yAqXB11E9Xz73PVPQW8LPlJWw4ScoO/OvyrSDqI5A73h26h1efv90VMmQR0EVmslLvW2MaBH1152amrl9y9/0lsaV3gwexlLHQ5Z/SkGifZOudDwGWpZEn6RN24bq+LdXc3u6hB/7szfcJcn385YKzvJTjDNCq4grypvhaAFDGR8oVLC5TLDqP+h+ecE/iIxVSQD+Jey+3/mnhTh9w+c5PZ/LcQqtZTwls7GN9noSxcykT+EtUg4wIar6i8IFvqtXooe7BALtvvTL8kqyiNnCc43NKVHkN41FskUOtwsuJ8xwptRmx9MRQ+rFzgBO/SnZX+vf8hcPrJp/EuWZAXylTDuI/1Oq/r5q/D5TV7yVzq90qprYD42TTIM1P+Pvd7bNTtt2v/9I3rcDbO35u/4mR960r64g6YFZ/XLkkGF2djGhA1FYRMLwQV03r0QvLghLHkJan3nn4vMdVHRsmAZy45Z3QLN+OH15dDs7xp8ZZy+WRmXrUrO2FqzBHyF27Unw59Exxz0+gi+A0zPP6JLM5tPxOmR97uG3ZmH/7YrBU5SQAL8IWFyfBw9bI55de/D0lySYceMjsKreyOc5VARAJx3FmRxRQ2WAiMwixTMT3GC3Ubu1vReTNRTBfvn3X8HS9E19lvj85WI3+/XraKMcbQtvsGg8AAA"
-                        alt=""
-                        class="hero-benefit-image">
+                    <svg class="hero-benefit-icon"
+                         viewBox="0 0 64 64"
+                         aria-hidden="true"
+                         focusable="false">
+                        <circle cx="32" cy="32" r="29"
+                                fill="#eef7ff"/>
+                        <circle cx="32" cy="32" r="28.5"
+                                fill="none"
+                                stroke="#dbeafe"
+                                stroke-width="1"/>
+                        <path d="M35.5 13.5L19.2 35.1C18.5 36 19.1 37.4 20.3 37.4H29.8L27.5 49.5C27.2 51.1 29.3 51.9 30.3 50.6L46.7 28.9C47.4 28 46.7 26.6 45.6 26.6H36.1L38.4 14.6C38.7 12.9 36.5 12.1 35.5 13.5Z"
+                              fill="#1769e0"/>
+                    </svg>
 
                     <span>
                         Finds underpriced laptops
@@ -9029,10 +9068,6 @@ def _dashboard_html_base():
                     {hero_cards_html}
                 </div>
 
-            </div>
-
-            <div class="hero-deal-carousel-hint">
-                Auto-scrolls · swipe on mobile · hover to pause
             </div>
 
         </div>
@@ -9181,29 +9216,20 @@ def _dashboard_html_base():
             font-weight: 750;
         }}
 
-        .hero-benefit-image {{
+        .hero-benefit-icon {{
             display: block;
 
-            width: 56px;
-            height: 56px;
+            width: 64px;
+            height: 64px;
 
-            margin: 0 0 7px;
-
-            border-radius: 14px;
-            object-fit: cover;
-
-            /*
-               The embedded icon artwork has a white canvas. Multiply lets
-               that canvas merge into the hero background instead of showing
-               as a separate white square around each icon.
-            */
-            mix-blend-mode: multiply;
-
-            box-shadow: none;
+            margin: 0 0 9px;
+            overflow: visible;
 
             filter:
-                saturate(1.05)
-                contrast(1.03);
+                drop-shadow(
+                    0 7px 14px
+                    rgba(37, 99, 235, .10)
+                );
         }}
 
         /* ----------------------------
@@ -9467,16 +9493,13 @@ def _dashboard_html_base():
                 margin-top: 23px;
             }}
 
-            .hero-benefit-image {{
-                flex: 0 0 50px;
+            .hero-benefit-icon {{
+                flex: 0 0 54px;
 
-                width: 50px;
-                height: 50px;
+                width: 54px;
+                height: 54px;
 
                 margin: 0;
-
-                border-radius: 13px;
-                mix-blend-mode: multiply;
             }}
 
             .hero-deals,
@@ -10403,15 +10426,6 @@ def _dashboard_html_base():
 
             font-size: 15px;
             font-weight: 900;
-        }}
-
-        .hero-deal-carousel-hint {{
-            margin-top: 8px;
-
-            color: #8792a5;
-
-            font-size: 10px;
-            font-weight: 650;
         }}
 
         .hero-deal-card:focus-visible,
