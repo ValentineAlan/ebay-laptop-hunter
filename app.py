@@ -4201,6 +4201,13 @@ def microsoft_windows11_cpu_status(cpu):
         ):
             return True
 
+        if re.search(
+            r"\bN(?:90|95|97|100|150|200|250|300|305|355)\b",
+            name,
+            re.I
+        ):
+            return True
+
         if (
             family.startswith("Core i")
             or re.search(r"\bi[3579]-\d", name, re.I)
@@ -4209,13 +4216,6 @@ def microsoft_windows11_cpu_status(cpu):
                 return None
 
             return generation >= 8
-
-        if re.search(
-            r"\bN(?:90|95|97|100|150|200|250|300|305|355)\b",
-            name,
-            re.I
-        ):
-            return True
 
         if re.search(
             r"\bCeleron\s+[NJ](?:4|5)\d{3}\b",
