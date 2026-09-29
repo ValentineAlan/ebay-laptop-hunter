@@ -6847,7 +6847,9 @@ def target_valuation_problem(target, conn):
     if not row_value(target, "total") or row_value(target, "postage") is None:
         return "UNKNOWN_DELIVERED_COST"
 
-    return Nonedef insufficient_valuation(reason, count=0):
+    return None
+
+def insufficient_valuation(reason, count=0):
     return dict(estimated_value=None, q1=None, q3=None, count=count,
                 confidence="INSUFFICIENT_DATA", undervaluation_gbp=None,
                 undervaluation_pct=None, deal_score=None, basis=reason)
