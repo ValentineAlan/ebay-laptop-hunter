@@ -5968,7 +5968,7 @@ def repair_v080_valuation_cache(conn):
     conn.commit()
 
 
-def sold_search_queries(row):
+def sold_search_queries(row, conn):
     """
     Search Product Research from most specific to broadest.
 
@@ -6299,7 +6299,7 @@ def collect_needed_sold_data(conn, maximum=None):
     attempted_listings = 0
 
     for row in rows:
-        queries = sold_search_queries(row)
+        queries = sold_search_queries(row, conn)
         if not queries or all(sold_search_is_fresh(conn, research_query_key(q)) for q in queries):
             continue
 
