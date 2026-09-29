@@ -6407,10 +6407,15 @@ def evidence_age_days(value):
     return age if age >= 0 else None
 
 
-def ordinary_laptop(title, condition=""):
+def eligible_laptop_target(title, condition=""):
+    """
+    True when this is a single laptop listing that can sensibly be valued.
+
+    Condition/faults do NOT make a target ineligible. They are surfaced
+    separately through status/fault_reasons and the Notes column.
+    """
     text = normalise(title) + " " + normalise(condition)
-    if classify_faults(text)[0] != "NORMAL":
-        return False
+
     # Aggregates, options, accessories and retail/refurbished offerings are not
     # directly comparable to one ordinary used laptop.
     return not re.search(
@@ -6418,8 +6423,25 @@ def ordinary_laptop(title, condition=""):
         r"[x×]\s*\d+|\d+\s+laptops?|choose|choice|various|refurbished|renewed|"
         r"brand new|sealed|warranty|charger only|screen only|keyboard only|"
         r"replacement|for Dell|for HP|for Lenovo|no ram|no memory)\b|"
-        r"\b\d+\s*(?:GB|TB)?\s*(?:/|or)\s*\d+\s*(?:GB|TB)\b", text, re.I
+        r"\b\d+\s*(?:GB|TB)?\s*(?:/|or)\s*\d+\s*(?:GB|TB)\b",
+        text,
+        re.I
     ) and not is_genuinely_new(condition)
+
+
+def ordinary_laptop(title, condition=""):
+    """
+    True only for a normal-condition single laptop.
+
+    Used for valuation COMPARABLES so faulty/damaged machines do not
+    contaminate normal sold-price evidence.
+    """
+    text = normalise(title) + " " + normalise(condition)
+
+    if classify_faults(text)[0] != "NORMAL":
+        return False
+
+    return eligible_laptop_target(title, condition)
 
 
 
@@ -6806,18 +6828,26 @@ def valuation_condition_requires_review(target):
     )
 
 
-def target_valuation_problem(target, conn=None):
+def target_valuation_problem(target):
     if row_value(target, "classifier_version") != CLASSIFIER_VERSION:
         return "REANALYSIS_REQUIRED"
 
-    if int(row_value(target, "rules_revision") or 0) != current_rules_revision(conn):
+    if int(row_value(target, "rules_revision") or 0) != current_rules_revision():
         return "REANALYSIS_REQUIRED"
-
-    if valuation_condition_requires_review(target):
-        return "CONDITION_REQUIRES_REVIEW"
 
     if not exact_spec_identity(target):
         return "INCOMPLETE_IDENTITY_OR_SPEC"
+
+    # Faults/poor condition do not prevent valuation. They remain attached
+    # to the listing through status + fault_reasons and are shown as Notes.
+    #
+    # Only listings that are not actually a single usable laptop target
+    # are prevented from entering the valuation pipeline.
+    if not eligible_laptop_target(
+        row_value(target, "title"),
+        row_value(target, "condition")
+    ):
+        return "CONDITION_REQUIRES_REVIEW"
 
     if not row_value(target, "total") or row_value(target, "postage") is None:
         return "UNKNOWN_DELIVERED_COST"
