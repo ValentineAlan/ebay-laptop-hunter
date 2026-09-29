@@ -6828,7 +6828,7 @@ def valuation_condition_requires_review(target):
     )
 
 
-def target_valuation_problem(conn, target):
+def target_valuation_problem(target, conn):
     if row_value(target, "classifier_version") != CLASSIFIER_VERSION:
         return "REANALYSIS_REQUIRED"
 
@@ -6838,8 +6838,6 @@ def target_valuation_problem(conn, target):
     if not exact_spec_identity(target):
         return "INCOMPLETE_IDENTITY_OR_SPEC"
 
-    # Faults and poor condition do not prevent valuation.
-    # They remain attached through status/fault_reasons for display in Notes.
     if not eligible_laptop_target(
         row_value(target, "title"),
         row_value(target, "condition")
@@ -6849,9 +6847,7 @@ def target_valuation_problem(conn, target):
     if not row_value(target, "total") or row_value(target, "postage") is None:
         return "UNKNOWN_DELIVERED_COST"
 
-    return None
-
-def insufficient_valuation(reason, count=0):
+    return Nonedef insufficient_valuation(reason, count=0):
     return dict(estimated_value=None, q1=None, q3=None, count=count,
                 confidence="INSUFFICIENT_DATA", undervaluation_gbp=None,
                 undervaluation_pct=None, deal_score=None, basis=reason)
