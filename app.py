@@ -5979,7 +5979,7 @@ def sold_search_queries(row):
     The valuation matcher remains strict; these queries only improve retrieval
     of potentially relevant sold evidence.
     """
-    if target_valuation_problem(row):
+    if target_valuation_problem(row, conn):
         return []
 
     brand = normalise(
