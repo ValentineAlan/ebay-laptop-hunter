@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.47"
+APP_VERSION = "0.9.48"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -117,6 +117,23 @@ PRODUCT_RESEARCH_DAY_RANGE = 90
 PRODUCT_RESEARCH_LIMIT = 50
 PRODUCT_RESEARCH_MAX_PAGES = 2
 PRODUCT_RESEARCH_SEARCHES_PER_CYCLE = 12
+
+# Product Research sold evidence should represent the second-hand market.
+# Filter server-side so New/New-other/New-with-defects and parts-only sales
+# never consume Product Research result slots.
+PRODUCT_RESEARCH_ALLOWED_CONDITION_IDS = (
+    "2000",  # Certified refurbished
+    "2010",  # Excellent refurbished
+    "2020",  # Very good refurbished
+    "2030",  # Good refurbished
+    "2500",  # Seller refurbished
+    "2750",  # Like new
+    "3000",  # Used / pre-owned
+    "4000",  # Used good (legacy/category-specific)
+    "5000",  # Used acceptable/fair
+    "6000",  # Pre-owned poor
+)
+
 ACTIVE_BIN_RECHECKS_PER_CYCLE = 40
 ACTIVE_BIN_RECHECKS_DURING_REANALYSIS = 5
 ACTIVE_BIN_RECHECK_MIN_AGE_MINUTES = 10
@@ -165,7 +182,7 @@ MEDIUM_CONFIDENCE_COMPARABLES = 6
 # Don't use ancient active observations indefinitely.
 COMPARABLE_MAX_AGE_DAYS = 30
 SOLD_CACHE_MAX_AGE_DAYS = 7
-SOLD_EVIDENCE_VERSION = "3"
+SOLD_EVIDENCE_VERSION = "4"
 
 
 # PassMark CPU benchmark cache.
@@ -5764,13 +5781,17 @@ def product_research_search(keywords, offset=0):
         "endDate": str(now_ms),
         "startDate": str(start_ms),
         "categoryId": CATEGORY,
+        "conditionId": list(PRODUCT_RESEARCH_ALLOWED_CONDITION_IDS),
         "offset": str(offset),
         "limit": str(PRODUCT_RESEARCH_LIMIT),
         "tabName": "SOLD",
         "tz": "Europe/London",
         "modules": "searchResults",
     }
-    url = "https://www.ebay.co.uk/sh/research/api/search?" + urllib.parse.urlencode(params)
+    url = (
+        "https://www.ebay.co.uk/sh/research/api/search?"
+        + urllib.parse.urlencode(params, doseq=True)
+    )
 
     # First attempt uses the freshest SID already supplied by the local browser helper.
     raw = _product_research_fetch(url, cookie)
@@ -5971,6 +5992,53 @@ def repair_v080_valuation_cache(conn):
         valuation_basis='REANALYSIS_REQUIRED', valuation_research_at=NULL""")
     conn.execute("INSERT INTO app_migrations VALUES (?,?)", (key, iso_now()))
     conn.commit()
+
+
+def repair_v0948_product_research_condition_filter(conn):
+    """Rebuild sold evidence using Product Research's server-side condition filter."""
+    key = "v0.9.48_product_research_non_new_non_parts_v4"
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS app_migrations (
+            migration_key TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        )
+    """)
+
+    if conn.execute(
+        "SELECT 1 FROM app_migrations WHERE migration_key=?",
+        (key,),
+    ).fetchone():
+        return
+
+    conn.execute(
+        "UPDATE sold_searches SET status='STALE', searched_at=NULL"
+    )
+
+    conn.execute("""
+        UPDATE listings
+        SET estimated_value=NULL,
+            valuation_q1=NULL,
+            valuation_q3=NULL,
+            comparable_count=NULL,
+            valuation_confidence=NULL,
+            undervaluation_gbp=NULL,
+            undervaluation_pct=NULL,
+            deal_score=NULL,
+            valuation_basis='REANALYSIS_REQUIRED',
+            valuation_research_at=NULL
+    """)
+
+    conn.execute(
+        "INSERT INTO app_migrations(migration_key,applied_at) VALUES (?,?)",
+        (key, iso_now()),
+    )
+    conn.commit()
+
+    print(
+        "Migration v0.9.48: Product Research restricted to non-new, "
+        "non-parts conditions; sold evidence v4 queued for rebuild"
+    )
 
 
 def repair_v0947_sold_condition_cache(conn):
@@ -6187,7 +6255,9 @@ def _research_condition(result, listing):
 
 def _parse_sold_result(result):
     listing = result.get("listing") or {}
-    item_id = normalise(listing.get("itemId") or result.get("itemId"))
+    item_id = canonical_sold_item_id(
+        listing.get("itemId") or result.get("itemId")
+    )
     title = _research_text(listing.get("title") or result.get("title"))
     if not title:
         title = _research_text(listing)
@@ -16696,6 +16766,7 @@ def main():
         repair_v080_valuation_cache(migration_conn)
         repair_v0944_telegram_notification_baseline(migration_conn)
         repair_v0947_sold_condition_cache(migration_conn)
+        repair_v0948_product_research_condition_filter(migration_conn)
     migration_conn.close()
 
     print(
