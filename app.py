@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.40"
+APP_VERSION = "0.9.41"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -8234,15 +8234,93 @@ th {
     font-weight: 600;
     padding: 8px 0;
 }
+.evidence-table-wrap {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    margin-top: 6px;
+    border: 1px solid #e4e7ec;
+    border-radius: 10px;
+    background: #fff;
+    -webkit-overflow-scrolling: touch;
+}
 .evidence-table {
     width: 100%;
-    margin-top: 6px;
+    min-width: 1040px;
+    margin: 0;
     font-size: 13px;
+    table-layout: fixed;
 }
 .evidence-table th,
 .evidence-table td {
-    padding: 6px 8px;
+    padding: 8px 10px;
     vertical-align: top;
+    overflow-wrap: normal;
+    word-break: normal;
+}
+.evidence-table th {
+    white-space: nowrap;
+}
+.evidence-table th:nth-child(1),
+.evidence-table td:nth-child(1) {
+    width: 310px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+.evidence-table th:nth-child(2),
+.evidence-table td:nth-child(2) {
+    width: 105px;
+    white-space: nowrap;
+}
+.evidence-table th:nth-child(3),
+.evidence-table td:nth-child(3) {
+    width: 170px;
+    white-space: normal;
+}
+.evidence-table th:nth-child(4),
+.evidence-table td:nth-child(4) {
+    width: 90px;
+    white-space: nowrap;
+}
+.evidence-table th:nth-child(5),
+.evidence-table td:nth-child(5) {
+    width: 105px;
+    white-space: nowrap;
+}
+.evidence-table th:nth-child(6),
+.evidence-table td:nth-child(6) {
+    width: 135px;
+    white-space: normal;
+}
+.evidence-table th:nth-child(7),
+.evidence-table td:nth-child(7) {
+    width: 120px;
+    white-space: normal;
+}
+.evidence-table th:nth-child(8),
+.evidence-table td:nth-child(8) {
+    width: 105px;
+    white-space: nowrap;
+}
+.evidence-condition {
+    font-weight: 600;
+}
+.evidence-reason {
+    display: block;
+    margin-top: 2px;
+    color: #667085;
+    font-size: 11px;
+    line-height: 1.3;
+    font-weight: 400;
+}
+.evidence-decision-used {
+    color: #137333;
+    font-weight: 700;
+}
+.evidence-decision-excluded {
+    color: #b42318;
+    font-weight: 700;
 }
 a {
     color: #0645ad;
@@ -8609,9 +8687,25 @@ def _dashboard_html_base():
                     else "—"
                 )
 
-                condition_text = entry.get("condition_class") or "WORKING_NORMAL"
+                condition_key = entry.get("condition_class") or "WORKING_NORMAL"
+                condition_label = {
+                    "WORKING_NORMAL": "Normal",
+                    "WORKING_DAMAGED": "Damaged",
+                    "WORKING_MINOR_FAULT": "Minor fault",
+                    "FAULTY_OR_PARTS": "Faulty / parts",
+                }.get(condition_key, condition_key.replace("_", " ").title())
+
+                condition_html = (
+                    "<span class='evidence-condition'>"
+                    + html.escape(condition_label)
+                    + "</span>"
+                )
                 if reasons:
-                    condition_text += " · " + reasons
+                    condition_html += (
+                        "<span class='evidence-reason'>"
+                        + html.escape(reasons)
+                        + "</span>"
+                    )
 
                 match_bits = []
                 if entry.get("spec_tier"):
@@ -8619,15 +8713,32 @@ def _dashboard_html_base():
                 if entry.get("tier"):
                     match_bits.append(str(entry["tier"]))
                 match_text = " / ".join(match_bits) or "—"
+                match_text = {
+                    "EXACT / EXACT": "Exact spec",
+                    "EXACT / COMPATIBLE": "Exact spec",
+                    "RAM_NEAR / EXACT": "Near spec",
+                    "STORAGE_NEAR / EXACT": "Near spec",
+                }.get(match_text, match_text.replace("_", " ").title())
+
+                decision_class = (
+                    "evidence-decision-used"
+                    if decision == "USED"
+                    else "evidence-decision-excluded"
+                )
+                decision_display = {
+                    "USED": "Used",
+                    "EXCLUDED · PRICE OUTLIER": "Price outlier",
+                    "EXCLUDED · FAULT/PARTS": "Fault / parts",
+                }.get(decision_label, decision_label)
 
                 evidence_rows.append(
                     "<tr>"
                     f"<td>{html.escape(sold['title'] or '')}</td>"
                     f"<td class='money'>{money(entry['raw_total'])}</td>"
-                    f"<td>{html.escape(condition_text)}</td>"
+                    f"<td>{condition_html}</td>"
                     f"<td>{adjustment_text}</td>"
                     f"<td class='money'>{normalised_text}</td>"
-                    f"<td>{html.escape(decision_label)}</td>"
+                    f"<td class='{decision_class}'>{html.escape(decision_display)}</td>"
                     f"<td>{html.escape(match_text)}</td>"
                     f"<td>{html.escape(sold['last_sold'] or '')}</td>"
                     "</tr>"
@@ -8666,15 +8777,16 @@ def _dashboard_html_base():
                 "<div class='small' style='margin:8px 0 10px'>"
                 + html.escape(logic_summary)
                 + "</div>"
+                "<div class='evidence-table-wrap'>"
                 "<table class='evidence-table'>"
                 "<thead><tr>"
                 "<th>Sold listing</th><th>Raw delivered</th>"
-                "<th>Condition assessment</th><th>Adjustment</th>"
+                "<th>Condition</th><th>Adjustment</th>"
                 "<th>Value used</th><th>Decision</th>"
                 "<th>Match</th><th>Last sold</th>"
                 "</tr></thead><tbody>"
                 + "".join(evidence_rows)
-                + "</tbody></table></details>"
+                + "</tbody></table></div></details>"
             )
 
             sales_wording = (
@@ -13456,7 +13568,7 @@ _DASHBOARD_UI_ENHANCEMENT = r"""
     display: none;
     position: fixed;
     z-index: 99999;
-    width: min(620px, calc(100vw - 24px));
+    width: min(920px, calc(100vw - 24px));
     max-height: min(460px, calc(100vh - 24px));
     overflow-y: auto;
     padding: 12px;
