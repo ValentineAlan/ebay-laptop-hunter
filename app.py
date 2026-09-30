@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.48"
+APP_VERSION = "0.9.49"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -16789,6 +16789,7 @@ def main():
     while True:
 
         cycle += 1
+        cycle_started = time.monotonic()
 
         conn = connect_db()
 
@@ -16816,10 +16817,30 @@ def main():
                 cycle
             )
 
-            sleep_for = (
+            # POLL_NORMAL and the adaptive poll bands are target
+            # start-to-start cadences, not additional sleeps after a cycle.
+            target_interval = (
                 polling_interval(
                     conn
                 )
+            )
+
+            cycle_elapsed = max(
+                0.0,
+                time.monotonic() - cycle_started
+            )
+
+            sleep_for = max(
+                0.0,
+                target_interval - cycle_elapsed
+            )
+
+            print(
+                f"Cycle duration        : {cycle_elapsed:.1f}s"
+            )
+            print(
+                f"Sleep to next cycle   : {sleep_for:.1f}s "
+                f"(target start cadence {target_interval}s)"
             )
 
         except KeyboardInterrupt:
@@ -16834,6 +16855,8 @@ def main():
                 repr(exc)
             )
 
+            # Preserve the short retry delay after a failed cycle rather than
+            # waiting for the normal polling cadence.
             sleep_for = 120
 
         finally:
