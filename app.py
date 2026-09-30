@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.45"
+APP_VERSION = "0.9.46"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -9197,6 +9197,14 @@ def _dashboard_html_base():
                     <div class="small">
                         {html.escape(spec_text)}
                     </div>
+
+                    <div class="mobile-notes"
+                         aria-label="Listing notes">
+                        {
+                            notes_html
+                            or "<span class='notes-clear'>No notes</span>"
+                        }
+                    </div>
                 </td>
 
                 <td class="power-per-pound"
@@ -10410,10 +10418,18 @@ def _dashboard_html_base():
         }}
 
         @media (max-width: 1050px) {{
-            /* Notes is the first low-priority column to disappear. */
+            /*
+             * Preserve note information when the dedicated Notes column is
+             * removed for narrower screens. Notes move under the listing/spec
+             * instead of disappearing.
+             */
             .deal-section th:nth-child(8),
             .deal-section td:nth-child(8) {{
                 display: none;
+            }}
+
+            .mobile-notes {{
+                display: block;
             }}
         }}
 
@@ -10426,6 +10442,19 @@ def _dashboard_html_base():
         }}
 
         @media (max-width: 700px) {{
+            .mobile-notes {{
+                margin-top: 6px;
+                line-height: 1.15;
+            }}
+
+            .mobile-notes .condition-note,
+            .mobile-notes .win11-ok-note {{
+                margin: 2px 3px 2px 0;
+                padding: 2px 6px;
+                font-size: 9px;
+                white-space: normal;
+            }}
+
             /* Then age/time-left, leaving the buying essentials. */
             .deal-section th:nth-child(4),
             .deal-section td:nth-child(4) {{
@@ -14227,6 +14256,11 @@ _DASHBOARD_UI_ENHANCEMENT = r"""
 .notes-cell {
     min-width: 120px;
     max-width: 240px;
+}
+
+.mobile-notes {
+    display: none;
+    margin-top: 7px;
 }
 
 .condition-note {
