@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.44"
+APP_VERSION = "0.9.45"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -9321,7 +9321,7 @@ def _dashboard_html_base():
 
     hero_cards = []
 
-    for hero_index, hero_row in enumerate(buy_now_rows[:8]):
+    for hero_index, hero_row in enumerate(buy_now_rows[:6]):
         hero_url_raw = normalise(
             hero_row["url"] or ""
         )
@@ -9487,6 +9487,50 @@ def _dashboard_html_base():
             </a>
             """
         )
+
+    # Six genuine deal cards followed by one Telegram card gives a
+    # deliberately low promotional cadence of roughly one in seven rotations.
+    hero_cards.append(
+        """
+        <a class="hero-deal-card hero-telegram-card"
+           href="https://t.me/LaptopLander"
+           target="_blank"
+           rel="noopener noreferrer"
+           aria-label="Join LaptopLander on Telegram for instant new-deal alerts">
+
+            <div class="hero-telegram-card-inner">
+
+                <div class="hero-telegram-icon"
+                     aria-hidden="true">
+                    <svg viewBox="0 0 64 64" focusable="false">
+                        <circle cx="32" cy="32" r="30"></circle>
+                        <path d="M14.5 30.3 48 17.4c1.6-.6 3 .4 2.5 2.6L44.8 47c-.4 1.9-1.5 2.4-3 1.5l-8.7-6.4-4.2 4c-.5.5-.9.9-1.8.9l.6-8.9 16.2-14.6c.7-.6-.2-1-1.1-.4L22.8 35.7l-8.6-2.7c-1.9-.6-1.9-1.9.3-2.7Z"></path>
+                    </svg>
+                </div>
+
+                <div class="hero-telegram-copy">
+                    <div class="hero-telegram-kicker">
+                        Instant deal alerts
+                    </div>
+
+                    <div class="hero-telegram-title">
+                        Never miss a LaptopLander bargain
+                    </div>
+
+                    <div class="hero-telegram-text">
+                        Get notified on Telegram as soon as a qualifying new deal is found.
+                    </div>
+
+                    <span class="hero-telegram-cta">
+                        Join @LaptopLander
+                        <span aria-hidden="true">→</span>
+                    </span>
+                </div>
+
+            </div>
+        </a>
+        """
+    )
 
     hero_cards_html = "".join(
         hero_cards
@@ -11017,6 +11061,126 @@ def _dashboard_html_base():
             font-weight: 900;
         }}
 
+        .hero-deal-track
+        .hero-telegram-card,
+        .hero-deal-track
+        .hero-telegram-card:nth-child(n) {{
+            border-color: rgba(34, 158, 217, .28);
+
+            background:
+                radial-gradient(
+                    circle at 100% 0%,
+                    rgba(34, 158, 217, .22),
+                    transparent 38%
+                ),
+                linear-gradient(
+                    145deg,
+                    #fafdff,
+                    #eef8fd
+                );
+        }}
+
+        .hero-deal-track
+        .hero-telegram-card:hover {{
+            border-color: rgba(34, 158, 217, .48);
+
+            box-shadow:
+                0 18px 38px
+                rgba(34, 158, 217, .18);
+        }}
+
+        .hero-telegram-card-inner {{
+            display: grid;
+            grid-template-columns: 104px minmax(0, 1fr);
+            align-items: center;
+            gap: 18px;
+            height: 100%;
+            padding: 16px 18px;
+            box-sizing: border-box;
+        }}
+
+        .hero-telegram-icon {{
+            display: grid;
+            place-items: center;
+            width: 92px;
+            height: 92px;
+            border-radius: 24px;
+
+            background:
+                linear-gradient(
+                    145deg,
+                    #37aee2,
+                    #1e96c8
+                );
+
+            box-shadow:
+                0 12px 26px
+                rgba(34, 158, 217, .25);
+        }}
+
+        .hero-telegram-icon svg {{
+            width: 56px;
+            height: 56px;
+        }}
+
+        .hero-telegram-icon circle {{
+            fill: transparent;
+        }}
+
+        .hero-telegram-icon path {{
+            fill: #fff;
+            stroke: none;
+        }}
+
+        .hero-telegram-copy {{
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            min-width: 0;
+        }}
+
+        .hero-telegram-kicker {{
+            margin-bottom: 4px;
+            color: #1685b7;
+            font-size: 10px;
+            font-weight: 900;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+        }}
+
+        .hero-telegram-title {{
+            color: #12344a;
+            font-size: 17px;
+            line-height: 1.15;
+            font-weight: 900;
+            letter-spacing: -.015em;
+        }}
+
+        .hero-telegram-text {{
+            margin-top: 6px;
+            color: #597386;
+            font-size: 11px;
+            line-height: 1.35;
+            font-weight: 650;
+        }}
+
+        .hero-telegram-cta {{
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            align-self: flex-start;
+            margin-top: 10px;
+            padding: 7px 10px;
+            border-radius: 999px;
+            background: #229ed9;
+            color: #fff;
+            box-shadow:
+                0 6px 14px
+                rgba(34, 158, 217, .2);
+            font-size: 10px;
+            font-weight: 900;
+        }}
+
         .hero-deal-card:focus-visible,
         .hero-deal-prev:focus-visible,
         .hero-deal-next:focus-visible {{
@@ -11083,6 +11247,32 @@ def _dashboard_html_base():
                 gap: 12px;
 
                 padding: 13px;
+            }}
+
+            .hero-telegram-card-inner {{
+                grid-template-columns:
+                    78px minmax(0, 1fr);
+                gap: 13px;
+                padding: 13px 14px;
+            }}
+
+            .hero-telegram-icon {{
+                width: 72px;
+                height: 72px;
+                border-radius: 20px;
+            }}
+
+            .hero-telegram-icon svg {{
+                width: 45px;
+                height: 45px;
+            }}
+
+            .hero-telegram-title {{
+                font-size: 15px;
+            }}
+
+            .hero-telegram-text {{
+                font-size: 10px;
             }}
 
             .hero-deal-track
@@ -11658,12 +11848,18 @@ def _site_nav(active="deals"):
         ("deals", "/", "Deals"),
         ("diagnostics", "/diagnostics", "Diagnostics"),
         ("settings", "/settings", "Settings"),
+        ("telegram", "https://t.me/LaptopLander", "Telegram alerts ↗"),
     )
     items = []
     for name, href, label in links:
         cls = " active" if name == active else ""
+        external = (
+            ' target="_blank" rel="noopener noreferrer"'
+            if href.startswith("http")
+            else ""
+        )
         items.append(
-            f'<a class="nav-link{cls}" href="{href}">{label}</a>'
+            f'<a class="nav-link{cls}" href="{href}"{external}>{label}</a>'
         )
     return (
         '<nav class="site-nav">'
