@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.42"
+APP_VERSION = "0.9.43"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -9014,7 +9014,7 @@ def _dashboard_html_base():
 
         target_rows.append(
             f"""
-            <tr>
+            <tr data-item-id="{html.escape(str(row['item_id'] or ''), quote=True)}">
                 <td class="product-thumb-cell">
                     {thumb_html}
                 </td>
@@ -9117,7 +9117,7 @@ def _dashboard_html_base():
 
         <div class="deal-section-header">
             <h2>Auctions</h2>
-            <span class="small listing-count">
+            <span class="small listing-count" data-live-count="auctions">
                 {auction_candidates} listing{
                     "" if auction_candidates == 1 else "s"
                 }
@@ -9139,7 +9139,7 @@ def _dashboard_html_base():
         </tr>
         </thead>
 
-        <tbody>
+        <tbody id="auction-deals-body">
             {''.join(auction_body_rows)}
         </tbody>
 
@@ -9330,15 +9330,21 @@ def _dashboard_html_base():
     <html>
     <head>
         <meta charset="utf-8">
-        <meta http-equiv="refresh"
-              content="60">
         <title>Laptop Lander</title>
         <style>{CSS}</style>
     </head>
 
     <body>
 
-
+    <div class="live-update-bar" id="live-update-bar" aria-live="polite">
+        <span class="live-update-state">
+            <span class="live-update-dot" aria-hidden="true"></span>
+            <span id="live-update-status">Live · checking for new deals</span>
+        </span>
+        <button type="button" id="live-update-button" class="live-update-button" hidden>
+            Show updates
+        </button>
+    </div>
 
     <section class="home-hero">
 
@@ -10972,13 +10978,93 @@ def _dashboard_html_base():
                 transition: none;
             }}
         }}
+
+        .live-update-bar {{
+            position: sticky;
+            top: 0;
+            z-index: 1200;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            width: min(1180px, calc(100% - 28px));
+            margin: 10px auto 0;
+            padding: 8px 12px;
+            border: 1px solid #e4e7ec;
+            border-radius: 10px;
+            background: rgba(255,255,255,.96);
+            box-shadow: 0 3px 12px rgba(16,24,40,.08);
+            backdrop-filter: blur(8px);
+            font-size: 13px;
+        }}
+
+        .live-update-state {{
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            min-width: 0;
+            color: #475467;
+            font-weight: 600;
+        }}
+
+        .live-update-dot {{
+            width: 8px;
+            height: 8px;
+            flex: 0 0 8px;
+            border-radius: 999px;
+            background: #12b76a;
+            box-shadow: 0 0 0 3px rgba(18,183,106,.12);
+        }}
+
+        .live-update-bar.has-updates {{
+            border-color: #b2ccff;
+            background: rgba(239,244,255,.98);
+        }}
+
+        .live-update-bar.has-updates .live-update-dot {{
+            background: #155eef;
+            box-shadow: 0 0 0 3px rgba(21,94,239,.12);
+        }}
+
+        .live-update-bar.offline .live-update-dot {{
+            background: #f79009;
+            box-shadow: 0 0 0 3px rgba(247,144,9,.14);
+        }}
+
+        .live-update-button {{
+            border: 0;
+            border-radius: 999px;
+            padding: 7px 12px;
+            background: #155eef;
+            color: #fff;
+            font: inherit;
+            font-weight: 700;
+            cursor: pointer;
+            white-space: nowrap;
+        }}
+
+        .live-update-button:hover {{
+            background: #004eeb;
+        }}
+
+        @media (max-width: 640px) {{
+            .live-update-bar {{
+                width: calc(100% - 16px);
+                margin-top: 8px;
+                padding: 8px 10px;
+            }}
+
+            .live-update-button {{
+                padding: 6px 10px;
+            }}
+        }}
 </style>
 
     <section class="deal-section">
 
         <div class="deal-section-header">
             <h2>Buy It Now deals</h2>
-            <span class="small listing-count">
+            <span class="small listing-count" data-live-count="buy-now">
                 {buy_now_candidates} listing{
                     "" if buy_now_candidates == 1 else "s"
                 }
@@ -11002,7 +11088,7 @@ def _dashboard_html_base():
         </tr>
         </thead>
 
-        <tbody>
+        <tbody id="buy-now-deals-body">
             {''.join(buy_now_body_rows)}
         </tbody>
 
@@ -11255,6 +11341,139 @@ def _dashboard_html_base():
         }}
 
         schedule();
+    }})();
+    </script>
+
+    <script>
+    (() => {{
+        const POLL_MS = 20000;
+        const bar = document.getElementById("live-update-bar");
+        const status = document.getElementById("live-update-status");
+        const button = document.getElementById("live-update-button");
+
+        if (!bar || !status || !button) return;
+
+        function idsFrom(root) {{
+            if (!root) return [];
+            return Array.from(
+                root.querySelectorAll("tr[data-item-id]")
+            )
+                .map(row => row.dataset.itemId)
+                .filter(Boolean);
+        }}
+
+        function currentIds() {{
+            return new Set([
+                ...idsFrom(document.getElementById("buy-now-deals-body")),
+                ...idsFrom(document.getElementById("auction-deals-body"))
+            ]);
+        }}
+
+        function fingerprint(doc) {{
+            const buy = doc.getElementById("buy-now-deals-body");
+            const auctions = doc.getElementById("auction-deals-body");
+            return [
+                buy ? buy.innerHTML : "",
+                auctions ? auctions.innerHTML : ""
+            ].join("\n--LL--\n");
+        }}
+
+        let shownFingerprint = fingerprint(document);
+        let pendingFingerprint = shownFingerprint;
+        let checking = false;
+
+        function setCheckedText() {{
+            const now = new Date();
+            status.textContent =
+                "Live · checked "
+                + now.toLocaleTimeString([], {{
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    second: "2-digit"
+                }});
+        }}
+
+        async function checkForUpdates() {{
+            if (checking || document.hidden) return;
+            checking = true;
+
+            try {{
+                const response = await fetch(
+                    "/?live_check=" + Date.now(),
+                    {{ cache: "no-store" }}
+                );
+
+                if (!response.ok) {{
+                    throw new Error("HTTP " + response.status);
+                }}
+
+                const htmlText = await response.text();
+                const next = new DOMParser().parseFromString(
+                    htmlText,
+                    "text/html"
+                );
+
+                const nextFingerprint = fingerprint(next);
+                pendingFingerprint = nextFingerprint;
+
+                if (nextFingerprint === shownFingerprint) {{
+                    bar.classList.remove("has-updates", "offline");
+                    button.hidden = true;
+                    setCheckedText();
+                    return;
+                }}
+
+                const existing = currentIds();
+                const incoming = new Set([
+                    ...idsFrom(next.getElementById("buy-now-deals-body")),
+                    ...idsFrom(next.getElementById("auction-deals-body"))
+                ]);
+
+                let newCount = 0;
+                incoming.forEach(id => {{
+                    if (!existing.has(id)) newCount += 1;
+                }});
+
+                bar.classList.remove("offline");
+                bar.classList.add("has-updates");
+                button.hidden = false;
+
+                if (newCount > 0) {{
+                    status.textContent =
+                        newCount
+                        + (newCount === 1 ? " new deal" : " new deals")
+                        + " available";
+                    button.textContent =
+                        newCount === 1 ? "Show new deal" : "Show new deals";
+                }} else {{
+                    status.textContent = "Updated deal data available";
+                    button.textContent = "Show updates";
+                }}
+            }} catch (error) {{
+                bar.classList.remove("has-updates");
+                bar.classList.add("offline");
+                status.textContent = "Live check unavailable · retrying";
+                button.hidden = true;
+            }} finally {{
+                checking = false;
+            }}
+        }}
+
+        button.addEventListener("click", () => {{
+            // User-controlled refresh preserves a stable page while browsing.
+            // The next page contains the latest rows, valuation evidence and
+            // carousel state without silently moving anything under the user.
+            shownFingerprint = pendingFingerprint;
+            window.location.reload();
+        }});
+
+        document.addEventListener("visibilitychange", () => {{
+            if (!document.hidden) checkForUpdates();
+        }});
+
+        setCheckedText();
+        window.setInterval(checkForUpdates, POLL_MS);
+        window.setTimeout(checkForUpdates, 1500);
     }})();
     </script>
     </body>
