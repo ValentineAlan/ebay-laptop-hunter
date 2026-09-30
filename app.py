@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.49"
+APP_VERSION = "0.9.50"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -116,7 +116,15 @@ PRODUCT_RESEARCH_CACHE_HOURS = 24
 PRODUCT_RESEARCH_DAY_RANGE = 90
 PRODUCT_RESEARCH_LIMIT = 50
 PRODUCT_RESEARCH_MAX_PAGES = 2
-PRODUCT_RESEARCH_SEARCHES_PER_CYCLE = 12
+PRODUCT_RESEARCH_SEARCHES_PER_CYCLE = 12  # legacy batch default; worker uses one query at a time
+PRODUCT_RESEARCH_RATE_STATE = "/data/product-research-rate.json"
+PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS = 10.0
+PRODUCT_RESEARCH_MIN_INTERVAL_SECONDS = 5.0
+PRODUCT_RESEARCH_MAX_INTERVAL_SECONDS = 300.0
+PRODUCT_RESEARCH_STABLE_SUCCESSES = 100
+PRODUCT_RESEARCH_429_FALLBACK_SECONDS = 300
+PRODUCT_RESEARCH_WORKER_IDLE_SECONDS = 30
+PRODUCT_RESEARCH_REVALUE_SECONDS = 60
 
 # Product Research sold evidence should represent the second-hand market.
 # Filter server-side so New/New-other/New-with-defects and parts-only sales
@@ -227,7 +235,6 @@ SETTINGS_SCHEMA = [
     {"key": "PRODUCT_RESEARCH_DAY_RANGE", "label": "Product Research sold range (days)", "group": "Valuation", "type": "int", "min": 1, "max": 365, "step": 1, "apply": "Applies live"},
     {"key": "PRODUCT_RESEARCH_LIMIT", "label": "Product Research results per page", "group": "Valuation", "type": "int", "min": 1, "max": 200, "step": 1, "apply": "Applies live"},
     {"key": "PRODUCT_RESEARCH_MAX_PAGES", "label": "Product Research maximum pages", "group": "Valuation", "type": "int", "min": 1, "max": 20, "step": 1, "apply": "Applies live"},
-    {"key": "PRODUCT_RESEARCH_SEARCHES_PER_CYCLE", "label": "Product Research searches per cycle", "group": "Valuation", "type": "int", "min": 1, "max": 100, "step": 1, "apply": "Next polling cycle"},
 
     {"key": "ACTIVE_BIN_RECHECKS_PER_CYCLE", "label": "Active BIN rechecks per cycle", "group": "Maintenance", "type": "int", "min": 0, "max": 500, "step": 1, "apply": "Next polling cycle"},
     {"key": "ACTIVE_BIN_RECHECKS_DURING_REANALYSIS", "label": "BIN rechecks during reanalysis", "group": "Maintenance", "type": "int", "min": 0, "max": 500, "step": 1, "apply": "Next polling cycle"},
@@ -5677,7 +5684,193 @@ def _product_research_invalid_session(raw, modules):
     return '"reason_code":"invalid_session"' in raw.replace(" ", "")
 
 
+class ProductResearchRateLimited(Exception):
+    """Product Research returned HTTP 429 and entered adaptive backoff."""
+    pass
+
+
+_product_research_rate_lock = threading.Lock()
+_product_research_next_request_at = 0.0
+_product_research_rate_loaded = False
+_product_research_rate = {
+    "interval_seconds": PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS,
+    "success_streak": 0,
+    "backoff_until": 0.0,
+    "last_429_at": None,
+    "last_success_at": None,
+}
+
+
+def _product_research_load_rate_state():
+    global _product_research_rate_loaded
+
+    with _product_research_rate_lock:
+        if _product_research_rate_loaded:
+            return dict(_product_research_rate)
+
+        saved = _read_json_file(PRODUCT_RESEARCH_RATE_STATE)
+
+        try:
+            interval = float(
+                saved.get(
+                    "interval_seconds",
+                    PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS,
+                )
+            )
+        except Exception:
+            interval = PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS
+
+        interval = min(
+            PRODUCT_RESEARCH_MAX_INTERVAL_SECONDS,
+            max(PRODUCT_RESEARCH_MIN_INTERVAL_SECONDS, interval),
+        )
+
+        try:
+            success_streak = max(0, int(saved.get("success_streak", 0)))
+        except Exception:
+            success_streak = 0
+
+        try:
+            backoff_until = max(0.0, float(saved.get("backoff_until", 0.0)))
+        except Exception:
+            backoff_until = 0.0
+
+        _product_research_rate.update({
+            "interval_seconds": interval,
+            "success_streak": success_streak,
+            "backoff_until": backoff_until,
+            "last_429_at": saved.get("last_429_at"),
+            "last_success_at": saved.get("last_success_at"),
+        })
+        _product_research_rate_loaded = True
+        return dict(_product_research_rate)
+
+
+def _product_research_save_rate_state():
+    payload = dict(_product_research_rate)
+    payload["updated_at"] = iso_now()
+    _atomic_json_write(PRODUCT_RESEARCH_RATE_STATE, payload)
+
+
+def _product_research_retry_after_seconds(exc):
+    try:
+        value = exc.headers.get("Retry-After")
+    except Exception:
+        value = None
+
+    if value:
+        try:
+            return max(0.0, float(value))
+        except Exception:
+            pass
+
+    return float(PRODUCT_RESEARCH_429_FALLBACK_SECONDS)
+
+
+def _product_research_wait_for_slot():
+    global _product_research_next_request_at
+
+    _product_research_load_rate_state()
+
+    while True:
+        with _product_research_rate_lock:
+            now_wall = time.time()
+            now_mono = time.monotonic()
+
+            backoff_wait = max(
+                0.0,
+                float(_product_research_rate.get("backoff_until", 0.0)) - now_wall,
+            )
+            cadence_wait = max(
+                0.0,
+                _product_research_next_request_at - now_mono,
+            )
+            wait_for = max(backoff_wait, cadence_wait)
+
+            if wait_for <= 0:
+                interval = float(
+                    _product_research_rate.get(
+                        "interval_seconds",
+                        PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS,
+                    )
+                )
+                _product_research_next_request_at = now_mono + interval
+                return
+
+        time.sleep(min(wait_for, 1.0))
+
+
+def _product_research_record_success():
+    with _product_research_rate_lock:
+        _product_research_rate["last_success_at"] = iso_now()
+        _product_research_rate["success_streak"] = (
+            int(_product_research_rate.get("success_streak", 0)) + 1
+        )
+
+        if (
+            _product_research_rate["success_streak"]
+            >= PRODUCT_RESEARCH_STABLE_SUCCESSES
+        ):
+            old_interval = float(
+                _product_research_rate.get(
+                    "interval_seconds",
+                    PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS,
+                )
+            )
+            new_interval = max(
+                PRODUCT_RESEARCH_MIN_INTERVAL_SECONDS,
+                old_interval - 1.0,
+            )
+            _product_research_rate["success_streak"] = 0
+            _product_research_rate["interval_seconds"] = new_interval
+
+            if new_interval < old_interval:
+                print(
+                    "Product Research rate: "
+                    f"{old_interval:.1f}s -> {new_interval:.1f}s/request "
+                    f"after {PRODUCT_RESEARCH_STABLE_SUCCESSES} successful requests"
+                )
+
+        _product_research_save_rate_state()
+
+
+def _product_research_record_429(exc):
+    with _product_research_rate_lock:
+        old_interval = float(
+            _product_research_rate.get(
+                "interval_seconds",
+                PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS,
+            )
+        )
+        new_interval = min(
+            PRODUCT_RESEARCH_MAX_INTERVAL_SECONDS,
+            max(
+                PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS,
+                old_interval * 2.0,
+            ),
+        )
+        retry_after = _product_research_retry_after_seconds(exc)
+
+        _product_research_rate.update({
+            "interval_seconds": new_interval,
+            "success_streak": 0,
+            "backoff_until": time.time() + retry_after,
+            "last_429_at": iso_now(),
+        })
+        _product_research_save_rate_state()
+
+    print(
+        "Product Research 429: "
+        f"backing off {retry_after:.0f}s; "
+        f"request interval {old_interval:.1f}s -> {new_interval:.1f}s"
+    )
+
+    return retry_after
+
+
 def _product_research_fetch(url, cookie):
+    _product_research_wait_for_slot()
+
     req = urllib.request.Request(
         url,
         headers={
@@ -5688,8 +5881,22 @@ def _product_research_fetch(url, cookie):
             "X-Requested-With": "XMLHttpRequest",
         },
     )
-    with ebay_urlopen(req, timeout=45) as response:
-        return response.read().decode("utf-8", errors="replace")
+
+    try:
+        # Product Research has its own adaptive limiter. Deliberately do not
+        # use ebay_urlopen(), whose 429 cooldown is shared with Browse.
+        with urllib.request.urlopen(req, timeout=45) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            _product_research_record_429(exc)
+            raise ProductResearchRateLimited(
+                "Product Research returned HTTP 429 Too Many Requests"
+            ) from exc
+        raise
+
+    _product_research_record_success()
+    return raw
 
 def _decode_json_modules(raw):
     decoder = json.JSONDecoder()
@@ -6448,6 +6655,10 @@ def collect_sold_search(conn, keywords):
         )
         conn.commit()
         print("Product Research ERROR:", keywords, repr(exc))
+
+        if isinstance(exc, ProductResearchRateLimited):
+            raise
+
         return 0
 
 
@@ -16388,6 +16599,100 @@ def mark_ended_listings(conn):
 
 
 # ============================================================
+# PRODUCT RESEARCH WORKER
+# ============================================================
+
+def _product_research_worker():
+    """
+    Continuously drain sold-evidence work independently of Browse discovery.
+
+    HTTP requests are paced by _product_research_fetch(). The worker asks for
+    one Product Research query at a time so the adaptive limiter controls the
+    actual request stream rather than sending bursts once per Browse cycle.
+    """
+    state = _product_research_load_rate_state()
+    print(
+        "Product Research worker: starting "
+        f"at {state['interval_seconds']:.1f}s/request "
+        f"(minimum {PRODUCT_RESEARCH_MIN_INTERVAL_SECONDS:.1f}s)"
+    )
+
+    last_revalue = 0.0
+
+    while True:
+        conn = None
+
+        try:
+            conn = connect_db()
+            refresh_runtime_settings(conn)
+            refresh_classifier_rules(conn)
+
+            attempted = collect_needed_sold_data(
+                conn,
+                maximum=1,
+            )
+
+            now = time.monotonic()
+
+            if (
+                attempted > 0
+                or now - last_revalue >= PRODUCT_RESEARCH_REVALUE_SECONDS
+            ):
+                revalue_all(conn)
+                telegram_sent = notify_pending_telegram_deals(conn)
+                if telegram_sent:
+                    print(
+                        f"Telegram alerts sent  : {telegram_sent}"
+                    )
+                last_revalue = now
+
+            if attempted <= 0:
+                time.sleep(PRODUCT_RESEARCH_WORKER_IDLE_SECONDS)
+
+        except ProductResearchRateLimited:
+            # The adaptive state contains the real backoff deadline. A short
+            # local pause avoids a tight exception loop; the next request waits
+            # for the full backoff in _product_research_wait_for_slot().
+            time.sleep(1)
+
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).lower():
+                print(
+                    "Product Research worker: database busy; retrying shortly"
+                )
+                time.sleep(2)
+            else:
+                print(
+                    "Product Research worker DB ERROR:",
+                    repr(exc),
+                )
+                time.sleep(10)
+
+        except Exception as exc:
+            print(
+                "Product Research worker ERROR:",
+                repr(exc),
+            )
+            time.sleep(10)
+
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+
+def start_product_research_worker():
+    thread = threading.Thread(
+        target=_product_research_worker,
+        name="product-research-worker",
+        daemon=True,
+    )
+    thread.start()
+
+
+# ============================================================
 # POLLER
 # ============================================================
 
@@ -16626,30 +16931,9 @@ def run_cycle(
     repair_v080_valuation_cache(conn)
 
     print()
-    print("Collecting sold-market evidence...")
-
-    research_searches = collect_needed_sold_data(
-        conn,
-        PRODUCT_RESEARCH_SEARCHES_PER_CYCLE
-    )
-
     print(
-        f"Product Research searches: "
-        f"{research_searches}"
+        "Product Research      : continuous background worker"
     )
-
-    print()
-    print(
-        "Recalculating valuations..."
-    )
-
-    revalue_all(
-        conn
-    )
-
-    telegram_sent = notify_pending_telegram_deals(conn)
-    if telegram_sent:
-        print(f"Telegram alerts sent  : {telegram_sent}")
 
     total_api = browse_usage_today(
         conn
@@ -16782,6 +17066,7 @@ def main():
 
     start_dashboard()
     start_product_research_session_monitor()
+    start_product_research_worker()
     start_cpu_benchmark_refresh_worker()
 
     cycle = 0
