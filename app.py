@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.46"
+APP_VERSION = "0.9.47"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -165,7 +165,7 @@ MEDIUM_CONFIDENCE_COMPARABLES = 6
 # Don't use ancient active observations indefinitely.
 COMPARABLE_MAX_AGE_DAYS = 30
 SOLD_CACHE_MAX_AGE_DAYS = 7
-SOLD_EVIDENCE_VERSION = "2"
+SOLD_EVIDENCE_VERSION = "3"
 
 
 # PassMark CPU benchmark cache.
@@ -943,6 +943,8 @@ def init_db():
         "evidence_version": "TEXT",
         "currency": "TEXT",
         "extended_title": "TEXT",
+        "sold_condition": "TEXT",
+        "sold_condition_id": "TEXT",
     }.items():
         ensure_column(conn, "sold_comparables", name, sql_type)
 
@@ -5971,6 +5973,54 @@ def repair_v080_valuation_cache(conn):
     conn.commit()
 
 
+def repair_v0947_sold_condition_cache(conn):
+    """Force one clean Product Research refresh with sold condition metadata."""
+    key = "v0.9.47_sold_condition_evidence_v3"
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS app_migrations (
+            migration_key TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        )
+    """)
+
+    if conn.execute(
+        "SELECT 1 FROM app_migrations WHERE migration_key=?",
+        (key,),
+    ).fetchone():
+        return
+
+    conn.execute(
+        "UPDATE sold_searches SET status='STALE', searched_at=NULL"
+    )
+
+    conn.execute("""
+        UPDATE listings
+        SET estimated_value=NULL,
+            valuation_q1=NULL,
+            valuation_q3=NULL,
+            comparable_count=NULL,
+            valuation_confidence=NULL,
+            undervaluation_gbp=NULL,
+            undervaluation_pct=NULL,
+            deal_score=NULL,
+            valuation_basis='REANALYSIS_REQUIRED',
+            valuation_research_at=NULL
+    """)
+
+    conn.execute(
+        "INSERT INTO app_migrations(migration_key,applied_at) VALUES (?,?)",
+        (key, iso_now()),
+    )
+
+    conn.commit()
+
+    print(
+        "Migration v0.9.47: invalidated Product Research cache so sold "
+        "condition metadata can be collected; valuations queued for rebuild"
+    )
+
+
 def sold_search_queries(row):
     """
     Search Product Research from most specific to broadest.
@@ -6074,6 +6124,67 @@ def sold_search_is_fresh(conn, key):
         return False
 
 
+def _research_condition(result, listing):
+    """Extract the sold listing condition from Product Research.
+
+    Product Research fields are not part of the public Browse schema and have
+    appeared as strings, TextualDisplayValue objects and condition IDs. Prefer
+    the human-readable value, with a conservative fallback for well-known
+    eBay condition IDs.
+    """
+    text_candidates = (
+        listing.get("condition"),
+        listing.get("conditionName"),
+        listing.get("conditionDisplayName"),
+        listing.get("itemCondition"),
+        result.get("condition"),
+        result.get("conditionName"),
+        result.get("conditionDisplayName"),
+        result.get("itemCondition"),
+    )
+
+    for value in text_candidates:
+        condition = _research_text(value)
+        if condition:
+            return condition, ""
+
+    id_candidates = (
+        listing.get("conditionId"),
+        listing.get("conditionID"),
+        listing.get("itemConditionId"),
+        result.get("conditionId"),
+        result.get("conditionID"),
+        result.get("itemConditionId"),
+    )
+
+    condition_id = ""
+    for value in id_candidates:
+        raw = _research_text(value)
+        if not raw and isinstance(value, (int, float)):
+            raw = str(int(value))
+        match = re.search(r"\b(\d{4})\b", normalise(raw))
+        if match:
+            condition_id = match.group(1)
+            break
+
+    # eBay's common laptop/electronics condition IDs. The three 1xxx states
+    # represent new merchandise and must not anchor used-laptop valuations.
+    condition_from_id = {
+        "1000": "New",
+        "1500": "New other",
+        "1750": "New with defects",
+        "2000": "Certified refurbished",
+        "2010": "Excellent refurbished",
+        "2020": "Very good refurbished",
+        "2030": "Good refurbished",
+        "2500": "Seller refurbished",
+        "2750": "Like new",
+        "3000": "Used",
+    }.get(condition_id, "")
+
+    return condition_from_id, condition_id
+
+
 def _parse_sold_result(result):
     listing = result.get("listing") or {}
     item_id = normalise(listing.get("itemId") or result.get("itemId"))
@@ -6104,6 +6215,10 @@ def _parse_sold_result(result):
     total_sales = _research_value(result.get("totalsales"))
     last_sold = _research_text(result.get("datelastsold"))
     formats = _research_text(listing.get("formatList") or result.get("formatList"))
+    sold_condition, sold_condition_id = _research_condition(
+        result,
+        listing,
+    )
 
     if not item_id:
         # Stable enough for a cached research row when eBay omits itemId.
@@ -6186,6 +6301,8 @@ def _parse_sold_result(result):
         "total_sales": total_sales,
         "last_sold": last_sold,
         "formats": formats,
+        "sold_condition": sold_condition,
+        "sold_condition_id": sold_condition_id,
     }
 
 
@@ -6226,15 +6343,18 @@ def collect_sold_search(conn, keywords):
                 """INSERT OR REPLACE INTO sold_comparables(
                     query_key,item_id,title,extended_title,brand,model,cpu,cpu_generation,
                     ram_gb,storage_gb,avg_sold_price,avg_postage,delivered_price,
-                    units_sold,total_sales,last_sold,formats,collected_at,currency,evidence_version,source
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'EBAY_PRODUCT_RESEARCH')""",
+                    units_sold,total_sales,last_sold,formats,sold_condition,sold_condition_id,
+                    collected_at,currency,evidence_version,source
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'EBAY_PRODUCT_RESEARCH')""",
                 (
                     key, row["item_id"], row["title"], row["extended_title"],
                     row["brand"], row["model"], row["cpu"], row["cpu_generation"],
                     row["ram_gb"],
                     row["storage_gb"], row["avg_sold_price"], row["avg_postage"],
                     row["delivered_price"], row["units_sold"], row["total_sales"],
-                    row["last_sold"], row["formats"], iso_now(), row["currency"], SOLD_EVIDENCE_VERSION,
+                    row["last_sold"], row["formats"], row["sold_condition"],
+                    row["sold_condition_id"], iso_now(), row["currency"],
+                    SOLD_EVIDENCE_VERSION,
                 ),
             )
         collected = len(parsed)
@@ -6436,11 +6556,32 @@ def ordinary_laptop(title, condition="", allow_repairable=False):
 def sold_condition_assessment(title, condition=""):
     """Classify and normalise condition differences in sold evidence.
 
+    New merchandise is a different market from the used/refurbished laptops
+    LaptopLander hunts, so explicit new-condition sales are excluded rather
+    than allowed to inflate used-laptop valuations.
+
     HIGH_RISK means parts/non-working evidence and is excluded. MODERATE and
     LOW_COST evidence is retained only for sold-price research: its raw sold
     price is uplifted conservatively toward an ordinary working example and its
     statistical weight is reduced because the normalisation is uncertain.
     """
+    condition_text = normalise(condition)
+
+    if is_genuinely_new(condition_text) or re.search(
+        r"\b(?:brand\s+new|new\s+with\s+(?:box|tags)|"
+        r"new\s+without\s+tags|new\s+other|new\s+with\s+defects|sealed)\b",
+        condition_text,
+        re.I,
+    ):
+        return {
+            "decision": "EXCLUDE",
+            "condition_class": "NEW_CONDITION",
+            "adjustment_pct": None,
+            "factor": None,
+            "weight": 0.0,
+            "reasons": [condition_text or "New"],
+        }
+
     level, reasons = classify_faults(title, condition)
 
     if level == "HIGH_RISK":
@@ -7377,7 +7518,8 @@ def sold_candidates(conn, target):
             continue
 
         condition_assessment = sold_condition_assessment(
-            row["title"]
+            row["title"],
+            row_value(row, "sold_condition", ""),
         )
 
         if condition_assessment["decision"] == "EXCLUDE":
@@ -7385,6 +7527,7 @@ def sold_candidates(conn, target):
 
         if not ordinary_laptop(
             row["title"],
+            row_value(row, "sold_condition", ""),
             allow_repairable=True
         ):
             continue
@@ -7878,7 +8021,10 @@ def sold_price_logic_for_basis(conn, target, basis):
         ):
             continue
 
-        assessment = sold_condition_assessment(row["title"])
+        assessment = sold_condition_assessment(
+            row["title"],
+            row_value(row, "sold_condition", ""),
+        )
         if assessment["decision"] != "EXCLUDE":
             continue
 
@@ -8853,13 +8999,6 @@ def _dashboard_html_base():
                 decision = entry["decision"]
                 reasons = ", ".join(entry.get("condition_reasons") or [])
 
-                if decision == "USED":
-                    decision_label = "USED"
-                elif decision == "EXCLUDED_OUTLIER":
-                    decision_label = "EXCLUDED · PRICE OUTLIER"
-                else:
-                    decision_label = "EXCLUDED · FAULT/PARTS"
-
                 adjustment = entry.get("condition_adjustment_pct")
                 adjustment_text = (
                     f"+{adjustment:.0f}%"
@@ -8880,14 +9019,33 @@ def _dashboard_html_base():
                     "WORKING_DAMAGED": "Damaged",
                     "WORKING_MINOR_FAULT": "Minor fault",
                     "FAULTY_OR_PARTS": "Faulty / parts",
+                    "NEW_CONDITION": "New",
                 }.get(condition_key, condition_key.replace("_", " ").title())
+
+                if decision == "USED":
+                    decision_label = "USED"
+                elif decision == "EXCLUDED_OUTLIER":
+                    decision_label = "EXCLUDED · PRICE OUTLIER"
+                elif condition_key == "NEW_CONDITION":
+                    decision_label = "EXCLUDED · NEW CONDITION"
+                else:
+                    decision_label = "EXCLUDED · FAULT/PARTS"
 
                 condition_html = (
                     "<span class='evidence-condition'>"
                     + html.escape(condition_label)
                     + "</span>"
                 )
-                if reasons:
+                sold_condition_text = normalise(
+                    row_value(sold, "sold_condition", "")
+                )
+                if sold_condition_text:
+                    condition_html += (
+                        "<span class='evidence-reason'>"
+                        + html.escape("eBay: " + sold_condition_text)
+                        + "</span>"
+                    )
+                if reasons and reasons.lower() != sold_condition_text.lower():
                     condition_html += (
                         "<span class='evidence-reason'>"
                         + html.escape(reasons)
@@ -8915,6 +9073,7 @@ def _dashboard_html_base():
                 decision_display = {
                     "USED": "Used",
                     "EXCLUDED · PRICE OUTLIER": "Price outlier",
+                    "EXCLUDED · NEW CONDITION": "New condition",
                     "EXCLUDED · FAULT/PARTS": "Fault / parts",
                 }.get(decision_label, decision_label)
 
@@ -8960,8 +9119,14 @@ def _dashboard_html_base():
                 and (entry.get("condition_adjustment_pct") or 0) > 0
                 for entry in sold_logic
             )
+            new_condition_excluded = sum(
+                entry["decision"] == "EXCLUDED_CONDITION"
+                and entry.get("condition_class") == "NEW_CONDITION"
+                for entry in sold_logic
+            )
             condition_excluded = sum(
                 entry["decision"] == "EXCLUDED_CONDITION"
+                and entry.get("condition_class") != "NEW_CONDITION"
                 for entry in sold_logic
             )
             outlier_excluded = sum(
@@ -8972,8 +9137,10 @@ def _dashboard_html_base():
             logic_summary = (
                 f"Used {used_count}; "
                 f"condition-adjusted {adjusted_count}; "
+                f"new-condition excluded {new_condition_excluded}; "
                 f"fault/parts excluded {condition_excluded}; "
                 f"price outliers excluded {outlier_excluded}. "
+                "New merchandise is excluded from used-laptop valuation. "
                 "Moderate working damage is normalised +12% and down-weighted; "
                 "minor faults +6% and down-weighted. Serious/non-working sales are not valued as working laptops."
             )
@@ -16528,6 +16695,7 @@ def main():
         repair_v078_model_and_sold_cache(migration_conn)
         repair_v080_valuation_cache(migration_conn)
         repair_v0944_telegram_notification_baseline(migration_conn)
+        repair_v0947_sold_condition_cache(migration_conn)
     migration_conn.close()
 
     print(
