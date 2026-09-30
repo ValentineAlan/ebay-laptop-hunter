@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.41"
+APP_VERSION = "0.9.42"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -8268,6 +8268,22 @@ th {
     white-space: normal;
     overflow-wrap: anywhere;
 }
+.evidence-title-link {
+    color: #0645ad;
+    text-decoration: none;
+    font-weight: 600;
+}
+.evidence-title-link:hover {
+    text-decoration: underline;
+}
+.evidence-external-link {
+    display: inline-block;
+    margin-left: 5px;
+    font-size: 11px;
+    line-height: 1;
+    vertical-align: 1px;
+    opacity: .7;
+}
 .evidence-table th:nth-child(2),
 .evidence-table td:nth-child(2) {
     width: 105px;
@@ -8731,9 +8747,29 @@ def _dashboard_html_base():
                     "EXCLUDED · FAULT/PARTS": "Fault / parts",
                 }.get(decision_label, decision_label)
 
+                sold_title = html.escape(sold["title"] or "")
+                sold_item_id = canonical_sold_item_id(
+                    row_value(sold, "item_id")
+                )
+                if sold_item_id and re.fullmatch(r"\d{9,15}", sold_item_id):
+                    sold_url = (
+                        "https://www.ebay.co.uk/itm/"
+                        + urllib.parse.quote(sold_item_id, safe="")
+                    )
+                    sold_title_html = (
+                        f"<a class='evidence-title-link' "
+                        f"href='{html.escape(sold_url, quote=True)}' "
+                        f"target='_blank' rel='noopener noreferrer' "
+                        f"title='Open sold eBay listing'>"
+                        f"{sold_title}<span class='evidence-external-link' aria-hidden='true'>↗</span>"
+                        f"</a>"
+                    )
+                else:
+                    sold_title_html = sold_title
+
                 evidence_rows.append(
                     "<tr>"
-                    f"<td>{html.escape(sold['title'] or '')}</td>"
+                    f"<td>{sold_title_html}</td>"
                     f"<td class='money'>{money(entry['raw_total'])}</td>"
                     f"<td>{condition_html}</td>"
                     f"<td>{adjustment_text}</td>"
