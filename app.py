@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.39"
+APP_VERSION = "0.9.40"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -5968,7 +5968,7 @@ def repair_v080_valuation_cache(conn):
     conn.commit()
 
 
-def sold_search_queries(row, conn):
+def sold_search_queries(row):
     """
     Search Product Research from most specific to broadest.
 
@@ -5979,7 +5979,7 @@ def sold_search_queries(row, conn):
     The valuation matcher remains strict; these queries only improve retrieval
     of potentially relevant sold evidence.
     """
-    if target_valuation_problem(row, conn):
+    if target_valuation_problem(row):
         return []
 
     brand = normalise(
@@ -6299,7 +6299,7 @@ def collect_needed_sold_data(conn, maximum=None):
     attempted_listings = 0
 
     for row in rows:
-        queries = sold_search_queries(row, conn)
+        queries = sold_search_queries(row)
         if not queries or all(sold_search_is_fresh(conn, research_query_key(q)) for q in queries):
             continue
 
@@ -6407,14 +6407,17 @@ def evidence_age_days(value):
     return age if age >= 0 else None
 
 
-def eligible_laptop_target(title, condition=""):
-    """
-    True when this is a single laptop listing that can sensibly be valued.
-
-    Condition/faults do NOT make a target ineligible. They are surfaced
-    separately through status/fault_reasons and the Notes column.
-    """
+def ordinary_laptop(title, condition="", allow_repairable=False):
     text = normalise(title) + " " + normalise(condition)
+    fault_level, _ = classify_faults(title, condition)
+
+    # Serious/non-working machines are never ordinary working-laptop comps.
+    # Sold-price research may retain lesser, repairable/cosmetic defects and
+    # normalise their sale price separately in sold_condition_assessment().
+    if fault_level == "HIGH_RISK":
+        return False
+    if fault_level != "NORMAL" and not allow_repairable:
+        return False
 
     # Aggregates, options, accessories and retail/refurbished offerings are not
     # directly comparable to one ordinary used laptop.
@@ -6423,25 +6426,58 @@ def eligible_laptop_target(title, condition=""):
         r"[x×]\s*\d+|\d+\s+laptops?|choose|choice|various|refurbished|renewed|"
         r"brand new|sealed|warranty|charger only|screen only|keyboard only|"
         r"replacement|for Dell|for HP|for Lenovo|no ram|no memory)\b|"
-        r"\b\d+\s*(?:GB|TB)?\s*(?:/|or)\s*\d+\s*(?:GB|TB)\b",
-        text,
-        re.I
+        r"\b\d+\s*(?:GB|TB)?\s*(?:/|or)\s*\d+\s*(?:GB|TB)\b", text, re.I
     ) and not is_genuinely_new(condition)
 
 
-def ordinary_laptop(title, condition=""):
+def sold_condition_assessment(title, condition=""):
+    """Classify and normalise condition differences in sold evidence.
+
+    HIGH_RISK means parts/non-working evidence and is excluded. MODERATE and
+    LOW_COST evidence is retained only for sold-price research: its raw sold
+    price is uplifted conservatively toward an ordinary working example and its
+    statistical weight is reduced because the normalisation is uncertain.
     """
-    True only for a normal-condition single laptop.
+    level, reasons = classify_faults(title, condition)
 
-    Used for valuation COMPARABLES so faulty/damaged machines do not
-    contaminate normal sold-price evidence.
-    """
-    text = normalise(title) + " " + normalise(condition)
+    if level == "HIGH_RISK":
+        return {
+            "decision": "EXCLUDE",
+            "condition_class": "FAULTY_OR_PARTS",
+            "adjustment_pct": None,
+            "factor": None,
+            "weight": 0.0,
+            "reasons": reasons,
+        }
 
-    if classify_faults(text)[0] != "NORMAL":
-        return False
+    if level == "MODERATE":
+        return {
+            "decision": "USE_ADJUSTED",
+            "condition_class": "WORKING_DAMAGED",
+            "adjustment_pct": 12.0,
+            "factor": 1.12,
+            "weight": 0.75,
+            "reasons": reasons,
+        }
 
-    return eligible_laptop_target(title, condition)
+    if level == "LOW_COST":
+        return {
+            "decision": "USE_ADJUSTED",
+            "condition_class": "WORKING_MINOR_FAULT",
+            "adjustment_pct": 6.0,
+            "factor": 1.06,
+            "weight": 0.90,
+            "reasons": reasons,
+        }
+
+    return {
+        "decision": "USE",
+        "condition_class": "WORKING_NORMAL",
+        "adjustment_pct": 0.0,
+        "factor": 1.0,
+        "weight": 1.0,
+        "reasons": [],
+    }
 
 
 
@@ -6828,26 +6864,24 @@ def valuation_condition_requires_review(target):
     )
 
 
-def target_valuation_problem(target, conn):
+def target_valuation_problem(target, conn=None):
     if row_value(target, "classifier_version") != CLASSIFIER_VERSION:
         return "REANALYSIS_REQUIRED"
 
     if int(row_value(target, "rules_revision") or 0) != current_rules_revision(conn):
         return "REANALYSIS_REQUIRED"
 
+    if valuation_condition_requires_review(target):
+        return "CONDITION_REQUIRES_REVIEW"
+
     if not exact_spec_identity(target):
         return "INCOMPLETE_IDENTITY_OR_SPEC"
-
-    if not eligible_laptop_target(
-        row_value(target, "title"),
-        row_value(target, "condition")
-    ):
-        return "CONDITION_REQUIRES_REVIEW"
 
     if not row_value(target, "total") or row_value(target, "postage") is None:
         return "UNKNOWN_DELIVERED_COST"
 
     return None
+
 
 def insufficient_valuation(reason, count=0):
     return dict(estimated_value=None, q1=None, q3=None, count=count,
@@ -7339,8 +7373,16 @@ def sold_candidates(conn, target):
         ):
             continue
 
-        if not ordinary_laptop(
+        condition_assessment = sold_condition_assessment(
             row["title"]
+        )
+
+        if condition_assessment["decision"] == "EXCLUDE":
+            continue
+
+        if not ordinary_laptop(
+            row["title"],
+            allow_repairable=True
         ):
             continue
 
@@ -7360,12 +7402,19 @@ def sold_candidates(conn, target):
         ):
             continue
 
-        price = float(
+        raw_price = float(
             row["delivered_price"]
         )
 
-        if not math.isfinite(price):
+        if not math.isfinite(raw_price):
             continue
+
+        # Normalise minor/moderate damage toward an ordinary working example
+        # while keeping the raw Product Research sale visible for audit.
+        price = (
+            raw_price
+            * condition_assessment["factor"]
+        )
 
         # Repeated identical adverts must not manufacture
         # independent evidence.
@@ -7398,6 +7447,11 @@ def sold_candidates(conn, target):
         best[sold_item_id] = dict(
             row=row,
             total=price,
+            raw_total=raw_price,
+            condition_decision=condition_assessment["decision"],
+            condition_class=condition_assessment["condition_class"],
+            condition_adjustment_pct=condition_assessment["adjustment_pct"],
+            condition_reasons=condition_assessment["reasons"],
             similarity=(
                 100
                 if (
@@ -7418,6 +7472,7 @@ def sold_candidates(conn, target):
                 recency_weight
                 * variant_weight
                 * spec_weight
+                * condition_assessment["weight"]
             )
         )
 
@@ -7744,6 +7799,118 @@ def sold_evidence_for_basis(conn, target, basis):
     if not basis or not basis.startswith("SOLD_"):
         return []
     return sorted(select_sold_evidence(conn, target), key=lambda c: c["total"])
+
+
+def sold_price_logic_for_basis(conn, target, basis):
+    """Return auditable sold-price decisions for the dashboard.
+
+    This intentionally exposes both evidence used by valuation and the two
+    most important rejection paths for price interpretation: statistical
+    outliers and serious fault/parts-only sales.
+    """
+    if not basis or not basis.startswith("SOLD_"):
+        return []
+
+    candidates = sold_candidates(conn, target)
+    selected = remove_price_outliers(candidates)
+
+    selected_ids = {
+        canonical_sold_item_id(c["row"]["item_id"])
+        for c in selected
+    }
+
+    results = []
+
+    for candidate in candidates:
+        sold = candidate["row"]
+        item_id = canonical_sold_item_id(sold["item_id"])
+        used = item_id in selected_ids
+        results.append({
+            "row": sold,
+            "raw_total": candidate.get("raw_total", candidate["total"]),
+            "normalised_total": candidate["total"],
+            "condition_class": candidate.get("condition_class", "WORKING_NORMAL"),
+            "condition_adjustment_pct": candidate.get("condition_adjustment_pct", 0.0),
+            "condition_reasons": candidate.get("condition_reasons", []),
+            "decision": "USED" if used else "EXCLUDED_OUTLIER",
+            "similarity": candidate.get("similarity"),
+            "tier": candidate.get("tier"),
+            "spec_tier": candidate.get("spec_tier"),
+            "units": candidate.get("units", 1),
+        })
+
+    # Also expose serious-fault/parts-only rows which sold_candidates() rightly
+    # removes before normal comparable matching. Keep the same freshness and
+    # currency constraints so the audit reflects the current evidence window.
+    rows = conn.execute(
+        "SELECT * FROM sold_comparables WHERE delivered_price > 0 "
+        "AND currency='GBP' AND evidence_version=? AND LOWER(brand)=LOWER(?) "
+        "AND LOWER(model)=LOWER(?)",
+        (SOLD_EVIDENCE_VERSION, target["brand"], target["model"])
+    ).fetchall()
+
+    target_item_id = canonical_sold_item_id(row_value(target, "item_id"))
+    already_seen = {
+        canonical_sold_item_id(entry["row"]["item_id"])
+        for entry in results
+    }
+
+    for row in sorted(rows, key=lambda r: r["collected_at"], reverse=True):
+        sold_item_id = canonical_sold_item_id(row["item_id"])
+        if (
+            not sold_item_id
+            or sold_item_id.startswith("title:")
+            or sold_item_id == target_item_id
+            or sold_item_id in already_seen
+        ):
+            continue
+
+        age = evidence_age_days(row["last_sold"])
+        cache_age = evidence_age_days(row["collected_at"])
+        if (
+            age is None
+            or age > PRODUCT_RESEARCH_DAY_RANGE
+            or cache_age is None
+            or cache_age > SOLD_CACHE_MAX_AGE_DAYS
+        ):
+            continue
+
+        assessment = sold_condition_assessment(row["title"])
+        if assessment["decision"] != "EXCLUDE":
+            continue
+
+        raw_price = float(row["delivered_price"])
+        if not math.isfinite(raw_price):
+            continue
+
+        results.append({
+            "row": row,
+            "raw_total": raw_price,
+            "normalised_total": None,
+            "condition_class": assessment["condition_class"],
+            "condition_adjustment_pct": None,
+            "condition_reasons": assessment["reasons"],
+            "decision": "EXCLUDED_CONDITION",
+            "similarity": None,
+            "tier": None,
+            "spec_tier": None,
+            "units": max(1, int(row["units_sold"] or 1)),
+        })
+        already_seen.add(sold_item_id)
+
+    priority = {
+        "USED": 0,
+        "EXCLUDED_OUTLIER": 1,
+        "EXCLUDED_CONDITION": 2,
+    }
+
+    return sorted(
+        results,
+        key=lambda entry: (
+            priority.get(entry["decision"], 9),
+            -(entry["raw_total"] or 0),
+        )
+    )
 
 
 def valuation_label(basis):
@@ -8407,36 +8574,109 @@ def _dashboard_html_base():
             basis
         )
 
-        if evidence:
+        sold_logic = sold_price_logic_for_basis(
+            conn,
+            row,
+            basis
+        )
+
+        if sold_logic:
             evidence_rows = []
-            for candidate in evidence[:25]:
-                sold = candidate["row"]
+
+            for entry in sold_logic[:35]:
+                sold = entry["row"]
+                decision = entry["decision"]
+                reasons = ", ".join(entry.get("condition_reasons") or [])
+
+                if decision == "USED":
+                    decision_label = "USED"
+                elif decision == "EXCLUDED_OUTLIER":
+                    decision_label = "EXCLUDED · PRICE OUTLIER"
+                else:
+                    decision_label = "EXCLUDED · FAULT/PARTS"
+
+                adjustment = entry.get("condition_adjustment_pct")
+                adjustment_text = (
+                    f"+{adjustment:.0f}%"
+                    if adjustment
+                    else "—"
+                )
+
+                normalised = entry.get("normalised_total")
+                normalised_text = (
+                    money(normalised)
+                    if normalised is not None
+                    else "—"
+                )
+
+                condition_text = entry.get("condition_class") or "WORKING_NORMAL"
+                if reasons:
+                    condition_text += " · " + reasons
+
+                match_bits = []
+                if entry.get("spec_tier"):
+                    match_bits.append(str(entry["spec_tier"]))
+                if entry.get("tier"):
+                    match_bits.append(str(entry["tier"]))
+                match_text = " / ".join(match_bits) or "—"
+
                 evidence_rows.append(
                     "<tr>"
                     f"<td>{html.escape(sold['title'] or '')}</td>"
-                    f"<td class='money'>{money(sold['delivered_price'])}</td>"
-                    f"<td class='money'>{money(sold['avg_sold_price'])}</td>"
-                    f"<td class='money'>{money(sold['avg_postage'])}</td>"
-                    f"<td>{int(sold['units_sold'] or 1)}</td>"
+                    f"<td class='money'>{money(entry['raw_total'])}</td>"
+                    f"<td>{html.escape(condition_text)}</td>"
+                    f"<td>{adjustment_text}</td>"
+                    f"<td class='money'>{normalised_text}</td>"
+                    f"<td>{html.escape(decision_label)}</td>"
+                    f"<td>{html.escape(match_text)}</td>"
                     f"<td>{html.escape(sold['last_sold'] or '')}</td>"
-                    f"<td>{candidate['similarity']}</td>"
-                    f"<td>{html.escape(candidate['tier'])}</td>"
                     "</tr>"
                 )
 
+            used_count = sum(
+                entry["decision"] == "USED"
+                for entry in sold_logic
+            )
+            adjusted_count = sum(
+                entry["decision"] == "USED"
+                and (entry.get("condition_adjustment_pct") or 0) > 0
+                for entry in sold_logic
+            )
+            condition_excluded = sum(
+                entry["decision"] == "EXCLUDED_CONDITION"
+                for entry in sold_logic
+            )
+            outlier_excluded = sum(
+                entry["decision"] == "EXCLUDED_OUTLIER"
+                for entry in sold_logic
+            )
+
+            logic_summary = (
+                f"Used {used_count}; "
+                f"condition-adjusted {adjusted_count}; "
+                f"fault/parts excluded {condition_excluded}; "
+                f"price outliers excluded {outlier_excluded}. "
+                "Moderate working damage is normalised +12% and down-weighted; "
+                "minor faults +6% and down-weighted. Serious/non-working sales are not valued as working laptops."
+            )
+
             evidence_html = (
                 "<details class='evidence'>"
-                "<summary>Show sold evidence</summary>"
+                "<summary>Show sold-price logic</summary>"
+                "<div class='small' style='margin:8px 0 10px'>"
+                + html.escape(logic_summary)
+                + "</div>"
                 "<table class='evidence-table'>"
                 "<thead><tr>"
-                "<th>Sold listing</th><th>Delivered</th>"
-                "<th>Avg sold</th><th>Postage</th>"
-                "<th>Sales</th><th>Last sold</th>"
-                "<th>Match</th><th>Tier</th>"
+                "<th>Sold listing</th><th>Raw delivered</th>"
+                "<th>Condition assessment</th><th>Adjustment</th>"
+                "<th>Value used</th><th>Decision</th>"
+                "<th>Match</th><th>Last sold</th>"
                 "</tr></thead><tbody>"
                 + "".join(evidence_rows)
                 + "</tbody></table></details>"
             )
+
             sales_wording = (
                 f"{sum(c['units'] for c in evidence)} sales "
                 f"from {len(evidence)} sold listings"
