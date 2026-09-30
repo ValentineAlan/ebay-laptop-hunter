@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.43"
+APP_VERSION = "0.9.44"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -782,6 +782,9 @@ def init_db():
         "win11_cpu_mark": "INTEGER",
 
         "valuation_research_at": "TEXT",
+
+        "telegram_notified_at": "TEXT",
+        "telegram_notify_error": "TEXT",
 
         "listed_at": "TEXT",
         "active": "INTEGER DEFAULT 1",
@@ -7993,6 +7996,174 @@ def revalue_all(conn):
         ))
 
     conn.commit()
+
+
+# ============================================================
+# TELEGRAM DEAL ALERTS
+# ============================================================
+
+def telegram_config():
+    return (
+        os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(),
+        os.environ.get("TELEGRAM_CHAT_ID", "").strip(),
+    )
+
+
+def telegram_enabled():
+    token, chat_id = telegram_config()
+    return bool(token and chat_id)
+
+
+def telegram_deal_message(row):
+    specs = []
+    if row_value(row, "cpu"):
+        specs.append(str(row_value(row, "cpu")))
+    if row_value(row, "ram_gb"):
+        specs.append(f"{int(row_value(row, 'ram_gb'))}GB RAM")
+    if row_value(row, "storage_gb"):
+        storage = int(row_value(row, "storage_gb"))
+        specs.append(
+            f"{storage // 1024}TB storage"
+            if storage >= 1024 and storage % 1024 == 0
+            else f"{storage}GB storage"
+        )
+
+    lines = [
+        "🔥 New LaptopLander deal",
+        "",
+        str(row_value(row, "title") or "eBay laptop"),
+    ]
+
+    if specs:
+        lines.append(" · ".join(specs))
+
+    lines.extend([
+        "",
+        f"Price: {money(row_value(row, 'total'))} delivered",
+        f"Estimated value: {money(row_value(row, 'estimated_value'))}",
+        (
+            f"Under value: {money(row_value(row, 'undervaluation_gbp'))} "
+            f"/ {float(row_value(row, 'undervaluation_pct') or 0):.1f}%"
+        ),
+        f"Deal score: {float(row_value(row, 'deal_score') or 0):.0f}",
+    ])
+
+    condition = normalise(row_value(row, "condition"))
+    if condition:
+        lines.append(f"Condition: {condition}")
+
+    url = str(row_value(row, "url") or "").strip()
+    if url:
+        lines.extend(["", url])
+
+    return "\n".join(lines)
+
+
+def send_telegram_message(text):
+    token, chat_id = telegram_config()
+    if not token or not chat_id:
+        return False, "Telegram credentials are not configured"
+
+    endpoint = f"https://api.telegram.org/bot{token}/sendMessage"
+    body = urllib.parse.urlencode({
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": "true",
+    }).encode("utf-8")
+
+    request = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=12) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        if payload.get("ok") is True:
+            return True, ""
+        return False, str(payload.get("description") or "Telegram returned ok=false")[:300]
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"[:300]
+
+
+def repair_v0944_telegram_notification_baseline(conn):
+    """Do not notify the channel about deals that existed before Telegram alerts."""
+    key = "v0.9.44_telegram_notification_baseline"
+    if conn.execute(
+        "SELECT 1 FROM app_migrations WHERE migration_key=?",
+        (key,),
+    ).fetchone():
+        return
+
+    baseline = iso_now()
+    conn.execute(
+        """
+        UPDATE listings
+        SET telegram_notified_at=?
+        WHERE telegram_notified_at IS NULL
+        """,
+        (baseline,),
+    )
+    conn.execute(
+        "INSERT INTO app_migrations(migration_key,applied_at) VALUES (?,?)",
+        (key, baseline),
+    )
+    conn.commit()
+    print("Telegram alerts: existing listings baselined; only future deals will notify")
+
+
+def notify_pending_telegram_deals(conn):
+    if not telegram_enabled():
+        return 0
+
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM listings
+        WHERE telegram_notified_at IS NULL
+          AND COALESCE(active,1)=1
+          AND deal_score IS NOT NULL
+          AND deal_score > 0
+          AND undervaluation_gbp IS NOT NULL
+          AND undervaluation_gbp >= ?
+          AND undervaluation_pct IS NOT NULL
+          AND undervaluation_pct >= ?
+        ORDER BY first_seen ASC
+        """,
+        (MIN_UNDERVALUE_GBP, MIN_UNDERVALUE_PCT),
+    ).fetchall()
+
+    sent = 0
+    for row in rows:
+        ok, error = send_telegram_message(telegram_deal_message(row))
+        if ok:
+            conn.execute(
+                """
+                UPDATE listings
+                SET telegram_notified_at=?, telegram_notify_error=NULL
+                WHERE item_id=?
+                """,
+                (iso_now(), row["item_id"]),
+            )
+            conn.commit()
+            sent += 1
+            print(f"Telegram alert sent: {row['item_id']} {row['title']}")
+        else:
+            conn.execute(
+                """
+                UPDATE listings
+                SET telegram_notify_error=?
+                WHERE item_id=?
+                """,
+                (error, row["item_id"]),
+            )
+            conn.commit()
+            print(f"Telegram alert failed: {row['item_id']} {error}")
+            break
+
+    return sent
 
 
 # ============================================================
@@ -16009,6 +16180,10 @@ def run_cycle(
         conn
     )
 
+    telegram_sent = notify_pending_telegram_deals(conn)
+    if telegram_sent:
+        print(f"Telegram alerts sent  : {telegram_sent}")
+
     total_api = browse_usage_today(
         conn
     )
@@ -16122,6 +16297,7 @@ def main():
     with connect_db() as migration_conn:
         repair_v078_model_and_sold_cache(migration_conn)
         repair_v080_valuation_cache(migration_conn)
+        repair_v0944_telegram_notification_baseline(migration_conn)
     migration_conn.close()
 
     print(
