@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.60"
+APP_VERSION = "0.10.0"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -110,6 +110,10 @@ PRODUCT_RESEARCH_LIVE_SID = "/data/ebaysid.current"
 PRODUCT_RESEARCH_REFRESH_REQUEST = "/data/ebaysid.refresh-request"
 PRODUCT_RESEARCH_SESSION_STATE = "/data/product-research-session.json"
 PRODUCT_RESEARCH_HELPER_STATE = "/data/ebaysid-helper-status.json"
+PRODUCT_RESEARCH_BROWSER_REQUEST = "/data/product-research-browser-request.json"
+PRODUCT_RESEARCH_BROWSER_RESPONSE = "/data/product-research-browser-response.json"
+PRODUCT_RESEARCH_BROWSER_TIMEOUT_SECONDS = 65
+PRODUCT_RESEARCH_BROWSER_POLL_SECONDS = 0.10
 PRODUCT_RESEARCH_REFRESH_WAIT_SECONDS = 25
 PRODUCT_RESEARCH_REFRESH_POLL_SECONDS = 0.5
 PRODUCT_RESEARCH_SESSION_PROBE_SECONDS = 300
@@ -5756,6 +5760,9 @@ _product_research_rate = {
 }
 
 
+_product_research_browser_lock = threading.Lock()
+
+
 def _product_research_load_rate_state():
     global _product_research_rate_loaded
 
@@ -5924,67 +5931,170 @@ def _product_research_record_429(exc):
 
 
 
-def _product_research_fetch(url, cookie):
+
+def _product_research_fetch(url, cookie=None):
+    """
+    Execute Product Research inside the persistent Chromium session.
+
+    Hunter writes a request to the shared /data volume. The sid-helper,
+    attached to the real Chromium session through Playwright/CDP, performs
+    fetch() inside ebay.co.uk and returns the response.
+
+    cookie is retained only for compatibility with old callers.
+    """
     _product_research_wait_for_slot()
 
-    req = urllib.request.Request(
-        url,
-        headers={
-            "Accept": "*/*",
-            "Cookie": cookie,
-            "Referer": "https://www.ebay.co.uk/sh/research",
-            "User-Agent": "Mozilla/5.0",
-            "X-Requested-With": "XMLHttpRequest",
-        },
-    )
+    request_id = secrets.token_hex(16)
+
+    request_payload = {
+        "request_id": request_id,
+        "requested_at": iso_now(),
+        "url": url,
+    }
+
+    with _product_research_browser_lock:
+        # Remove a stale response from an earlier request.
+        try:
+            if os.path.exists(PRODUCT_RESEARCH_BROWSER_RESPONSE):
+                os.unlink(PRODUCT_RESEARCH_BROWSER_RESPONSE)
+        except OSError:
+            pass
+
+        _atomic_json_write(
+            PRODUCT_RESEARCH_BROWSER_REQUEST,
+            request_payload,
+        )
+
+        deadline = (
+            time.monotonic()
+            + PRODUCT_RESEARCH_BROWSER_TIMEOUT_SECONDS
+        )
+
+        response_payload = None
+
+        while time.monotonic() < deadline:
+            candidate = _read_json_file(
+                PRODUCT_RESEARCH_BROWSER_RESPONSE
+            )
+
+            if candidate.get("request_id") == request_id:
+                response_payload = candidate
+                break
+
+            time.sleep(
+                PRODUCT_RESEARCH_BROWSER_POLL_SECONDS
+            )
+
+        if response_payload is None:
+            _session_state_update(
+                status="NOT WORKING",
+                last_checked_at=iso_now(),
+                last_failure_at=iso_now(),
+                message=(
+                    "Timed out waiting for Chromium "
+                    "Product Research helper"
+                ),
+            )
+
+            raise RuntimeError(
+                "PRODUCT_RESEARCH_BROWSER_TIMEOUT"
+            )
+
+        try:
+            os.unlink(
+                PRODUCT_RESEARCH_BROWSER_RESPONSE
+            )
+        except OSError:
+            pass
+
+    error = response_payload.get("error")
+
+    if error:
+        raise RuntimeError(
+            "PRODUCT_RESEARCH_BROWSER_ERROR:"
+            + str(error)[:500]
+        )
 
     try:
-        # Product Research has its own adaptive limiter. Deliberately do not
-        # use ebay_urlopen(), whose 429 cooldown is shared with Browse.
-        with urllib.request.urlopen(req, timeout=45) as response:
-            status = getattr(response, "status", None)
-            content_type = response.headers.get("Content-Type", "")
-            raw_bytes = response.read()
-            raw = raw_bytes.decode("utf-8", errors="replace")
+        status = int(
+            response_payload.get("status") or 0
+        )
+    except Exception:
+        status = 0
 
-    except urllib.error.HTTPError as exc:
-        if exc.code == 429:
-            _product_research_record_429(exc)
-            raise ProductResearchRateLimited(
-                "Product Research returned HTTP 429 Too Many Requests"
-            ) from exc
-        raise
+    content_type = str(
+        response_payload.get("content_type") or ""
+    )
 
-    # HTTP 200 alone is not proof that Product Research worked. eBay may
-    # return an empty response or an HTML login/challenge document.
+    raw = response_payload.get("body")
+
+    if raw is None:
+        raw = ""
+
+    if not isinstance(raw, str):
+        raw = str(raw)
+
+    # Preserve the existing adaptive Product Research rate limiter.
+    if status == 429:
+        class Browser429:
+            headers = {}
+
+        retry_after = response_payload.get(
+            "retry_after"
+        )
+
+        if retry_after not in (None, ""):
+            Browser429.headers = {
+                "Retry-After": str(retry_after)
+            }
+
+        _product_research_record_429(
+            Browser429()
+        )
+
+        raise ProductResearchRateLimited(
+            "Product Research returned "
+            "HTTP 429 Too Many Requests"
+        )
+
+    if status < 200 or status >= 300:
+        print(
+            "Product Research browser HTTP error: "
+            f"HTTP={status} "
+            f"content_type={content_type!r}",
+            flush=True,
+        )
+
+        raise RuntimeError(
+            f"PRODUCT_RESEARCH_HTTP_{status}"
+        )
+
     if not raw.strip():
         print(
-            "Product Research invalid response: "
+            "Product Research browser response: "
             f"HTTP={status} "
             f"content_type={content_type!r} "
-            f"bytes={len(raw_bytes)} "
             "EMPTY BODY",
             flush=True,
         )
 
-    elif raw.lstrip().startswith("<"):
+        return raw
+
+    if raw.lstrip().startswith("<"):
         preview = re.sub(
             r"\s+",
             " ",
             raw.lstrip()[:500],
         )
+
         print(
-            "Product Research invalid response: "
+            "Product Research browser returned HTML: "
             f"HTTP={status} "
             f"content_type={content_type!r} "
-            f"bytes={len(raw_bytes)} "
-            f"HTML={preview!r}",
+            f"preview={preview!r}",
             flush=True,
         )
 
-    # Do NOT call _product_research_record_success() here.
-    # A HTTP transport success only becomes a Product Research success after
-    # product_research_search() finds a SearchResultsModule.
     return raw
 
 
@@ -6004,7 +6114,10 @@ def _decode_json_modules(raw):
             break
 
         try:
-            obj, pos = decoder.raw_decode(raw, pos)
+            obj, pos = decoder.raw_decode(
+                raw,
+                pos,
+            )
         except json.JSONDecodeError:
             preview = re.sub(
                 r"\s+",
@@ -6019,9 +6132,6 @@ def _decode_json_modules(raw):
                 flush=True,
             )
 
-            # Return no modules rather than throwing JSONDecodeError.
-            # product_research_search() can then detect an expired/challenged
-            # browser session and invoke the existing SID refresh path.
             return []
 
         if isinstance(obj, dict):
@@ -6083,20 +6193,17 @@ def _research_text(value):
     return ""
 
 
+
 def product_research_search(keywords, offset=0):
-    base_cookie = _curl_cookie_header()
-    if not base_cookie:
-        _session_state_update(
-            status="NOT WORKING",
-            last_failure_at=iso_now(),
-            message="product-research.curl contains no usable Cookie header",
-        )
-        raise RuntimeError("PRODUCT_RESEARCH_COOKIE_NOT_FOUND")
-
-    cookie, _ = _cookie_with_live_sid(base_cookie)
-
     now_ms = int(time.time() * 1000)
-    start_ms = now_ms - PRODUCT_RESEARCH_DAY_RANGE * 86400 * 1000
+
+    start_ms = (
+        now_ms
+        - PRODUCT_RESEARCH_DAY_RANGE
+        * 86400
+        * 1000
+    )
+
     params = {
         "marketplace": "EBAY-UK",
         "keywords": keywords,
@@ -6104,97 +6211,145 @@ def product_research_search(keywords, offset=0):
         "endDate": str(now_ms),
         "startDate": str(start_ms),
         "categoryId": CATEGORY,
-        "conditionId": list(PRODUCT_RESEARCH_ALLOWED_CONDITION_IDS),
+        "conditionId": list(
+            PRODUCT_RESEARCH_ALLOWED_CONDITION_IDS
+        ),
         "offset": str(offset),
         "limit": str(PRODUCT_RESEARCH_LIMIT),
         "tabName": "SOLD",
         "tz": "Europe/London",
         "modules": "searchResults",
     }
+
     url = (
         "https://www.ebay.co.uk/sh/research/api/search?"
-        + urllib.parse.urlencode(params, doseq=True)
+        + urllib.parse.urlencode(
+            params,
+            doseq=True,
+        )
     )
 
-    # First attempt uses the freshest SID already supplied by the local browser helper.
-    raw = _product_research_fetch(url, cookie)
+    # Request now runs INSIDE Chromium rather than through urllib.
+    raw = _product_research_fetch(url)
+
     modules = _decode_json_modules(raw)
+
     search = next(
-        (x for x in modules if x.get("_type") == "SearchResultsModule"),
+        (
+            obj
+            for obj in modules
+            if obj.get("_type")
+            == "SearchResultsModule"
+        ),
         None,
     )
 
     if search is not None:
+        # Only an actual Product Research result counts as success.
         _product_research_record_success()
-        sid = _extract_ebaysid(cookie)
+
+        sid = _read_live_ebaysid()
+
         _session_state_update(
             status="WORKING",
             last_checked_at=iso_now(),
             last_success_at=iso_now(),
             ebaysid_hash=_sid_hash(sid),
-            message="Product Research sold search succeeded",
+            last_refresh_source="TrueNAS Chromium",
+            message=(
+                "Product Research sold search "
+                "succeeded inside Chromium"
+            ),
         )
+
         return search.get("results") or []
 
-    if _product_research_invalid_session(raw, modules):
-        failed_sid = _extract_ebaysid(cookie)
+    lowered = (raw or "").lower()
+
+    browser_challenge = any(
+        marker in lowered
+        for marker in (
+            "pardon our interruption",
+            "splashui/challenge",
+            "security measure",
+            "captcha",
+            "challenge",
+        )
+    )
+
+    auth_failure = any(
+        marker in lowered
+        for marker in (
+            "signin.ebay",
+            "sign in",
+            "auth_required",
+            "invalid_session",
+        )
+    )
+
+    # Retain compatibility with normal eBay invalid-session JSON.
+    try:
+        auth_failure = (
+            auth_failure
+            or _product_research_invalid_session(
+                raw,
+                modules,
+            )
+        )
+    except Exception:
+        pass
+
+    if browser_challenge or auth_failure:
+        sid = _read_live_ebaysid()
+
+        reason = (
+            "challenged"
+            if browser_challenge
+            else "signed out"
+        )
+
         _session_state_update(
             status="NOT WORKING",
             last_checked_at=iso_now(),
             last_failure_at=iso_now(),
-            ebaysid_hash=_sid_hash(failed_sid),
-            message="eBay returned auth_required / invalid_session; requesting browser refresh",
+            ebaysid_hash=_sid_hash(sid),
+            message=(
+                "Chromium Product Research session "
+                f"is {reason}"
+            ),
         )
-        _request_browser_sid_refresh(keywords, failed_sid)
-        refreshed_sid = _wait_for_new_live_sid(failed_sid)
 
-        if refreshed_sid:
-            retry_cookie = _replace_ebaysid(cookie, refreshed_sid)
-            _session_state_update(
-                last_refresh_at=iso_now(),
-                last_refresh_source="TrueNAS Chromium",
-                ebaysid_hash=_sid_hash(refreshed_sid),
-            )
-            print(
-                "Product Research session refreshed from TrueNAS Chromium: "
-                f"{_sid_hash(refreshed_sid)}"
-            )
-            raw = _product_research_fetch(url, retry_cookie)
-            modules = _decode_json_modules(raw)
-            search = next(
-                (x for x in modules if x.get("_type") == "SearchResultsModule"),
-                None,
-            )
-            if search is not None:
-                _product_research_record_success()
-                _session_state_update(
-                    status="WORKING",
-                    last_checked_at=iso_now(),
-                    last_success_at=iso_now(),
-                    ebaysid_hash=_sid_hash(refreshed_sid),
-                    message="Product Research succeeded after automatic Chromium refresh",
-                )
-                return search.get("results") or []
-
-        _session_state_update(
-            status="NOT WORKING",
-            last_checked_at=iso_now(),
-            last_failure_at=iso_now(),
-            message="Product Research session refresh did not recover within timeout",
+        raise RuntimeError(
+            "PRODUCT_RESEARCH_BROWSER_SESSION_CHALLENGED"
+            if browser_challenge
+            else "PRODUCT_RESEARCH_BROWSER_SESSION_INVALID"
         )
-        raise RuntimeError("PRODUCT_RESEARCH_INVALID_SESSION")
 
-    types = ",".join(x.get("_type", "?") for x in modules)
+    types = ",".join(
+        obj.get("_type", "?")
+        for obj in modules
+    )
+
     _session_state_update(
-        status="WORKING",
+        status="NOT WORKING",
         last_checked_at=iso_now(),
+        last_failure_at=iso_now(),
         message=(
-            "eBay session authenticated, but Product Research returned "
-            + (types or "an unexpected response")
+            "Chromium Product Research returned "
+            + (
+                types
+                or "an unexpected response"
+            )
         ),
     )
-    raise RuntimeError("PRODUCT_RESEARCH_RESPONSE:" + (types or "?"))
 
+    raise RuntimeError(
+        "PRODUCT_RESEARCH_RESPONSE:"
+        + (
+            types
+            or "?"
+        )
+    )
 
 def _product_research_session_monitor():
     """Keep dashboard session state current even when no valuation search is due."""
