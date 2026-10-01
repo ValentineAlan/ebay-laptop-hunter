@@ -490,10 +490,14 @@ def mark_manual_challenge(page, request_id=None):
     )
 
 
+
 def watch_manual_recovery(context):
     """
-    Detect the transition caused by a user manually completing eBay's
-    visible browser challenge.
+    Watch for genuine manual Product Research recovery.
+
+    Closing tabs, opening a blank page, or browsing ordinary eBay pages does
+    not count as recovery. We only emit the recovery signal when a real
+    ebay.co.uk/sh/research page is visible and is no longer challenged.
     """
     if not MANUAL_CHALLENGE_FILE.exists():
         return
@@ -502,26 +506,64 @@ def watch_manual_recovery(context):
         MANUAL_CHALLENGE_FILE
     )
 
-    page = choose_page(
-        context
+    pages = list(
+        context.pages
     )
 
+    # Do not create a new page here. The user may intentionally have closed
+    # every Chromium tab to let the session remain completely idle.
+    if not pages:
+        return
+
+    research_page = None
+
+    for candidate in pages:
+        url = (
+            candidate.url
+            or ""
+        ).lower()
+
+        if (
+            "ebay.co.uk/sh/research"
+            in url
+            or "ebay.co.uk/splashui/"
+            in url
+        ):
+            research_page = candidate
+            break
+
+    # Browsing ordinary eBay is useful as a manual test, but it is not proof
+    # that Product Research itself has recovered.
+    if research_page is None:
+        return
+
     state, title, url = page_state(
-        page
+        research_page
     )
 
     seen = bool(
-        marker.get("challenge_seen_in_page")
+        marker.get(
+            "challenge_seen_in_page"
+        )
     )
 
-    # If the first navigation had not finished rendering the challenge yet,
-    # allow a later poll to establish that it really became CHALLENGED.
     if state == "CHALLENGED":
         if not seen:
-            marker["challenge_seen_in_page"] = True
-            marker["challenge_seen_at"] = now_iso()
-            marker["page_title"] = title
-            marker["page_url"] = url
+            marker[
+                "challenge_seen_in_page"
+            ] = True
+
+            marker[
+                "challenge_seen_at"
+            ] = now_iso()
+
+            marker[
+                "page_title"
+            ] = title
+
+            marker[
+                "page_url"
+            ] = url
 
             atomic_json(
                 MANUAL_CHALLENGE_FILE,
@@ -529,16 +571,26 @@ def watch_manual_recovery(context):
             )
 
             print(
-                "Product Research manual challenge visible in Chromium",
+                "Product Research block visible in Chromium",
                 flush=True,
             )
 
         return
 
-    # Do not generate a recovery signal unless we previously observed the
-    # actual challenge page. This prevents an ordinary Product Research page
-    # from being mistaken for successful verification.
     if not seen:
+        return
+
+    lowered_url = (
+        url
+        or ""
+    ).lower()
+
+    # Strong requirement: the page that looks recovered must actually be
+    # Product Research, not eBay home/search/account/etc.
+    if (
+        "ebay.co.uk/sh/research"
+        not in lowered_url
+    ):
         return
 
     if state == "CONNECTED":
@@ -553,12 +605,10 @@ def watch_manual_recovery(context):
             pass
 
         print(
-            "Product Research manual verification completed; "
-            "recovery signal written",
+            "Product Research page appears available again; "
+            "immediate recovery probe requested",
             flush=True,
         )
-
-
 
 def process_research_request(context):
     if not RESEARCH_REQUEST_FILE.exists():

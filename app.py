@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.2"
+APP_VERSION = "0.10.3"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -114,7 +114,12 @@ PRODUCT_RESEARCH_BROWSER_REQUEST = "/data/product-research-browser-request.json"
 PRODUCT_RESEARCH_BROWSER_RESPONSE = "/data/product-research-browser-response.json"
 PRODUCT_RESEARCH_BROWSER_TIMEOUT_SECONDS = 65
 PRODUCT_RESEARCH_BROWSER_POLL_SECONDS = 0.10
-PRODUCT_RESEARCH_CHALLENGE_COOLDOWN_SECONDS = 30 * 60
+PRODUCT_RESEARCH_CHALLENGE_COOLDOWNS = (
+    60 * 60,       # first consecutive block: 1 hour
+    2 * 60 * 60,   # second: 2 hours
+    4 * 60 * 60,   # third: 4 hours
+    6 * 60 * 60,   # fourth and subsequent: 6 hours
+)
 PRODUCT_RESEARCH_CIRCUIT_STATE = "/data/product-research-circuit.json"
 PRODUCT_RESEARCH_RECOVERY_SIGNAL = "/data/product-research-recovery.signal"
 PRODUCT_RESEARCH_MANUAL_CHALLENGE = "/data/product-research-manual-challenge.json"
@@ -5983,27 +5988,75 @@ def _product_research_circuit_remaining():
 
 
 
-def _product_research_challenge_telegram_message():
-    return (
-        "eBay Product Research needs verification\n\n"
-        "Status: CHALLENGED\n"
-        "Product Research is paused.\n"
-        "The valuation backlog is preserved.\n\n"
-        "Open Chromium:\n"
-        f"{PRODUCT_RESEARCH_BROWSER_GUI_URL}\n\n"
-        "Complete the eBay verification in the browser. "
-        "LaptopLander will detect recovery and resume automatically."
+
+def _product_research_cooldown_label(seconds):
+    seconds = int(seconds)
+
+    if seconds % 3600 == 0:
+        hours = seconds // 3600
+        return (
+            f"{hours} hour"
+            if hours == 1
+            else f"{hours} hours"
+        )
+
+    minutes = max(
+        1,
+        seconds // 60,
     )
+
+    return (
+        f"{minutes} minute"
+        if minutes == 1
+        else f"{minutes} minutes"
+    )
+
+
+
+def _product_research_challenge_telegram_message(
+    cooldown_seconds=None,
+    challenge_count=None,
+):
+    lines = [
+        "eBay Product Research is blocked",
+        "",
+        "LaptopLander has paused Product Research.",
+        "The valuation backlog is preserved.",
+        "",
+        "Open Chromium:",
+        PRODUCT_RESEARCH_BROWSER_GUI_URL,
+        "",
+        "Leave eBay alone for a while, then test it manually.",
+        "If Product Research loads normally, LaptopLander will "
+        "detect recovery and resume automatically.",
+        "",
+        "Do not repeatedly refresh the blocked Product Research page.",
+    ]
+
+    if cooldown_seconds:
+        lines.extend([
+            "",
+            "Automatic fallback probe: "
+            + _product_research_cooldown_label(
+                cooldown_seconds
+            ),
+        ])
+
+    if challenge_count:
+        lines.append(
+            f"Consecutive blocks: {challenge_count}"
+        )
+
+    return "\n".join(lines)
 
 
 def _product_research_recovered_telegram_message():
     return (
         "eBay Product Research restored\n\n"
-        "The Chromium session is working again.\n"
-        "Product Research has resumed and the valuation backlog "
-        "will continue processing automatically."
+        "A real Product Research search succeeded.\n"
+        "The block escalation has been reset.\n"
+        "LaptopLander has resumed valuation processing automatically."
     )
-
 
 
 def _product_research_open_circuit(reason):
@@ -6011,6 +6064,26 @@ def _product_research_open_circuit(reason):
 
     already_open = bool(
         previous.get("opened_at")
+    )
+
+    try:
+        previous_count = int(
+            previous.get("challenge_count") or 0
+        )
+    except Exception:
+        previous_count = 0
+
+    challenge_count = previous_count + 1
+
+    cooldown_index = min(
+        challenge_count - 1,
+        len(PRODUCT_RESEARCH_CHALLENGE_COOLDOWNS) - 1,
+    )
+
+    cooldown_seconds = int(
+        PRODUCT_RESEARCH_CHALLENGE_COOLDOWNS[
+            cooldown_index
+        ]
     )
 
     now = time.time()
@@ -6024,40 +6097,53 @@ def _product_research_open_circuit(reason):
             previous.get("opened_epoch")
             or now
         ),
+        "last_challenge_at": iso_now(),
+        "last_challenge_epoch": now,
         "probe_after_epoch": (
-            now
-            + PRODUCT_RESEARCH_CHALLENGE_COOLDOWN_SECONDS
+            now + cooldown_seconds
         ),
         "reason": str(reason),
+        "challenge_count": challenge_count,
+        "cooldown_seconds": cooldown_seconds,
         "telegram_alert_sent": bool(
             previous.get("telegram_alert_sent")
         ),
     }
 
-    # Send only one Telegram challenge alert for a continuous outage.
-    if not state["telegram_alert_sent"]:
+    # One Telegram alert for each newly observed block event. A fallback
+    # probe that gets blocked again is a new event and therefore deserves
+    # one updated alert showing the longer cooldown.
+    should_alert = (
+        not already_open
+        or challenge_count > previous_count
+    )
+
+    if should_alert:
         try:
             ok, error = send_telegram_message(
-                _product_research_challenge_telegram_message()
+                _product_research_challenge_telegram_message(
+                    cooldown_seconds=cooldown_seconds,
+                    challenge_count=challenge_count,
+                )
             )
 
             if ok:
                 state["telegram_alert_sent"] = True
 
                 print(
-                    "Product Research challenge alert sent to Telegram",
+                    "Product Research block alert sent to Telegram",
                     flush=True,
                 )
             else:
                 print(
-                    "Product Research challenge Telegram alert failed: "
+                    "Product Research block Telegram alert failed: "
                     f"{error}",
                     flush=True,
                 )
 
         except Exception as exc:
             print(
-                "Product Research challenge Telegram alert error:",
+                "Product Research block Telegram alert error:",
                 repr(exc),
                 flush=True,
             )
@@ -6068,30 +6154,30 @@ def _product_research_open_circuit(reason):
             state,
         )
 
+    cooldown_label = (
+        _product_research_cooldown_label(
+            cooldown_seconds
+        )
+    )
+
     _session_state_update(
         status="CHALLENGED",
         last_checked_at=iso_now(),
         last_failure_at=iso_now(),
         message=(
-            "Product Research circuit open: "
-            f"{reason}. Manual verification available at "
-            f"{PRODUCT_RESEARCH_BROWSER_GUI_URL}"
+            "Product Research blocked; "
+            f"consecutive block #{challenge_count}; "
+            f"fallback probe in {cooldown_label}. "
+            f"Browser: {PRODUCT_RESEARCH_BROWSER_GUI_URL}"
         ),
     )
 
-    if not already_open:
-        print(
-            "Product Research circuit OPEN: "
-            f"{reason}; waiting for manual verification "
-            "or scheduled recovery probe",
-            flush=True,
-        )
-    else:
-        print(
-            "Product Research circuit remains OPEN: "
-            f"{reason}",
-            flush=True,
-        )
+    print(
+        "Product Research circuit OPEN: "
+        f"{reason}; consecutive block #{challenge_count}; "
+        f"fallback probe in {cooldown_label}",
+        flush=True,
+    )
 
 
 def _product_research_close_circuit():
@@ -6111,13 +6197,14 @@ def _product_research_close_circuit():
         except OSError:
             pass
 
-    # Consume any stale recovery/manual-challenge signals.
-    for path in (
+    for file_path in (
         PRODUCT_RESEARCH_RECOVERY_SIGNAL,
         PRODUCT_RESEARCH_MANUAL_CHALLENGE,
     ):
         try:
-            os.unlink(path)
+            os.unlink(
+                file_path
+            )
         except FileNotFoundError:
             pass
         except OSError:
@@ -6126,7 +6213,8 @@ def _product_research_close_circuit():
     if was_open:
         print(
             "Product Research circuit CLOSED: "
-            "Chromium verification succeeded",
+            "real Product Research response succeeded; "
+            "block escalation reset",
             flush=True,
         )
 
