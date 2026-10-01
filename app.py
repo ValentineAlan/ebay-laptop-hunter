@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.56"
+APP_VERSION = "0.9.57"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -6851,17 +6851,24 @@ def collect_needed_sold_data(conn, maximum=None):
         SELECT COUNT(*) AS n
         FROM listings
         WHERE estimated_value IS NULL
-          AND cpu IS NOT NULL AND trim(cpu) <> ''
+          AND COALESCE(active,1)=1
+          AND classifier_version=?
+          AND COALESCE(rules_revision,0)=?
+          AND cpu IS NOT NULL
+          AND trim(cpu) <> ''
           AND (
                 (brand IS NOT NULL AND trim(brand) <> '')
                 OR
                 (model IS NOT NULL AND trim(model) <> '')
               )
-    """).fetchone()["n"]
+    """, (
+        CLASSIFIER_VERSION,
+        current_rules_revision(conn),
+    )).fetchone()["n"]
 
     print(
         f"Awaiting reanalysis: attempted {attempted_listings} listings this cycle; "
-        f"{remaining} identifiable listings currently unvalued"
+        f"{remaining} active current listings currently unvalued"
     )
     return done
 
