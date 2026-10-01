@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.0"
+APP_VERSION = "0.10.1"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -114,6 +114,9 @@ PRODUCT_RESEARCH_BROWSER_REQUEST = "/data/product-research-browser-request.json"
 PRODUCT_RESEARCH_BROWSER_RESPONSE = "/data/product-research-browser-response.json"
 PRODUCT_RESEARCH_BROWSER_TIMEOUT_SECONDS = 65
 PRODUCT_RESEARCH_BROWSER_POLL_SECONDS = 0.10
+PRODUCT_RESEARCH_CHALLENGE_COOLDOWN_SECONDS = 30 * 60
+PRODUCT_RESEARCH_CIRCUIT_STATE = "/data/product-research-circuit.json"
+
 PRODUCT_RESEARCH_REFRESH_WAIT_SECONDS = 25
 PRODUCT_RESEARCH_REFRESH_POLL_SECONDS = 0.5
 PRODUCT_RESEARCH_SESSION_PROBE_SECONDS = 300
@@ -5932,6 +5935,106 @@ def _product_research_record_429(exc):
 
 
 
+
+_product_research_circuit_lock = threading.Lock()
+
+
+def _product_research_circuit_state():
+    with _product_research_circuit_lock:
+        state = _read_json_file(
+            PRODUCT_RESEARCH_CIRCUIT_STATE
+        )
+
+    return (
+        state
+        if isinstance(state, dict)
+        else {}
+    )
+
+
+def _product_research_circuit_is_open():
+    state = _product_research_circuit_state()
+    return bool(state.get("opened_at"))
+
+
+def _product_research_circuit_remaining():
+    state = _product_research_circuit_state()
+
+    if not state.get("opened_at"):
+        return 0
+
+    try:
+        paused_until = float(
+            state.get("probe_after_epoch") or 0
+        )
+    except Exception:
+        paused_until = 0
+
+    return max(
+        0,
+        int(paused_until - time.time()),
+    )
+
+
+def _product_research_open_circuit(reason):
+    now = time.time()
+
+    state = {
+        "opened_at": iso_now(),
+        "opened_epoch": now,
+        "probe_after_epoch": (
+            now
+            + PRODUCT_RESEARCH_CHALLENGE_COOLDOWN_SECONDS
+        ),
+        "reason": str(reason),
+    }
+
+    with _product_research_circuit_lock:
+        _atomic_json_write(
+            PRODUCT_RESEARCH_CIRCUIT_STATE,
+            state,
+        )
+
+    _session_state_update(
+        status="CHALLENGED",
+        last_checked_at=iso_now(),
+        last_failure_at=iso_now(),
+        message=(
+            "Product Research circuit open: "
+            f"{reason}; probe in "
+            f"{PRODUCT_RESEARCH_CHALLENGE_COOLDOWN_SECONDS // 60} minutes"
+        ),
+    )
+
+    print(
+        "Product Research circuit OPEN: "
+        f"{reason}; pausing normal Product Research for "
+        f"{PRODUCT_RESEARCH_CHALLENGE_COOLDOWN_SECONDS // 60} minutes",
+        flush=True,
+    )
+
+
+def _product_research_close_circuit():
+    was_open = _product_research_circuit_is_open()
+
+    with _product_research_circuit_lock:
+        try:
+            os.unlink(
+                PRODUCT_RESEARCH_CIRCUIT_STATE
+            )
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+    if was_open:
+        print(
+            "Product Research circuit CLOSED: "
+            "Chromium probe succeeded",
+            flush=True,
+        )
+
+
 def _product_research_fetch(url, cookie=None):
     """
     Execute Product Research inside the persistent Chromium session.
@@ -6194,7 +6297,25 @@ def _research_text(value):
 
 
 
-def product_research_search(keywords, offset=0):
+
+def product_research_search(
+    keywords,
+    offset=0,
+    allow_probe=False,
+):
+    if (
+        _product_research_circuit_is_open()
+        and not allow_probe
+    ):
+        remaining = (
+            _product_research_circuit_remaining()
+        )
+
+        raise RuntimeError(
+            "PRODUCT_RESEARCH_CIRCUIT_OPEN:"
+            + str(remaining)
+        )
+
     now_ms = int(time.time() * 1000)
 
     start_ms = (
@@ -6207,7 +6328,9 @@ def product_research_search(keywords, offset=0):
     params = {
         "marketplace": "EBAY-UK",
         "keywords": keywords,
-        "dayRange": str(PRODUCT_RESEARCH_DAY_RANGE),
+        "dayRange": str(
+            PRODUCT_RESEARCH_DAY_RANGE
+        ),
         "endDate": str(now_ms),
         "startDate": str(start_ms),
         "categoryId": CATEGORY,
@@ -6215,7 +6338,9 @@ def product_research_search(keywords, offset=0):
             PRODUCT_RESEARCH_ALLOWED_CONDITION_IDS
         ),
         "offset": str(offset),
-        "limit": str(PRODUCT_RESEARCH_LIMIT),
+        "limit": str(
+            PRODUCT_RESEARCH_LIMIT
+        ),
         "tabName": "SOLD",
         "tz": "Europe/London",
         "modules": "searchResults",
@@ -6229,7 +6354,6 @@ def product_research_search(keywords, offset=0):
         )
     )
 
-    # Request now runs INSIDE Chromium rather than through urllib.
     raw = _product_research_fetch(url)
 
     modules = _decode_json_modules(raw)
@@ -6245,8 +6369,10 @@ def product_research_search(keywords, offset=0):
     )
 
     if search is not None:
-        # Only an actual Product Research result counts as success.
         _product_research_record_success()
+
+        # A real Product Research response proves recovery.
+        _product_research_close_circuit()
 
         sid = _read_live_ebaysid()
 
@@ -6255,7 +6381,9 @@ def product_research_search(keywords, offset=0):
             last_checked_at=iso_now(),
             last_success_at=iso_now(),
             ebaysid_hash=_sid_hash(sid),
-            last_refresh_source="TrueNAS Chromium",
+            last_refresh_source=(
+                "TrueNAS Chromium"
+            ),
             message=(
                 "Product Research sold search "
                 "succeeded inside Chromium"
@@ -6287,7 +6415,6 @@ def product_research_search(keywords, offset=0):
         )
     )
 
-    # Retain compatibility with normal eBay invalid-session JSON.
     try:
         auth_failure = (
             auth_failure
@@ -6299,30 +6426,22 @@ def product_research_search(keywords, offset=0):
     except Exception:
         pass
 
-    if browser_challenge or auth_failure:
-        sid = _read_live_ebaysid()
-
-        reason = (
-            "challenged"
-            if browser_challenge
-            else "signed out"
-        )
-
-        _session_state_update(
-            status="NOT WORKING",
-            last_checked_at=iso_now(),
-            last_failure_at=iso_now(),
-            ebaysid_hash=_sid_hash(sid),
-            message=(
-                "Chromium Product Research session "
-                f"is {reason}"
-            ),
+    if browser_challenge:
+        _product_research_open_circuit(
+            "eBay Chromium session challenged"
         )
 
         raise RuntimeError(
             "PRODUCT_RESEARCH_BROWSER_SESSION_CHALLENGED"
-            if browser_challenge
-            else "PRODUCT_RESEARCH_BROWSER_SESSION_INVALID"
+        )
+
+    if auth_failure:
+        _product_research_open_circuit(
+            "eBay Chromium session signed out"
+        )
+
+        raise RuntimeError(
+            "PRODUCT_RESEARCH_BROWSER_SESSION_INVALID"
         )
 
     types = ",".join(
@@ -6351,32 +6470,135 @@ def product_research_search(keywords, offset=0):
         )
     )
 
+
 def _product_research_session_monitor():
-    """Keep dashboard session state current even when no valuation search is due."""
+    """
+    Maintain Product Research session state.
+
+    When the Chromium circuit is open, this monitor is the only component
+    allowed to probe for recovery.
+    """
+    last_wait_log = 0.0
+
     while True:
         try:
-            state = _read_json_file(PRODUCT_RESEARCH_SESSION_STATE)
-            checked = state.get("last_checked_at")
+            if _product_research_circuit_is_open():
+                remaining = (
+                    _product_research_circuit_remaining()
+                )
+
+                if remaining > 0:
+                    now = time.monotonic()
+
+                    # Avoid one log line every minute.
+                    if (
+                        now - last_wait_log
+                        >= 300
+                    ):
+                        print(
+                            "Product Research circuit: "
+                            f"probe suppressed for another "
+                            f"{remaining}s",
+                            flush=True,
+                        )
+                        last_wait_log = now
+
+                else:
+                    print(
+                        "Product Research circuit: "
+                        "cooldown expired; running Chromium recovery probe",
+                        flush=True,
+                    )
+
+                    try:
+                        product_research_search(
+                            PRODUCT_RESEARCH_SESSION_PROBE_QUERY,
+                            0,
+                            allow_probe=True,
+                        )
+
+                        print(
+                            "Product Research recovery probe: WORKING",
+                            flush=True,
+                        )
+
+                    except Exception as exc:
+                        print(
+                            "Product Research recovery probe:",
+                            repr(exc),
+                            flush=True,
+                        )
+
+                time.sleep(60)
+                continue
+
+            state = _read_json_file(
+                PRODUCT_RESEARCH_SESSION_STATE
+            )
+
+            checked = state.get(
+                "last_checked_at"
+            )
+
             due = True
+
             if checked:
                 try:
-                    dt = datetime.fromisoformat(str(checked).replace("Z", "+00:00"))
+                    dt = datetime.fromisoformat(
+                        str(checked).replace(
+                            "Z",
+                            "+00:00",
+                        )
+                    )
+
                     if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    age = (utcnow() - dt.astimezone(timezone.utc)).total_seconds()
-                    due = age >= PRODUCT_RESEARCH_SESSION_PROBE_SECONDS
+                        dt = dt.replace(
+                            tzinfo=timezone.utc
+                        )
+
+                    age = (
+                        utcnow()
+                        - dt.astimezone(
+                            timezone.utc
+                        )
+                    ).total_seconds()
+
+                    due = (
+                        age
+                        >= PRODUCT_RESEARCH_SESSION_PROBE_SECONDS
+                    )
+
                 except Exception:
                     due = True
+
             if due:
                 try:
-                    product_research_search(PRODUCT_RESEARCH_SESSION_PROBE_QUERY, 0)
-                    print("Product Research session monitor: WORKING")
-                except Exception as exc:
-                    print("Product Research session monitor:", repr(exc))
-        except Exception as exc:
-            print("Product Research session monitor error:", repr(exc))
-        time.sleep(60)
+                    product_research_search(
+                        PRODUCT_RESEARCH_SESSION_PROBE_QUERY,
+                        0,
+                        allow_probe=True,
+                    )
 
+                    print(
+                        "Product Research session monitor: WORKING",
+                        flush=True,
+                    )
+
+                except Exception as exc:
+                    print(
+                        "Product Research session monitor:",
+                        repr(exc),
+                        flush=True,
+                    )
+
+        except Exception as exc:
+            print(
+                "Product Research session monitor error:",
+                repr(exc),
+                flush=True,
+            )
+
+        time.sleep(60)
 
 def start_product_research_session_monitor():
     thread = threading.Thread(
@@ -17020,32 +17242,78 @@ def mark_ended_listings(conn):
 # PRODUCT RESEARCH WORKER
 # ============================================================
 
+
 def _product_research_worker():
     """
     Continuously drain sold-evidence work independently of Browse discovery.
 
-    HTTP requests are paced by _product_research_fetch(). The worker asks for
-    one Product Research query at a time so the adaptive limiter controls the
-    actual request stream rather than sending bursts once per Browse cycle.
+    A Chromium challenge opens the Product Research circuit. While open this
+    worker does not touch the sold-evidence backlog; the session monitor owns
+    recovery probing.
     """
     state = _product_research_load_rate_state()
+
     print(
         "Product Research worker: starting "
         f"at {state['interval_seconds']:.1f}s/request "
-        f"(minimum {PRODUCT_RESEARCH_MIN_INTERVAL_SECONDS:.1f}s)"
+        f"(minimum "
+        f"{PRODUCT_RESEARCH_MIN_INTERVAL_SECONDS:.1f}s)"
     )
 
-    # Do not immediately revalue the entire database at worker startup.
-    # Allow Product Research to begin draining evidence first.
     last_revalue = time.monotonic()
+    last_circuit_log = 0.0
 
     while True:
         conn = None
 
         try:
+            # Gate BEFORE opening the DB and BEFORE selecting a backlog row.
+            if _product_research_circuit_is_open():
+                remaining = (
+                    _product_research_circuit_remaining()
+                )
+
+                now = time.monotonic()
+
+                if (
+                    now - last_circuit_log
+                    >= 300
+                ):
+                    if remaining > 0:
+                        print(
+                            "Product Research worker: "
+                            "circuit open; backlog preserved; "
+                            f"recovery probe eligible in "
+                            f"{remaining}s",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            "Product Research worker: "
+                            "circuit open; backlog preserved; "
+                            "awaiting session-monitor recovery probe",
+                            flush=True,
+                        )
+
+                    last_circuit_log = now
+
+                time.sleep(
+                    60
+                    if remaining > 0
+                    else 30
+                )
+
+                continue
+
             conn = connect_db()
-            refresh_runtime_settings(conn)
-            refresh_classifier_rules(conn)
+
+            refresh_runtime_settings(
+                conn
+            )
+
+            refresh_classifier_rules(
+                conn
+            )
 
             attempted = collect_needed_sold_data(
                 conn,
@@ -17053,44 +17321,44 @@ def _product_research_worker():
             )
 
             # collect_needed_sold_data() recalculates the target listing
-            # immediately after new sold evidence is collected. Do not run
-            # revalue_all() here: that needlessly recalculates the entire
-            # listings table and can consume a full CPU core continuously.
-            #
-            # Telegram discovery remains cheap and does not require a global
-            # valuation pass.
+            # immediately after new sold evidence is collected. Avoid a
+            # whole-database revalue pass here.
             now = time.monotonic()
 
             if (
                 now - last_revalue
                 >= PRODUCT_RESEARCH_REVALUE_SECONDS
             ):
-                telegram_sent = notify_pending_telegram_deals(
-                    conn
+                telegram_sent = (
+                    notify_pending_telegram_deals(
+                        conn
+                    )
                 )
 
                 if telegram_sent:
                     print(
-                        f"Telegram alerts sent  : {telegram_sent}"
+                        "Telegram alerts sent  : "
+                        f"{telegram_sent}"
                     )
 
                 last_revalue = now
 
             if attempted <= 0:
-                time.sleep(PRODUCT_RESEARCH_WORKER_IDLE_SECONDS)
+                time.sleep(
+                    PRODUCT_RESEARCH_WORKER_IDLE_SECONDS
+                )
 
         except ProductResearchRateLimited:
-            # The adaptive state contains the real backoff deadline. A short
-            # local pause avoids a tight exception loop; the next request waits
-            # for the full backoff in _product_research_wait_for_slot().
             time.sleep(1)
 
         except sqlite3.OperationalError as exc:
             if "locked" in str(exc).lower():
                 print(
-                    "Product Research worker: database busy; retrying shortly"
+                    "Product Research worker: "
+                    "database busy; retrying shortly"
                 )
                 time.sleep(2)
+
             else:
                 print(
                     "Product Research worker DB ERROR:",
@@ -17111,7 +17379,6 @@ def _product_research_worker():
                     conn.close()
                 except Exception:
                     pass
-
 
 def start_product_research_worker():
     thread = threading.Thread(
