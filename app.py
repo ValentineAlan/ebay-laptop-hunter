@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.52"
+APP_VERSION = "0.9.53"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -16701,21 +16701,19 @@ def _product_research_worker():
                 maximum=1,
             )
 
+            # collect_needed_sold_data() recalculates the target listing
+            # immediately after new sold evidence is collected. Do not run
+            # revalue_all() here: that needlessly recalculates the entire
+            # listings table and can consume a full CPU core continuously.
+            #
+            # Telegram discovery remains cheap and does not require a global
+            # valuation pass.
             now = time.monotonic()
 
             if (
                 now - last_revalue
                 >= PRODUCT_RESEARCH_REVALUE_SECONDS
             ):
-                revalued = revalue_all(
-                    conn
-                )
-
-                print(
-                    f"Product Research revalue: "
-                    f"{revalued} listings recalculated"
-                )
-
                 telegram_sent = notify_pending_telegram_deals(
                     conn
                 )
