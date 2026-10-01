@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.55"
+APP_VERSION = "0.9.56"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -6694,6 +6694,46 @@ def collect_sold_search(conn, keywords):
         return 0
 
 
+def persist_listing_valuation(
+    conn,
+    row,
+    valuation
+):
+    """Persist a valuation for one listing without a global revalue pass."""
+    if valuation is None:
+        return False
+
+    conn.execute("""
+        UPDATE listings
+        SET
+            estimated_value=?,
+            valuation_q1=?,
+            valuation_q3=?,
+            comparable_count=?,
+            valuation_confidence=?,
+            undervaluation_gbp=?,
+            undervaluation_pct=?,
+            deal_score=?,
+            valuation_basis=?
+        WHERE item_id=?
+    """, (
+        valuation["estimated_value"],
+        valuation["q1"],
+        valuation["q3"],
+        valuation["count"],
+        valuation["confidence"],
+        valuation["undervaluation_gbp"],
+        valuation["undervaluation_pct"],
+        valuation["deal_score"],
+        valuation["basis"],
+        row["item_id"],
+    ))
+
+    conn.commit()
+
+    return True
+
+
 def collect_needed_sold_data(conn, maximum=None):
     if maximum is None:
         maximum = PRODUCT_RESEARCH_SEARCHES_PER_CYCLE
@@ -6746,20 +6786,51 @@ def collect_needed_sold_data(conn, maximum=None):
             key = research_query_key(keywords)
 
             if sold_search_is_fresh(conn, key):
-                if calculate_sold_valuation(conn, row) is not None:
+                valuation = calculate_sold_valuation(
+                    conn,
+                    row
+                )
+
+                if valuation is not None:
+                    persist_listing_valuation(
+                        conn,
+                        row,
+                        valuation
+                    )
+
+                    print(
+                        "Product Research: cached evidence valued "
+                        f"{row['item_id']} at "
+                        f"{valuation['estimated_value']}"
+                    )
+
                     break
+
                 continue
 
             collect_sold_search(conn, keywords)
             done += 1
             searched_this_listing = True
 
-            valuation = calculate_sold_valuation(conn, row)
+            valuation = calculate_sold_valuation(
+                conn,
+                row
+            )
+
             if valuation is not None:
+                persist_listing_valuation(
+                    conn,
+                    row,
+                    valuation
+                )
+
                 print(
                     "Product Research: sufficient evidence; "
+                    f"valued {row['item_id']} at "
+                    f"{valuation['estimated_value']}; "
                     f"stopping at {valuation['basis']}"
                 )
+
                 break
 
             if done >= maximum:
