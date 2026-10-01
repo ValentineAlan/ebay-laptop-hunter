@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.54"
+APP_VERSION = "0.9.55"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -17134,7 +17134,7 @@ def main():
     try:
         faulthandler.register(
             signal.SIGUSR1,
-            file=sys.stderr,
+            file=sys.__stderr__,
             all_threads=True,
         )
         print(
