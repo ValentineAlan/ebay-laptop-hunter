@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.58"
+APP_VERSION = "0.9.59"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -5705,33 +5705,39 @@ def _wait_for_new_live_sid(previous_sid):
     return None
 
 
+
 def _product_research_invalid_session(raw, modules):
-    # invalid_session is returned as a plain JSON object, not a SearchResultsModule.
+    # Normal Product Research invalid-session response.
     for obj in modules:
         if (
             obj.get("error") == "auth_required"
             and obj.get("reason_code") == "invalid_session"
         ):
             return True
-    return '"reason_code":"invalid_session"' in raw.replace(" ", "")
 
+    lowered = (raw or "").lower()
 
-class ProductResearchRateLimited(Exception):
-    """Product Research returned HTTP 429 and entered adaptive backoff."""
-    pass
+    if '"reason_code":"invalid_session"' in lowered.replace(" ", ""):
+        return True
 
+    # eBay can occasionally return HTTP 200 plus an HTML authentication or
+    # challenge page instead of the normal JSON invalid_session object.
+    if not modules:
+        indicators = (
+            "signin",
+            "sign in",
+            "login",
+            "auth_required",
+            "invalid_session",
+            "captcha",
+            "challenge",
+            "verify",
+        )
 
-_product_research_rate_lock = threading.Lock()
-_product_research_next_request_at = 0.0
-_product_research_rate_loaded = False
-_product_research_rate = {
-    "interval_seconds": PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS,
-    "success_streak": 0,
-    "backoff_until": 0.0,
-    "last_429_at": None,
-    "last_success_at": None,
-}
+        if any(marker in lowered for marker in indicators):
+            return True
 
+    return False
 
 def _product_research_load_rate_state():
     global _product_research_rate_loaded
@@ -5900,6 +5906,7 @@ def _product_research_record_429(exc):
     return retry_after
 
 
+
 def _product_research_fetch(url, cookie):
     _product_research_wait_for_slot()
 
@@ -5918,7 +5925,11 @@ def _product_research_fetch(url, cookie):
         # Product Research has its own adaptive limiter. Deliberately do not
         # use ebay_urlopen(), whose 429 cooldown is shared with Browse.
         with urllib.request.urlopen(req, timeout=45) as response:
-            raw = response.read().decode("utf-8", errors="replace")
+            status = getattr(response, "status", None)
+            content_type = response.headers.get("Content-Type", "")
+            raw_bytes = response.read()
+            raw = raw_bytes.decode("utf-8", errors="replace")
+
     except urllib.error.HTTPError as exc:
         if exc.code == 429:
             _product_research_record_429(exc)
@@ -5927,23 +5938,79 @@ def _product_research_fetch(url, cookie):
             ) from exc
         raise
 
-    _product_research_record_success()
+    # HTTP 200 alone is not proof that Product Research worked. eBay may
+    # return an empty response or an HTML login/challenge document.
+    if not raw.strip():
+        print(
+            "Product Research invalid response: "
+            f"HTTP={status} "
+            f"content_type={content_type!r} "
+            f"bytes={len(raw_bytes)} "
+            "EMPTY BODY",
+            flush=True,
+        )
+
+    elif raw.lstrip().startswith("<"):
+        preview = re.sub(
+            r"\s+",
+            " ",
+            raw.lstrip()[:500],
+        )
+        print(
+            "Product Research invalid response: "
+            f"HTTP={status} "
+            f"content_type={content_type!r} "
+            f"bytes={len(raw_bytes)} "
+            f"HTML={preview!r}",
+            flush=True,
+        )
+
+    # Do NOT call _product_research_record_success() here.
+    # A HTTP transport success only becomes a Product Research success after
+    # product_research_search() finds a SearchResultsModule.
     return raw
 
+
 def _decode_json_modules(raw):
+    if not raw or not raw.strip():
+        return []
+
     decoder = json.JSONDecoder()
     pos = 0
     objects = []
+
     while pos < len(raw):
         while pos < len(raw) and raw[pos].isspace():
             pos += 1
+
         if pos >= len(raw):
             break
-        obj, pos = decoder.raw_decode(raw, pos)
+
+        try:
+            obj, pos = decoder.raw_decode(raw, pos)
+        except json.JSONDecodeError:
+            preview = re.sub(
+                r"\s+",
+                " ",
+                raw[pos:pos + 500],
+            )
+
+            print(
+                "Product Research non-JSON response: "
+                f"position={pos} "
+                f"preview={preview!r}",
+                flush=True,
+            )
+
+            # Return no modules rather than throwing JSONDecodeError.
+            # product_research_search() can then detect an expired/challenged
+            # browser session and invoke the existing SID refresh path.
+            return []
+
         if isinstance(obj, dict):
             objects.append(obj)
-    return objects
 
+    return objects
 
 def _research_value(value):
     """Extract a numeric value from Product Research display structures."""
@@ -6041,6 +6108,7 @@ def product_research_search(keywords, offset=0):
     )
 
     if search is not None:
+        _product_research_record_success()
         sid = _extract_ebaysid(cookie)
         _session_state_update(
             status="WORKING",
@@ -6081,6 +6149,7 @@ def product_research_search(keywords, offset=0):
                 None,
             )
             if search is not None:
+                _product_research_record_success()
                 _session_state_update(
                     status="WORKING",
                     last_checked_at=iso_now(),
