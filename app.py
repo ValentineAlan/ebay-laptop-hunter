@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.57"
+APP_VERSION = "0.9.58"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -6336,10 +6336,11 @@ def sold_search_queries(row):
     unrelated configurations. Prefer exact model + CPU + RAM + storage first,
     then progressively relax the query.
 
-    The valuation matcher remains strict; these queries only improve retrieval
-    of potentially relevant sold evidence.
+    Product Research eligibility is intentionally different from deal
+    eligibility: condition-review listings may still collect normal-market
+    sold evidence.
     """
-    if target_valuation_problem(row):
+    if product_research_problem(row):
         return []
 
     brand = normalise(
@@ -7408,6 +7409,35 @@ def target_valuation_problem(target, conn=None):
 
     if valuation_condition_requires_review(target):
         return "CONDITION_REQUIRES_REVIEW"
+
+    if not exact_spec_identity(target):
+        return "INCOMPLETE_IDENTITY_OR_SPEC"
+
+    if not row_value(target, "total") or row_value(target, "postage") is None:
+        return "UNKNOWN_DELIVERED_COST"
+
+    return None
+
+
+def product_research_problem(target, conn=None):
+    """
+    Decide whether Product Research can meaningfully research this listing.
+
+    This is deliberately less restrictive than target_valuation_problem().
+
+    CONDITION_REQUIRES_REVIEW is NOT a research blocker. A damaged,
+    incomplete or otherwise review-required listing can still teach us the
+    normal market value of its model/specification. Deal scoring remains
+    protected separately by target_valuation_problem().
+
+    Exact identity/specification and delivered price remain required by the
+    current valuation pipeline.
+    """
+    if row_value(target, "classifier_version") != CLASSIFIER_VERSION:
+        return "REANALYSIS_REQUIRED"
+
+    if int(row_value(target, "rules_revision") or 0) != current_rules_revision(conn):
+        return "REANALYSIS_REQUIRED"
 
     if not exact_spec_identity(target):
         return "INCOMPLETE_IDENTITY_OR_SPEC"
