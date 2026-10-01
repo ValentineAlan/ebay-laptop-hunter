@@ -56,6 +56,10 @@ REQUEST_POLL_SECONDS = float(
 )
 
 
+RECOVERY_SIGNAL_FILE = DATA / "product-research-recovery.signal"
+MANUAL_CHALLENGE_FILE = DATA / "product-research-manual-challenge.json"
+
+
 def now_iso():
     return datetime.now(
         timezone.utc
@@ -430,6 +434,132 @@ def process_refresh_request(context):
             pass
 
 
+
+def mark_manual_challenge(page, request_id=None):
+    """
+    Put the visible browser on Product Research so the user can complete
+    eBay's verification interactively.
+
+    Recovery is only signalled after a real CHALLENGED page has been observed
+    and subsequently becomes CONNECTED.
+    """
+    payload = {
+        "challenged_at": now_iso(),
+        "request_id": request_id,
+        "challenge_seen_in_page": False,
+    }
+
+    try:
+        page.goto(
+            "https://www.ebay.co.uk/sh/research",
+            wait_until="domcontentloaded",
+            timeout=60000,
+        )
+
+        time.sleep(1)
+
+        state, title, url = page_state(page)
+
+        payload.update({
+            "page_state": state,
+            "page_title": title,
+            "page_url": url,
+            "challenge_seen_in_page": (
+                state == "CHALLENGED"
+            ),
+        })
+
+        print(
+            "Product Research manual verification page: "
+            f"state={state} url={url}",
+            flush=True,
+        )
+
+    except Exception as exc:
+        payload["navigation_error"] = repr(exc)
+
+        print(
+            "Product Research challenge-page navigation error:",
+            repr(exc),
+            flush=True,
+        )
+
+    atomic_json(
+        MANUAL_CHALLENGE_FILE,
+        payload,
+    )
+
+
+def watch_manual_recovery(context):
+    """
+    Detect the transition caused by a user manually completing eBay's
+    visible browser challenge.
+    """
+    if not MANUAL_CHALLENGE_FILE.exists():
+        return
+
+    marker = read_json(
+        MANUAL_CHALLENGE_FILE
+    )
+
+    page = choose_page(
+        context
+    )
+
+    state, title, url = page_state(
+        page
+    )
+
+    seen = bool(
+        marker.get("challenge_seen_in_page")
+    )
+
+    # If the first navigation had not finished rendering the challenge yet,
+    # allow a later poll to establish that it really became CHALLENGED.
+    if state == "CHALLENGED":
+        if not seen:
+            marker["challenge_seen_in_page"] = True
+            marker["challenge_seen_at"] = now_iso()
+            marker["page_title"] = title
+            marker["page_url"] = url
+
+            atomic_json(
+                MANUAL_CHALLENGE_FILE,
+                marker,
+            )
+
+            print(
+                "Product Research manual challenge visible in Chromium",
+                flush=True,
+            )
+
+        return
+
+    # Do not generate a recovery signal unless we previously observed the
+    # actual challenge page. This prevents an ordinary Product Research page
+    # from being mistaken for successful verification.
+    if not seen:
+        return
+
+    if state == "CONNECTED":
+        atomic_write(
+            RECOVERY_SIGNAL_FILE,
+            now_iso(),
+        )
+
+        try:
+            MANUAL_CHALLENGE_FILE.unlink()
+        except FileNotFoundError:
+            pass
+
+        print(
+            "Product Research manual verification completed; "
+            "recovery signal written",
+            flush=True,
+        )
+
+
+
 def process_research_request(context):
     if not RESEARCH_REQUEST_FILE.exists():
         return
@@ -451,6 +581,7 @@ def process_research_request(context):
             RESEARCH_REQUEST_FILE.unlink()
         except FileNotFoundError:
             pass
+
         return
 
     print(
@@ -474,8 +605,6 @@ def process_research_request(context):
             page,
         )
 
-        # Execute the request inside the existing Chromium page context.
-        # credentials=include uses that browser context's normal eBay cookies.
         result = page.evaluate(
             """
             async (url) => {
@@ -501,6 +630,7 @@ def process_research_request(context):
                         final_url: response.url || "",
                         body: body
                     };
+
                 } catch (error) {
                     return {
                         ok: false,
@@ -590,6 +720,16 @@ def process_research_request(context):
             flush=True,
         )
 
+        # The fetch response itself does not automatically navigate the
+        # visible Chromium tab. If eBay challenged the Product Research API,
+        # explicitly put the browser on Product Research so the user can see
+        # and complete the verification.
+        if state == "CHALLENGED":
+            mark_manual_challenge(
+                page,
+                request_id=request_id,
+            )
+
     except Exception as exc:
         response_payload.update({
             "status": 0,
@@ -620,7 +760,6 @@ def process_research_request(context):
             RESEARCH_REQUEST_FILE.unlink()
         except FileNotFoundError:
             pass
-
 
 def main():
     DATA.mkdir(
@@ -697,6 +836,10 @@ def main():
                     )
 
                     process_research_request(
+                        context
+                    )
+
+                    watch_manual_recovery(
                         context
                     )
 

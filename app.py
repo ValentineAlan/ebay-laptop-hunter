@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.1"
+APP_VERSION = "0.10.2"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -116,6 +116,12 @@ PRODUCT_RESEARCH_BROWSER_TIMEOUT_SECONDS = 65
 PRODUCT_RESEARCH_BROWSER_POLL_SECONDS = 0.10
 PRODUCT_RESEARCH_CHALLENGE_COOLDOWN_SECONDS = 30 * 60
 PRODUCT_RESEARCH_CIRCUIT_STATE = "/data/product-research-circuit.json"
+PRODUCT_RESEARCH_RECOVERY_SIGNAL = "/data/product-research-recovery.signal"
+PRODUCT_RESEARCH_MANUAL_CHALLENGE = "/data/product-research-manual-challenge.json"
+PRODUCT_RESEARCH_BROWSER_GUI_URL = os.environ.get(
+    "PRODUCT_RESEARCH_BROWSER_GUI_URL",
+    "https://192.168.1.6:30311/",
+)
 
 PRODUCT_RESEARCH_REFRESH_WAIT_SECONDS = 25
 PRODUCT_RESEARCH_REFRESH_POLL_SECONDS = 0.5
@@ -5976,18 +5982,85 @@ def _product_research_circuit_remaining():
     )
 
 
+
+def _product_research_challenge_telegram_message():
+    return (
+        "eBay Product Research needs verification\n\n"
+        "Status: CHALLENGED\n"
+        "Product Research is paused.\n"
+        "The valuation backlog is preserved.\n\n"
+        "Open Chromium:\n"
+        f"{PRODUCT_RESEARCH_BROWSER_GUI_URL}\n\n"
+        "Complete the eBay verification in the browser. "
+        "LaptopLander will detect recovery and resume automatically."
+    )
+
+
+def _product_research_recovered_telegram_message():
+    return (
+        "eBay Product Research restored\n\n"
+        "The Chromium session is working again.\n"
+        "Product Research has resumed and the valuation backlog "
+        "will continue processing automatically."
+    )
+
+
+
 def _product_research_open_circuit(reason):
+    previous = _product_research_circuit_state()
+
+    already_open = bool(
+        previous.get("opened_at")
+    )
+
     now = time.time()
 
     state = {
-        "opened_at": iso_now(),
-        "opened_epoch": now,
+        "opened_at": (
+            previous.get("opened_at")
+            or iso_now()
+        ),
+        "opened_epoch": (
+            previous.get("opened_epoch")
+            or now
+        ),
         "probe_after_epoch": (
             now
             + PRODUCT_RESEARCH_CHALLENGE_COOLDOWN_SECONDS
         ),
         "reason": str(reason),
+        "telegram_alert_sent": bool(
+            previous.get("telegram_alert_sent")
+        ),
     }
+
+    # Send only one Telegram challenge alert for a continuous outage.
+    if not state["telegram_alert_sent"]:
+        try:
+            ok, error = send_telegram_message(
+                _product_research_challenge_telegram_message()
+            )
+
+            if ok:
+                state["telegram_alert_sent"] = True
+
+                print(
+                    "Product Research challenge alert sent to Telegram",
+                    flush=True,
+                )
+            else:
+                print(
+                    "Product Research challenge Telegram alert failed: "
+                    f"{error}",
+                    flush=True,
+                )
+
+        except Exception as exc:
+            print(
+                "Product Research challenge Telegram alert error:",
+                repr(exc),
+                flush=True,
+            )
 
     with _product_research_circuit_lock:
         _atomic_json_write(
@@ -6001,21 +6074,32 @@ def _product_research_open_circuit(reason):
         last_failure_at=iso_now(),
         message=(
             "Product Research circuit open: "
-            f"{reason}; probe in "
-            f"{PRODUCT_RESEARCH_CHALLENGE_COOLDOWN_SECONDS // 60} minutes"
+            f"{reason}. Manual verification available at "
+            f"{PRODUCT_RESEARCH_BROWSER_GUI_URL}"
         ),
     )
 
-    print(
-        "Product Research circuit OPEN: "
-        f"{reason}; pausing normal Product Research for "
-        f"{PRODUCT_RESEARCH_CHALLENGE_COOLDOWN_SECONDS // 60} minutes",
-        flush=True,
-    )
+    if not already_open:
+        print(
+            "Product Research circuit OPEN: "
+            f"{reason}; waiting for manual verification "
+            "or scheduled recovery probe",
+            flush=True,
+        )
+    else:
+        print(
+            "Product Research circuit remains OPEN: "
+            f"{reason}",
+            flush=True,
+        )
 
 
 def _product_research_close_circuit():
-    was_open = _product_research_circuit_is_open()
+    previous = _product_research_circuit_state()
+
+    was_open = bool(
+        previous.get("opened_at")
+    )
 
     with _product_research_circuit_lock:
         try:
@@ -6027,13 +6111,48 @@ def _product_research_close_circuit():
         except OSError:
             pass
 
+    # Consume any stale recovery/manual-challenge signals.
+    for path in (
+        PRODUCT_RESEARCH_RECOVERY_SIGNAL,
+        PRODUCT_RESEARCH_MANUAL_CHALLENGE,
+    ):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
     if was_open:
         print(
             "Product Research circuit CLOSED: "
-            "Chromium probe succeeded",
+            "Chromium verification succeeded",
             flush=True,
         )
 
+        try:
+            ok, error = send_telegram_message(
+                _product_research_recovered_telegram_message()
+            )
+
+            if ok:
+                print(
+                    "Product Research recovery alert sent to Telegram",
+                    flush=True,
+                )
+            else:
+                print(
+                    "Product Research recovery Telegram alert failed: "
+                    f"{error}",
+                    flush=True,
+                )
+
+        except Exception as exc:
+            print(
+                "Product Research recovery Telegram alert error:",
+                repr(exc),
+                flush=True,
+            )
 
 def _product_research_fetch(url, cookie=None):
     """
@@ -6471,18 +6590,64 @@ def product_research_search(
     )
 
 
+
 def _product_research_session_monitor():
     """
-    Maintain Product Research session state.
+    Maintain Product Research state.
 
-    When the Chromium circuit is open, this monitor is the only component
-    allowed to probe for recovery.
+    During a challenge:
+      * normal backlog processing remains paused;
+      * Chromium helper watches for manual verification;
+      * a recovery signal causes an immediate Product Research probe;
+      * otherwise the normal cooldown probe remains as fallback.
     """
     last_wait_log = 0.0
 
     while True:
         try:
             if _product_research_circuit_is_open():
+
+                manual_recovery = os.path.exists(
+                    PRODUCT_RESEARCH_RECOVERY_SIGNAL
+                )
+
+                if manual_recovery:
+                    print(
+                        "Product Research circuit: "
+                        "manual verification detected; "
+                        "running immediate Chromium recovery probe",
+                        flush=True,
+                    )
+
+                    try:
+                        os.unlink(
+                            PRODUCT_RESEARCH_RECOVERY_SIGNAL
+                        )
+                    except OSError:
+                        pass
+
+                    try:
+                        product_research_search(
+                            PRODUCT_RESEARCH_SESSION_PROBE_QUERY,
+                            0,
+                            allow_probe=True,
+                        )
+
+                        print(
+                            "Product Research manual recovery probe: WORKING",
+                            flush=True,
+                        )
+
+                    except Exception as exc:
+                        print(
+                            "Product Research manual recovery probe:",
+                            repr(exc),
+                            flush=True,
+                        )
+
+                    time.sleep(5)
+                    continue
+
                 remaining = (
                     _product_research_circuit_remaining()
                 )
@@ -6490,23 +6655,23 @@ def _product_research_session_monitor():
                 if remaining > 0:
                     now = time.monotonic()
 
-                    # Avoid one log line every minute.
                     if (
                         now - last_wait_log
                         >= 300
                     ):
                         print(
                             "Product Research circuit: "
-                            f"probe suppressed for another "
-                            f"{remaining}s",
+                            f"waiting for manual verification; "
+                            f"fallback probe in {remaining}s",
                             flush=True,
                         )
+
                         last_wait_log = now
 
                 else:
                     print(
                         "Product Research circuit: "
-                        "cooldown expired; running Chromium recovery probe",
+                        "cooldown expired; running fallback recovery probe",
                         flush=True,
                     )
 
@@ -6518,18 +6683,18 @@ def _product_research_session_monitor():
                         )
 
                         print(
-                            "Product Research recovery probe: WORKING",
+                            "Product Research fallback recovery probe: WORKING",
                             flush=True,
                         )
 
                     except Exception as exc:
                         print(
-                            "Product Research recovery probe:",
+                            "Product Research fallback recovery probe:",
                             repr(exc),
                             flush=True,
                         )
 
-                time.sleep(60)
+                time.sleep(5)
                 continue
 
             state = _read_json_file(
@@ -6598,7 +6763,7 @@ def _product_research_session_monitor():
                 flush=True,
             )
 
-        time.sleep(60)
+        time.sleep(5)
 
 def start_product_research_session_monitor():
     thread = threading.Thread(
