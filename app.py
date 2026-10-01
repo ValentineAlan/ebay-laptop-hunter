@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.3"
+APP_VERSION = "0.10.4"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -13894,6 +13894,17 @@ def diagnostics_html():
     except Exception:
         helper = {}
 
+    try:
+        circuit = _read_json_file(
+            PRODUCT_RESEARCH_CIRCUIT_STATE
+        ) or {}
+    except Exception:
+        circuit = {}
+
+    circuit_open = bool(
+        circuit.get("opened_at")
+    )
+
     session_status = session.get(
         "status",
         "UNKNOWN"
@@ -14058,6 +14069,118 @@ def diagnostics_html():
             "<tr><td colspan='2' class='muted'>No migrations recorded</td></tr>"
         )
 
+    try:
+        circuit_probe_epoch = float(
+            circuit.get("probe_after_epoch")
+            or 0
+        )
+    except Exception:
+        circuit_probe_epoch = 0
+
+    circuit_remaining = max(
+        0,
+        int(
+            circuit_probe_epoch
+            - time.time()
+        ),
+    )
+
+    if circuit_remaining > 0:
+        probe_hours, probe_rem = divmod(
+            circuit_remaining,
+            3600,
+        )
+
+        probe_minutes = probe_rem // 60
+
+        circuit_probe_text = (
+            f"{probe_hours}h {probe_minutes:02d}m"
+            if probe_hours
+            else f"{max(1, probe_minutes)}m"
+        )
+
+    elif circuit_open:
+        circuit_probe_text = "Eligible now"
+
+    else:
+        circuit_probe_text = "—"
+
+    try:
+        circuit_challenge_count = int(
+            circuit.get("challenge_count")
+            or 0
+        )
+    except Exception:
+        circuit_challenge_count = 0
+
+    circuit_cooldown = (
+        circuit.get("cooldown_seconds")
+    )
+
+    circuit_items = [
+        (
+            "Circuit",
+            "OPEN"
+            if circuit_open
+            else "CLOSED"
+        ),
+        (
+            "Reason",
+            circuit.get("reason")
+            or "—"
+        ),
+        (
+            "Consecutive blocks",
+            circuit_challenge_count
+        ),
+        (
+            "Opened",
+            (
+                relative_age(
+                    circuit.get("opened_at")
+                )
+                if circuit_open
+                else "—"
+            )
+        ),
+        (
+            "Last challenge",
+            (
+                relative_age(
+                    circuit.get("last_challenge_at")
+                )
+                if circuit.get("last_challenge_at")
+                else "—"
+            )
+        ),
+        (
+            "Configured cooldown",
+            (
+                _product_research_cooldown_label(
+                    circuit_cooldown
+                )
+                if circuit_cooldown
+                else "—"
+            )
+        ),
+        (
+            "Next fallback probe",
+            circuit_probe_text
+        ),
+        (
+            "Backlog policy",
+            (
+                "Preserved — Product Research worker paused"
+                if circuit_open
+                else "Processing normally"
+            )
+        ),
+        (
+            "Chromium GUI",
+            PRODUCT_RESEARCH_BROWSER_GUI_URL
+        ),
+    ]
+
     session_items = [
         ("Status", session_status),
         (
@@ -14078,8 +14201,18 @@ def diagnostics_html():
                 session.get("last_refresh_at")
             )
         ),
+        (
+            "Last failure",
+            relative_age(
+                session.get("last_failure_at")
+            )
+        ),
+        (
+            "Message",
+            session.get("message")
+            or "—"
+        ),
     ]
-
     helper_items = [
         ("Status", helper_status),
         (
@@ -14098,8 +14231,34 @@ def diagnostics_html():
             helper.get("page_url")
             or "—"
         ),
+        (
+            "Last browser fetch",
+            relative_age(
+                helper.get(
+                    "last_browser_fetch_at"
+                )
+            )
+        ),
+        (
+            "Last browser HTTP status",
+            helper.get(
+                "last_browser_fetch_status"
+            )
+            or "—"
+        ),
+        (
+            "Last browser content type",
+            helper.get(
+                "last_browser_fetch_content_type"
+            )
+            or "—"
+        ),
+        (
+            "Last error",
+            helper.get("last_error")
+            or "—"
+        ),
     ]
-
     queue_items = [
         ("REANALYSIS_REQUIRED", reanalysis),
         ("INCOMPLETE_IDENTITY_OR_SPEC", incomplete),
@@ -14168,18 +14327,45 @@ def diagnostics_html():
         ("Listings made inactive in last 24h", recently_inactive),
     ]
 
-    status_class = (
-        "good"
-        if str(session_status).upper() == "WORKING"
-        else "bad"
-    )
+    session_status_upper = str(
+        session_status
+    ).upper()
 
-    helper_class = (
-        "good"
-        if str(helper_status).upper()
-        in ("CONNECTED", "WORKING", "OK")
-        else "warn"
-    )
+    helper_status_upper = str(
+        helper_status
+    ).upper()
+
+    if session_status_upper == "WORKING":
+        status_class = "good"
+
+    elif (
+        circuit_open
+        or session_status_upper
+        in (
+            "CHALLENGED",
+            "SIGNIN_REQUIRED",
+        )
+    ):
+        status_class = "warn"
+
+    else:
+        status_class = "bad"
+
+    if helper_status_upper in (
+        "CONNECTED",
+        "WORKING",
+        "OK",
+    ):
+        helper_class = "good"
+
+    elif helper_status_upper in (
+        "CHALLENGED",
+        "SIGNIN_REQUIRED",
+    ):
+        helper_class = "warn"
+
+    else:
+        helper_class = "bad"
 
     usage_pct = (
         (api_used / DAILY_SAFETY_LIMIT) * 100
@@ -14627,6 +14813,32 @@ def diagnostics_html():
             <table>
                 {table_rows(session_items)}
             </table>
+        </section>
+
+        <section class="panel">
+            <h2>Product Research circuit breaker</h2>
+
+            <div class="status-line {('warn' if circuit_open else 'good')}">
+                {(
+                    'OPEN — Product Research intentionally paused'
+                    if circuit_open
+                    else 'CLOSED — normal processing'
+                )}
+            </div>
+
+            <table>
+                {table_rows(circuit_items)}
+            </table>
+
+            <div class="status-line">
+                <a
+                    href="{html.escape(PRODUCT_RESEARCH_BROWSER_GUI_URL, quote=True)}"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                >
+                    Open Chromium ↗
+                </a>
+            </div>
         </section>
 
         <section class="panel">
@@ -15369,9 +15581,9 @@ def _dashboard_state_age_seconds(value):
 
 def _dashboard_health_alert():
     """
-    Healthy operational state is silent.
-
-    Only return visible UI when something needs attention.
+    Homepage summary:
+      amber = intentional Product Research pause;
+      red   = an unexpected LaptopLander infrastructure fault.
     """
     problems = []
 
@@ -15389,22 +15601,125 @@ def _dashboard_health_alert():
     except Exception:
         helper = {}
 
+    try:
+        circuit = _read_json_file(
+            PRODUCT_RESEARCH_CIRCUIT_STATE
+        ) or {}
+    except Exception:
+        circuit = {}
+
+    circuit_open = bool(
+        circuit.get("opened_at")
+    )
+
     session_status = normalise(
         session.get("status")
     ).upper()
 
-    if session_status != "WORKING":
-        problems.append(
-            "Product Research session is not working"
-        )
+    helper_status = normalise(
+        helper.get("status")
+    ).upper()
 
     success_age = _dashboard_state_age_seconds(
         session.get("last_success_at")
     )
 
-    # Don't alert merely because the app has only just started.
+    helper_age = _dashboard_state_age_seconds(
+        helper.get("last_seen_at")
+    )
+
+    notice_html = ""
+
+    if circuit_open:
+        try:
+            probe_epoch = float(
+                circuit.get("probe_after_epoch")
+                or 0
+            )
+        except Exception:
+            probe_epoch = 0
+
+        remaining = max(
+            0,
+            int(probe_epoch - time.time()),
+        )
+
+        if remaining <= 0:
+            probe_text = "due now"
+        else:
+            hours, rem = divmod(
+                remaining,
+                3600,
+            )
+            minutes = rem // 60
+
+            probe_text = (
+                f"{hours}h {minutes:02d}m"
+                if hours
+                else f"{max(1, minutes)}m"
+            )
+
+        try:
+            challenge_count = int(
+                circuit.get("challenge_count")
+                or 1
+            )
+        except Exception:
+            challenge_count = 1
+
+        notice_html = (
+            "<div id='product-research-pause' "
+            "class='system-health-notice'>"
+
+            "<div class='health-notice-title'>"
+            "VALUATION RESEARCH PAUSED"
+            "</div>"
+
+            "<div class='health-notice-copy'>"
+            "eBay has temporarily blocked Product Research. "
+            "New-listing discovery continues normally and the "
+            "valuation backlog is preserved."
+            "</div>"
+
+            "<div class='health-notice-meta'>"
+            "Next automatic check: "
+            + html.escape(probe_text)
+            + " &nbsp;·&nbsp; Block "
+            + html.escape(str(challenge_count))
+            + "</div>"
+
+            "<div class='health-notice-actions'>"
+            "<a href='/diagnostics'>"
+            "View diagnostics"
+            "</a>"
+
+            "<a href='"
+            + html.escape(
+                PRODUCT_RESEARCH_BROWSER_GUI_URL,
+                quote=True,
+            )
+            + "' target='_blank' "
+            "rel='noopener noreferrer'>"
+            "Open Chromium ↗"
+            "</a>"
+            "</div>"
+
+            "</div>"
+        )
+
+    # An intentionally-open circuit is degraded operation, not a red fault.
     if (
-        success_age is not None
+        not circuit_open
+        and session_status
+        and session_status != "WORKING"
+    ):
+        problems.append(
+            "Product Research is unexpectedly unavailable"
+        )
+
+    if (
+        not circuit_open
+        and success_age is not None
         and success_age > 15 * 60
     ):
         problems.append(
@@ -15412,40 +15727,50 @@ def _dashboard_health_alert():
             f"for {int(success_age // 60)} minutes"
         )
 
-    helper_status = normalise(
-        helper.get("status")
-    ).upper()
-
-    if helper_status and helper_status not in {
+    # These states mean the helper is alive even though Research is unusable.
+    live_helper_states = {
         "CONNECTED",
         "WORKING",
-    }:
+        "OK",
+        "CHALLENGED",
+        "SIGNIN_REQUIRED",
+    }
+
+    if (
+        helper_status
+        and helper_status not in live_helper_states
+    ):
         problems.append(
-            "Chromium session helper is disconnected"
+            "Chromium helper reports "
+            + helper_status
         )
 
-    helper_age = _dashboard_state_age_seconds(
-        helper.get("last_seen_at")
-    )
-
+    # Heartbeat freshness determines whether the helper itself is dead/stale.
     if (
         helper_age is not None
         and helper_age > 5 * 60
     ):
         problems.append(
-            "Chromium session helper has not been seen "
-            f"for {int(helper_age // 60)} minutes"
+            "Chromium session helper heartbeat is stale "
+            f"({int(helper_age // 60)} minutes)"
         )
 
-    # Shared central eBay 429 cooldown, if available.
-    try:
-        remaining = ebay_rate_limit_remaining()
-    except Exception:
-        remaining = 0
+    if (
+        not helper_status
+        and not circuit_open
+    ):
+        problems.append(
+            "Chromium session helper status is unavailable"
+        )
 
-    if remaining > 0:
+    try:
+        rate_remaining = ebay_rate_limit_remaining()
+    except Exception:
+        rate_remaining = 0
+
+    if rate_remaining > 0:
         minutes, seconds = divmod(
-            int(remaining),
+            int(rate_remaining),
             60,
         )
 
@@ -15456,25 +15781,27 @@ def _dashboard_health_alert():
             "other processing continues"
         )
 
-    if not problems:
-        return ""
+    alert_html = ""
 
-    items = "".join(
-        "<li>"
-        + html.escape(problem)
-        + "</li>"
-        for problem in problems
-    )
+    if problems:
+        items = "".join(
+            "<li>"
+            + html.escape(problem)
+            + "</li>"
+            for problem in problems
+        )
 
-    return (
-        "<div id='system-health-alert' "
-        "class='system-health-alert'>"
-        "<strong>SYSTEM HEALTH ALERT</strong>"
-        "<ul>"
-        + items
-        + "</ul>"
-        "</div>"
-    )
+        alert_html = (
+            "<div id='system-health-alert' "
+            "class='system-health-alert'>"
+            "<strong>SYSTEM HEALTH ALERT</strong>"
+            "<ul>"
+            + items
+            + "</ul>"
+            "</div>"
+        )
+
+    return notice_html + alert_html
 
 
 _DASHBOARD_UI_ENHANCEMENT = r"""
@@ -15503,6 +15830,57 @@ _DASHBOARD_UI_ENHANCEMENT = r"""
     background: #fff4f3;
     color: #7d1712;
 }
+
+.system-health-notice {
+    margin: 12px;
+    padding: 16px 18px;
+    border: 1px solid #f0b429;
+    border-left: 5px solid #f59e0b;
+    border-radius: 10px;
+    background: #fffaf0;
+    color: #7a4b00;
+}
+
+.health-notice-title {
+    font-weight: 800;
+    letter-spacing: .02em;
+    margin-bottom: 6px;
+}
+
+.health-notice-copy {
+    line-height: 1.45;
+}
+
+.health-notice-meta {
+    margin-top: 7px;
+    font-size: 13px;
+    color: #8a5a13;
+    font-weight: 600;
+}
+
+.health-notice-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 11px;
+}
+
+.health-notice-actions a {
+    display: inline-block;
+    padding: 7px 11px;
+    border: 1px solid #d89b20;
+    border-radius: 8px;
+    background: #fff;
+    color: #8a5600;
+    text-decoration: none;
+    font-weight: 700;
+    font-size: 13px;
+}
+
+.health-notice-actions a:hover {
+    background: #fff4d6;
+}
+
 
 .sortable-header {
     cursor: pointer;
