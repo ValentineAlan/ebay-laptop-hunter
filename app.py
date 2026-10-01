@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.50"
+APP_VERSION = "0.9.51"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -468,6 +468,12 @@ def connect_db():
 
     conn.row_factory = sqlite3.Row
 
+    # Allow concurrent LaptopLander workers to wait for a short-lived
+    # SQLite writer rather than failing immediately.
+    conn.execute(
+        "PRAGMA busy_timeout=30000"
+    )
+
     return conn
 
 
@@ -742,6 +748,26 @@ def _audit_setting(conn, kind, key, old_value, new_value):
 
 def init_db():
     conn = connect_db()
+
+
+    # LaptopLander has independent Browse, Product Research and dashboard
+    # activity sharing one SQLite database. WAL allows readers to continue
+    # while a writer is committing and greatly reduces unnecessary blocking.
+    journal_mode = conn.execute(
+        "PRAGMA journal_mode=WAL"
+    ).fetchone()[0]
+
+    conn.execute(
+        "PRAGMA synchronous=NORMAL"
+    )
+
+    conn.execute(
+        "PRAGMA busy_timeout=30000"
+    )
+
+    print(
+        f"SQLite journal mode   : {journal_mode}"
+    )
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS listings (
@@ -8371,20 +8397,65 @@ def calculate_valuation(conn, target):
     return active
 
 
-def revalue_all(conn):
+def revalue_all(conn, batch_size=50):
     rows = conn.execute("""
         SELECT *
         FROM listings
     """).fetchall()
 
-    for row in rows:
+    total = len(rows)
+    updated = 0
 
-        valuation = calculate_valuation(
-            conn,
-            row
-        )
+    for start in range(
+        0,
+        total,
+        batch_size
+    ):
+        batch = rows[
+            start:start + batch_size
+        ]
 
-        conn.execute("""
+        # Do the potentially expensive valuation calculations before
+        # beginning a SQLite write transaction.
+        updates = []
+
+        for row in batch:
+
+            valuation = calculate_valuation(
+                conn,
+                row
+            )
+
+            updates.append((
+                valuation[
+                    "estimated_value"
+                ],
+                valuation["q1"],
+                valuation["q3"],
+                valuation["count"],
+                valuation[
+                    "confidence"
+                ],
+                valuation[
+                    "undervaluation_gbp"
+                ],
+                valuation[
+                    "undervaluation_pct"
+                ],
+                valuation[
+                    "deal_score"
+                ],
+                valuation[
+                    "basis"
+                ],
+                row["item_id"]
+            ))
+
+        if not updates:
+            continue
+
+        # Keep the SQLite writer transaction deliberately short.
+        conn.executemany("""
             UPDATE listings
             SET
                 estimated_value=?,
@@ -8397,32 +8468,15 @@ def revalue_all(conn):
                 deal_score=?,
                 valuation_basis=?
             WHERE item_id=?
-        """, (
-            valuation[
-                "estimated_value"
-            ],
-            valuation["q1"],
-            valuation["q3"],
-            valuation["count"],
-            valuation[
-                "confidence"
-            ],
-            valuation[
-                "undervaluation_gbp"
-            ],
-            valuation[
-                "undervaluation_pct"
-            ],
-            valuation[
-                "deal_score"
-            ],
-            valuation[
-                "basis"
-            ],
-            row["item_id"]
-        ))
+        """, updates)
 
-    conn.commit()
+        conn.commit()
+
+        updated += len(
+            updates
+        )
+
+    return updated
 
 
 # ============================================================
@@ -14232,7 +14286,16 @@ class DashboardHandler(
         for key, value in (headers or []):
             self.send_header(key, value)
         self.end_headers()
-        self.wfile.write(content)
+        try:
+            self.wfile.write(
+                content
+            )
+        except (
+            BrokenPipeError,
+            ConnectionResetError,
+        ):
+            # Client closed the browser/socket before the response completed.
+            pass
 
     def _redirect(self, location, headers=None):
         self.send_response(303)
@@ -16635,15 +16698,27 @@ def _product_research_worker():
             now = time.monotonic()
 
             if (
-                attempted > 0
-                or now - last_revalue >= PRODUCT_RESEARCH_REVALUE_SECONDS
+                now - last_revalue
+                >= PRODUCT_RESEARCH_REVALUE_SECONDS
             ):
-                revalue_all(conn)
-                telegram_sent = notify_pending_telegram_deals(conn)
+                revalued = revalue_all(
+                    conn
+                )
+
+                print(
+                    f"Product Research revalue: "
+                    f"{revalued} listings recalculated"
+                )
+
+                telegram_sent = notify_pending_telegram_deals(
+                    conn
+                )
+
                 if telegram_sent:
                     print(
                         f"Telegram alerts sent  : {telegram_sent}"
                     )
+
                 last_revalue = now
 
             if attempted <= 0:
