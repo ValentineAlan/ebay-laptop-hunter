@@ -36,6 +36,8 @@ import base64
 import sqlite3
 import statistics
 import threading
+import faulthandler
+import signal
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -55,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.53"
+APP_VERSION = "0.9.54"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -17123,6 +17125,27 @@ def start_persistent_logging():
 
 def main():
     start_persistent_logging()
+
+    # Diagnostic stack dump:
+    #     kill -USR1 <pid>
+    #
+    # Dumps every Python thread to the application log without terminating
+    # LaptopLander. Useful for locating CPU-bound worker code.
+    try:
+        faulthandler.register(
+            signal.SIGUSR1,
+            file=sys.stderr,
+            all_threads=True,
+        )
+        print(
+            "Python stack dump     : SIGUSR1 enabled"
+        )
+    except Exception as exc:
+        print(
+            "Could not enable SIGUSR1 stack dump:",
+            repr(exc)
+        )
+
     init_db()
     with connect_db() as migration_conn:
         repair_v078_model_and_sold_cache(migration_conn)
