@@ -55,7 +55,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.51"
+APP_VERSION = "0.9.52"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -472,6 +472,10 @@ def connect_db():
     # SQLite writer rather than failing immediately.
     conn.execute(
         "PRAGMA busy_timeout=30000"
+    )
+
+    conn.execute(
+        "PRAGMA synchronous=NORMAL"
     )
 
     return conn
@@ -16680,7 +16684,9 @@ def _product_research_worker():
         f"(minimum {PRODUCT_RESEARCH_MIN_INTERVAL_SECONDS:.1f}s)"
     )
 
-    last_revalue = 0.0
+    # Do not immediately revalue the entire database at worker startup.
+    # Allow Product Research to begin draining evidence first.
+    last_revalue = time.monotonic()
 
     while True:
         conn = None
