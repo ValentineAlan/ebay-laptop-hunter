@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.9.59"
+APP_VERSION = "0.9.60"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -5738,6 +5738,23 @@ def _product_research_invalid_session(raw, modules):
             return True
 
     return False
+
+class ProductResearchRateLimited(Exception):
+    """Product Research returned HTTP 429 and entered adaptive backoff."""
+    pass
+
+
+_product_research_rate_lock = threading.Lock()
+_product_research_next_request_at = 0.0
+_product_research_rate_loaded = False
+_product_research_rate = {
+    "interval_seconds": PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS,
+    "success_streak": 0,
+    "backoff_until": 0.0,
+    "last_429_at": None,
+    "last_success_at": None,
+}
+
 
 def _product_research_load_rate_state():
     global _product_research_rate_loaded
