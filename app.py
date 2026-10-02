@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.5"
+APP_VERSION = "0.10.6"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -6377,7 +6377,7 @@ def _product_research_open_circuit(reason):
 
     if should_alert:
         try:
-            ok, error = send_telegram_message(
+            ok, error = send_telegram_admin_message(
                 _product_research_challenge_telegram_message(
                     cooldown_seconds=cooldown_seconds,
                     challenge_count=challenge_count,
@@ -6388,7 +6388,7 @@ def _product_research_open_circuit(reason):
                 state["telegram_alert_sent"] = True
 
                 print(
-                    "Product Research block alert sent to Telegram",
+                    "Product Research block alert sent privately to Telegram admin",
                     flush=True,
                 )
             else:
@@ -6471,13 +6471,13 @@ def _product_research_close_circuit():
         )
 
         try:
-            ok, error = send_telegram_message(
+            ok, error = send_telegram_admin_message(
                 _product_research_recovered_telegram_message()
             )
 
             if ok:
                 print(
-                    "Product Research recovery alert sent to Telegram",
+                    "Product Research recovery alert sent privately to Telegram admin",
                     flush=True,
                 )
             else:
@@ -9649,6 +9649,78 @@ def send_telegram_message(text):
         return False, str(payload.get("description") or "Telegram returned ok=false")[:300]
     except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}"[:300]
+
+
+
+def send_telegram_admin_message(text):
+    """
+    Send LaptopLander operational notifications privately to the
+    administrator rather than to the public deal channel.
+    """
+    token = os.environ.get(
+        "TELEGRAM_BOT_TOKEN",
+        "",
+    ).strip()
+
+    chat_id = os.environ.get(
+        "TELEGRAM_ADMIN_CHAT_ID",
+        "",
+    ).strip()
+
+    if not token:
+        return False, "TELEGRAM_BOT_TOKEN is not configured"
+
+    if not chat_id:
+        return False, "TELEGRAM_ADMIN_CHAT_ID is not configured"
+
+    endpoint = (
+        f"https://api.telegram.org/bot{token}/sendMessage"
+    )
+
+    body = urllib.parse.urlencode({
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": "true",
+    }).encode("utf-8")
+
+    request = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={
+            "Content-Type":
+                "application/x-www-form-urlencoded"
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=12,
+        ) as response:
+            payload = json.loads(
+                response.read().decode(
+                    "utf-8",
+                    errors="replace",
+                )
+            )
+
+        if payload.get("ok") is True:
+            return True, ""
+
+        return (
+            False,
+            str(
+                payload.get("description")
+                or "Telegram returned ok=false"
+            )[:300],
+        )
+
+    except Exception as exc:
+        return (
+            False,
+            f"{type(exc).__name__}: {exc}"[:300],
+        )
 
 
 def repair_v0944_telegram_notification_baseline(conn):
