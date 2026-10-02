@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.7"
+APP_VERSION = "0.10.8"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -11349,10 +11349,10 @@ def _dashboard_html_base():
 
     <body>
 
-    <div class="live-update-bar" id="live-update-bar" aria-live="polite">
+    <div class="live-update-bar" id="live-update-bar" aria-live="polite" hidden>
         <span class="live-update-state">
             <span class="live-update-dot" aria-hidden="true"></span>
-            <span id="live-update-status">Live · checking for new deals</span>
+            <span id="live-update-status"></span>
         </span>
         <button type="button" id="live-update-button" class="live-update-button" hidden>
             Show updates
@@ -13562,15 +13562,11 @@ def _dashboard_html_base():
         let pendingFingerprint = shownFingerprint;
         let checking = false;
 
-        function setCheckedText() {{
-            const now = new Date();
-            status.textContent =
-                "Live · checked "
-                + now.toLocaleTimeString([], {{
-                    hour: "2-digit",
-                    minute: "2-digit",
-                    second: "2-digit"
-                }});
+        function hideUpdateBar() {{
+            bar.hidden = true;
+            bar.classList.remove("has-updates", "offline");
+            button.hidden = true;
+            status.textContent = "";
         }}
 
         async function checkForUpdates() {{
@@ -13597,9 +13593,7 @@ def _dashboard_html_base():
                 pendingFingerprint = nextFingerprint;
 
                 if (nextFingerprint === shownFingerprint) {{
-                    bar.classList.remove("has-updates", "offline");
-                    button.hidden = true;
-                    setCheckedText();
+                    hideUpdateBar();
                     return;
                 }}
 
@@ -13614,6 +13608,7 @@ def _dashboard_html_base():
                     if (!existing.has(id)) newCount += 1;
                 }});
 
+                bar.hidden = false;
                 bar.classList.remove("offline");
                 bar.classList.add("has-updates");
                 button.hidden = false;
@@ -13630,10 +13625,9 @@ def _dashboard_html_base():
                     button.textContent = "Show updates";
                 }}
             }} catch (error) {{
-                bar.classList.remove("has-updates");
-                bar.classList.add("offline");
-                status.textContent = "Live check unavailable · retrying";
-                button.hidden = true;
+                // Background polling is an implementation detail.
+                // Do not surface transient polling failures to visitors.
+                hideUpdateBar();
             }} finally {{
                 checking = false;
             }}
@@ -13651,7 +13645,7 @@ def _dashboard_html_base():
             if (!document.hidden) checkForUpdates();
         }});
 
-        setCheckedText();
+        hideUpdateBar();
         window.setInterval(checkForUpdates, POLL_MS);
         window.setTimeout(checkForUpdates, 1500);
     }})();
@@ -16132,36 +16126,19 @@ def _dashboard_health_alert():
             "class='system-health-notice'>"
 
             "<div class='health-notice-title'>"
-            "VALUATION RESEARCH PAUSED"
+            "NEW DEALS MAY BE DELAYED"
             "</div>"
 
             "<div class='health-notice-copy'>"
-            "eBay has temporarily blocked Product Research. "
-            "New-listing discovery continues normally and the "
-            "valuation backlog is preserved."
-            "</div>"
-
-            "<div class='health-notice-meta'>"
-            "Next automatic check: "
-            + html.escape(probe_text)
-            + " &nbsp;·&nbsp; Block "
-            + html.escape(str(challenge_count))
-            + "</div>"
-
-            "<div class='health-notice-actions'>"
-            "<a href='/diagnostics'>"
-            "View diagnostics"
-            "</a>"
-
-            "<a href='"
-            + html.escape(
-                PRODUCT_RESEARCH_BROWSER_GUI_URL,
-                quote=True,
-            )
-            + "' target='_blank' "
-            "rel='noopener noreferrer'>"
-            "Open Chromium ↗"
-            "</a>"
+            "eBay isn't happy that we're doing so much searching of "
+            "sold-history prices — which we need to do to work out "
+            "what laptops are really worth — and has temporarily "
+            "blocked us from doing more."
+            "<br><br>"
+            "That's why you may not be seeing new deals at the moment."
+            "<br><br>"
+            "We're on it. As soon as we've regained access to eBay's "
+            "sales history, new deals will start coming through again."
             "</div>"
 
             "</div>"
