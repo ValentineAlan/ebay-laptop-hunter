@@ -11,12 +11,29 @@ Self-hosted eBay UK laptop deal hunter with:
 - persistent Chromium session for Product Research
 - automatic `ebaysid` recovery via Chrome DevTools Protocol
 
-Current bundled versions:
+Current version:
 
-- Hunter: `0.8.0`
-- SID helper: `0.1.1`
+- Laptop Lander / Hunter: `0.10.6`
+- Chromium/Product Research helper: bundled with the application
 
-## Valuation changes in 0.8.0
+See `CHANGELOG.md` for release history.
+
+## Current 0.10.x architecture
+
+Laptop Lander now separates live-listing discovery from sold-price research:
+
+- eBay Browse API handles live-listing discovery.
+- eBay Product Research runs through the persistent Chromium session.
+- Product Research uses adaptive request pacing with durable SQLite state.
+- Learned Product Research pacing survives redeploys.
+- eBay Product Research challenges open a circuit breaker rather than repeatedly consuming the valuation backlog.
+- Browse discovery continues while Product Research is paused.
+- Product Research can automatically resume after recovery.
+- Product Research operational alerts are sent privately to the administrator.
+- Public Telegram notifications are reserved for qualifying laptop deals.
+- Durable application state is stored in SQLite; browser/helper IPC remains file-based.
+
+## Historical: valuation changes introduced in 0.8.0
 
 This release favours fewer, better-supported valuations over optimistic bargain
 scores. At least three distinct, recent sold listing IDs/titles must match an

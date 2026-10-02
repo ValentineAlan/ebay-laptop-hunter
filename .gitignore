@@ -19,3 +19,18 @@ product-research-session.json
 *.har
 cookies.txt
 cookies.json
+
+# Local development backups
+*.bak
+*.bak.*
+*.backup.*
+*.before-*
+*.pre-*
+README.md.bak.*
+
+# Local archives
+*.zip
+
+# Local helper/deployment scripts not intended for repository
+push-deploy-test.sh
+
