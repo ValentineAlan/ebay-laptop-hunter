@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.4"
+APP_VERSION = "0.10.5"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -120,7 +120,7 @@ PRODUCT_RESEARCH_CHALLENGE_COOLDOWNS = (
     4 * 60 * 60,   # third: 4 hours
     6 * 60 * 60,   # fourth and subsequent: 6 hours
 )
-PRODUCT_RESEARCH_CIRCUIT_STATE = "/data/product-research-circuit.json"
+LEGACY_PRODUCT_RESEARCH_CIRCUIT_STATE = "/data/product-research-circuit.json"
 PRODUCT_RESEARCH_RECOVERY_SIGNAL = "/data/product-research-recovery.signal"
 PRODUCT_RESEARCH_MANUAL_CHALLENGE = "/data/product-research-manual-challenge.json"
 PRODUCT_RESEARCH_BROWSER_GUI_URL = os.environ.get(
@@ -137,7 +137,7 @@ PRODUCT_RESEARCH_DAY_RANGE = 90
 PRODUCT_RESEARCH_LIMIT = 50
 PRODUCT_RESEARCH_MAX_PAGES = 2
 PRODUCT_RESEARCH_SEARCHES_PER_CYCLE = 12  # legacy batch default; worker uses one query at a time
-PRODUCT_RESEARCH_RATE_STATE = "/data/product-research-rate.json"
+LEGACY_PRODUCT_RESEARCH_RATE_STATE = "/data/product-research-rate.json"
 PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS = 10.0
 PRODUCT_RESEARCH_MIN_INTERVAL_SECONDS = 5.0
 PRODUCT_RESEARCH_MAX_INTERVAL_SECONDS = 300.0
@@ -499,6 +499,210 @@ def connect_db():
     )
 
     return conn
+
+
+
+RUNTIME_STATE_PRODUCT_RESEARCH_RATE = "product_research_rate"
+RUNTIME_STATE_PRODUCT_RESEARCH_CIRCUIT = "product_research_circuit"
+
+
+def runtime_state_get(key, default=None):
+    """
+    Read durable operational state from SQLite.
+
+    Browser/container IPC deliberately remains file-based; this table is for
+    application-owned state that must survive redeploys.
+    """
+    conn = connect_db()
+
+    try:
+        row = conn.execute(
+            """
+            SELECT value_json
+            FROM runtime_state
+            WHERE key=?
+            """,
+            (key,),
+        ).fetchone()
+
+        if not row:
+            return default
+
+        try:
+            return json.loads(
+                row["value_json"]
+            )
+        except Exception:
+            return default
+
+    finally:
+        conn.close()
+
+
+def runtime_state_set(key, value):
+    conn = connect_db()
+
+    try:
+        conn.execute(
+            """
+            INSERT INTO runtime_state(
+                key,
+                value_json,
+                updated_at
+            )
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value_json=excluded.value_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                key,
+                json.dumps(
+                    value,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                iso_now(),
+            ),
+        )
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+
+def runtime_state_delete(key):
+    conn = connect_db()
+
+    try:
+        conn.execute(
+            """
+            DELETE FROM runtime_state
+            WHERE key=?
+            """,
+            (key,),
+        )
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+
+def _migrate_legacy_runtime_state_files(conn):
+    """
+    One-time migration from the old JSON persistence files.
+
+    Existing SQLite values always win. Legacy files are removed only after
+    their state is safely present in runtime_state.
+    """
+    migrations = (
+        (
+            RUNTIME_STATE_PRODUCT_RESEARCH_RATE,
+            LEGACY_PRODUCT_RESEARCH_RATE_STATE,
+        ),
+        (
+            RUNTIME_STATE_PRODUCT_RESEARCH_CIRCUIT,
+            LEGACY_PRODUCT_RESEARCH_CIRCUIT_STATE,
+        ),
+    )
+
+    remove_after_commit = []
+
+    for key, filename in migrations:
+        existing = conn.execute(
+            """
+            SELECT 1
+            FROM runtime_state
+            WHERE key=?
+            """,
+            (key,),
+        ).fetchone()
+
+        legacy_exists = os.path.exists(
+            filename
+        )
+
+        if existing:
+            if legacy_exists:
+                remove_after_commit.append(
+                    filename
+                )
+            continue
+
+        if not legacy_exists:
+            continue
+
+        legacy = _read_json_file(
+            filename
+        )
+
+        if not isinstance(
+            legacy,
+            dict,
+        ):
+            print(
+                "Runtime-state migration: "
+                f"not removing unreadable {filename}",
+                flush=True,
+            )
+            continue
+
+        conn.execute(
+            """
+            INSERT INTO runtime_state(
+                key,
+                value_json,
+                updated_at
+            )
+            VALUES (?, ?, ?)
+            """,
+            (
+                key,
+                json.dumps(
+                    legacy,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                iso_now(),
+            ),
+        )
+
+        remove_after_commit.append(
+            filename
+        )
+
+        print(
+            "Runtime-state migration: "
+            f"imported {filename} -> SQLite key {key}",
+            flush=True,
+        )
+
+    # Make the imported values durable before deleting their source files.
+    conn.commit()
+
+    for filename in remove_after_commit:
+        try:
+            os.unlink(
+                filename
+            )
+
+            print(
+                "Runtime-state migration: "
+                f"removed legacy {filename}",
+                flush=True,
+            )
+
+        except FileNotFoundError:
+            pass
+
+        except OSError as exc:
+            print(
+                "Runtime-state migration: "
+                f"could not remove {filename}: {exc!r}",
+                flush=True,
+            )
 
 
 def ensure_column(
@@ -1042,6 +1246,14 @@ def init_db():
               'USB_C_PD',
               'WIN11_APPROVED'
           )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS runtime_state (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
     """)
 
     conn.execute("""
@@ -5777,14 +5989,20 @@ _product_research_rate = {
 _product_research_browser_lock = threading.Lock()
 
 
+
 def _product_research_load_rate_state():
     global _product_research_rate_loaded
 
     with _product_research_rate_lock:
         if _product_research_rate_loaded:
-            return dict(_product_research_rate)
+            return dict(
+                _product_research_rate
+            )
 
-        saved = _read_json_file(PRODUCT_RESEARCH_RATE_STATE)
+        saved = runtime_state_get(
+            RUNTIME_STATE_PRODUCT_RESEARCH_RATE,
+            {},
+        ) or {}
 
         try:
             interval = float(
@@ -5794,20 +6012,41 @@ def _product_research_load_rate_state():
                 )
             )
         except Exception:
-            interval = PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS
+            interval = (
+                PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS
+            )
 
         interval = min(
             PRODUCT_RESEARCH_MAX_INTERVAL_SECONDS,
-            max(PRODUCT_RESEARCH_MIN_INTERVAL_SECONDS, interval),
+            max(
+                PRODUCT_RESEARCH_MIN_INTERVAL_SECONDS,
+                interval,
+            ),
         )
 
         try:
-            success_streak = max(0, int(saved.get("success_streak", 0)))
+            success_streak = max(
+                0,
+                int(
+                    saved.get(
+                        "success_streak",
+                        0,
+                    )
+                ),
+            )
         except Exception:
             success_streak = 0
 
         try:
-            backoff_until = max(0.0, float(saved.get("backoff_until", 0.0)))
+            backoff_until = max(
+                0.0,
+                float(
+                    saved.get(
+                        "backoff_until",
+                        0.0,
+                    )
+                ),
+            )
         except Exception:
             backoff_until = 0.0
 
@@ -5815,18 +6054,32 @@ def _product_research_load_rate_state():
             "interval_seconds": interval,
             "success_streak": success_streak,
             "backoff_until": backoff_until,
-            "last_429_at": saved.get("last_429_at"),
-            "last_success_at": saved.get("last_success_at"),
+            "last_429_at": saved.get(
+                "last_429_at"
+            ),
+            "last_success_at": saved.get(
+                "last_success_at"
+            ),
         })
+
         _product_research_rate_loaded = True
-        return dict(_product_research_rate)
+
+        return dict(
+            _product_research_rate
+        )
 
 
 def _product_research_save_rate_state():
-    payload = dict(_product_research_rate)
-    payload["updated_at"] = iso_now()
-    _atomic_json_write(PRODUCT_RESEARCH_RATE_STATE, payload)
+    payload = dict(
+        _product_research_rate
+    )
 
+    payload["updated_at"] = iso_now()
+
+    runtime_state_set(
+        RUNTIME_STATE_PRODUCT_RESEARCH_RATE,
+        payload,
+    )
 
 def _product_research_retry_after_seconds(exc):
     try:
@@ -5950,18 +6203,22 @@ def _product_research_record_429(exc):
 _product_research_circuit_lock = threading.Lock()
 
 
+
 def _product_research_circuit_state():
     with _product_research_circuit_lock:
-        state = _read_json_file(
-            PRODUCT_RESEARCH_CIRCUIT_STATE
+        state = runtime_state_get(
+            RUNTIME_STATE_PRODUCT_RESEARCH_CIRCUIT,
+            {},
         )
 
     return (
         state
-        if isinstance(state, dict)
+        if isinstance(
+            state,
+            dict,
+        )
         else {}
     )
-
 
 def _product_research_circuit_is_open():
     state = _product_research_circuit_state()
@@ -6149,8 +6406,8 @@ def _product_research_open_circuit(reason):
             )
 
     with _product_research_circuit_lock:
-        _atomic_json_write(
-            PRODUCT_RESEARCH_CIRCUIT_STATE,
+        runtime_state_set(
+            RUNTIME_STATE_PRODUCT_RESEARCH_CIRCUIT,
             state,
         )
 
@@ -6188,14 +6445,9 @@ def _product_research_close_circuit():
     )
 
     with _product_research_circuit_lock:
-        try:
-            os.unlink(
-                PRODUCT_RESEARCH_CIRCUIT_STATE
-            )
-        except FileNotFoundError:
-            pass
-        except OSError:
-            pass
+        runtime_state_delete(
+            RUNTIME_STATE_PRODUCT_RESEARCH_CIRCUIT
+        )
 
     for file_path in (
         PRODUCT_RESEARCH_RECOVERY_SIGNAL,
@@ -13895,8 +14147,9 @@ def diagnostics_html():
         helper = {}
 
     try:
-        circuit = _read_json_file(
-            PRODUCT_RESEARCH_CIRCUIT_STATE
+        circuit = runtime_state_get(
+            RUNTIME_STATE_PRODUCT_RESEARCH_CIRCUIT,
+            {},
         ) or {}
     except Exception:
         circuit = {}
@@ -15602,8 +15855,9 @@ def _dashboard_health_alert():
         helper = {}
 
     try:
-        circuit = _read_json_file(
-            PRODUCT_RESEARCH_CIRCUIT_STATE
+        circuit = runtime_state_get(
+            RUNTIME_STATE_PRODUCT_RESEARCH_CIRCUIT,
+            {},
         ) or {}
     except Exception:
         circuit = {}
