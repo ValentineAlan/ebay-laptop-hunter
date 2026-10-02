@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.8"
+APP_VERSION = "0.10.9"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -13176,6 +13176,10 @@ def _dashboard_html_base():
             box-shadow: 0 3px 12px rgba(16,24,40,.08);
             backdrop-filter: blur(8px);
             font-size: 13px;
+        }}
+
+        .live-update-bar[hidden] {{
+            display: none;
         }}
 
         .live-update-state {{
