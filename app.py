@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.6"
+APP_VERSION = "0.10.7"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -139,7 +139,7 @@ PRODUCT_RESEARCH_MAX_PAGES = 2
 PRODUCT_RESEARCH_SEARCHES_PER_CYCLE = 12  # legacy batch default; worker uses one query at a time
 LEGACY_PRODUCT_RESEARCH_RATE_STATE = "/data/product-research-rate.json"
 PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS = 10.0
-PRODUCT_RESEARCH_MIN_INTERVAL_SECONDS = 5.0
+PRODUCT_RESEARCH_MIN_INTERVAL_SECONDS = 10.0
 PRODUCT_RESEARCH_MAX_INTERVAL_SECONDS = 300.0
 PRODUCT_RESEARCH_STABLE_SUCCESSES = 100
 PRODUCT_RESEARCH_429_FALLBACK_SECONDS = 300
@@ -5988,6 +5988,86 @@ _product_research_rate = {
 
 _product_research_browser_lock = threading.Lock()
 
+# Per-process Product Research request telemetry.  This deliberately records
+# timing/count information only; request URLs, cookies and session identifiers
+# are not retained here.  Counts include recovery probes because eBay sees them
+# as Product Research requests too.
+_product_research_telemetry_lock = threading.Lock()
+_product_research_telemetry_started_at = time.monotonic()
+_product_research_telemetry_request_count = 0
+_product_research_telemetry_request_times = []
+
+
+def _product_research_telemetry_begin():
+    global _product_research_telemetry_request_count
+
+    now_wall = time.time()
+    now_mono = time.monotonic()
+
+    with _product_research_telemetry_lock:
+        _product_research_telemetry_request_count += 1
+        request_number = _product_research_telemetry_request_count
+        _product_research_telemetry_request_times.append(now_wall)
+
+        cutoff = now_wall - 3600.0
+        while (
+            _product_research_telemetry_request_times
+            and _product_research_telemetry_request_times[0] < cutoff
+        ):
+            _product_research_telemetry_request_times.pop(0)
+
+        elapsed = max(
+            0.0,
+            now_mono - _product_research_telemetry_started_at,
+        )
+
+        counts = {}
+        for minutes in (1, 5, 15, 30, 60):
+            window_start = now_wall - (minutes * 60.0)
+            counts[minutes] = sum(
+                1
+                for timestamp in _product_research_telemetry_request_times
+                if timestamp >= window_start
+            )
+
+    with _product_research_rate_lock:
+        interval = float(
+            _product_research_rate.get(
+                "interval_seconds",
+                PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS,
+            )
+        )
+
+    return {
+        "number": request_number,
+        "elapsed": elapsed,
+        "counts": counts,
+        "interval": interval,
+    }
+
+
+def _product_research_telemetry_log(telemetry, outcome, detail=""):
+    elapsed = int(telemetry["elapsed"])
+    hours, remainder = divmod(elapsed, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    elapsed_text = f"{hours:d}:{minutes:02d}:{seconds:02d}"
+    counts = telemetry["counts"]
+
+    message = (
+        "Product Research telemetry: "
+        f"PR #{telemetry['number']} "
+        f"+{elapsed_text} "
+        f"interval={telemetry['interval']:.1f}s "
+        f"outcome={outcome} "
+        f"rolling=1m:{counts[1]},5m:{counts[5]},"
+        f"15m:{counts[15]},30m:{counts[30]},60m:{counts[60]} "
+        f"session:{telemetry['number']}"
+    )
+
+    if detail:
+        message += " " + str(detail)[:200]
+
+    print(message, flush=True)
 
 
 def _product_research_load_rate_state():
@@ -6505,6 +6585,7 @@ def _product_research_fetch(url, cookie=None):
     cookie is retained only for compatibility with old callers.
     """
     _product_research_wait_for_slot()
+    telemetry = _product_research_telemetry_begin()
 
     request_id = secrets.token_hex(16)
 
@@ -6558,6 +6639,11 @@ def _product_research_fetch(url, cookie=None):
                 ),
             )
 
+            _product_research_telemetry_log(
+                telemetry,
+                "TIMEOUT",
+            )
+
             raise RuntimeError(
                 "PRODUCT_RESEARCH_BROWSER_TIMEOUT"
             )
@@ -6572,6 +6658,11 @@ def _product_research_fetch(url, cookie=None):
     error = response_payload.get("error")
 
     if error:
+        _product_research_telemetry_log(
+            telemetry,
+            "BROWSER_ERROR",
+            str(error)[:120],
+        )
         raise RuntimeError(
             "PRODUCT_RESEARCH_BROWSER_ERROR:"
             + str(error)[:500]
@@ -6614,6 +6705,11 @@ def _product_research_fetch(url, cookie=None):
             Browser429()
         )
 
+        _product_research_telemetry_log(
+            telemetry,
+            "HTTP_429",
+        )
+
         raise ProductResearchRateLimited(
             "Product Research returned "
             "HTTP 429 Too Many Requests"
@@ -6625,6 +6721,12 @@ def _product_research_fetch(url, cookie=None):
             f"HTTP={status} "
             f"content_type={content_type!r}",
             flush=True,
+        )
+
+        _product_research_telemetry_log(
+            telemetry,
+            f"HTTP_{status}",
+            f"content_type={content_type!r}",
         )
 
         raise RuntimeError(
@@ -6640,6 +6742,11 @@ def _product_research_fetch(url, cookie=None):
             flush=True,
         )
 
+        _product_research_telemetry_log(
+            telemetry,
+            "EMPTY",
+            f"HTTP={status}",
+        )
         return raw
 
     if raw.lstrip().startswith("<"):
@@ -6655,6 +6762,33 @@ def _product_research_fetch(url, cookie=None):
             f"content_type={content_type!r} "
             f"preview={preview!r}",
             flush=True,
+        )
+
+        lowered = raw.lower()
+        html_outcome = (
+            "CHALLENGE"
+            if any(
+                marker in lowered
+                for marker in (
+                    "pardon our interruption",
+                    "splashui/challenge",
+                    "security measure",
+                    "captcha",
+                    "challenge",
+                )
+            )
+            else "HTML"
+        )
+        _product_research_telemetry_log(
+            telemetry,
+            html_outcome,
+            f"HTTP={status} bytes={len(raw)}",
+        )
+    else:
+        _product_research_telemetry_log(
+            telemetry,
+            "OK",
+            f"HTTP={status} bytes={len(raw)}",
         )
 
     return raw
