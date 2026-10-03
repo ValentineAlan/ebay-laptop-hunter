@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.11"
+APP_VERSION = "0.10.12"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -10424,9 +10424,19 @@ def _dashboard_html_base():
     auction_candidates = len(auction_rows)
     candidates = buy_now_candidates + auction_candidates
 
-    api_calls = browse_usage_today(
-        conn
-    )
+    # Public page must never perform a live eBay quota request.
+    # The worker/runtime state is the authoritative cached value here.
+    try:
+        api_calls = int(
+            runtime_state_get(
+                conn,
+                "browse_usage_today",
+                0,
+            )
+            or 0
+        )
+    except Exception:
+        api_calls = 0
 
 
     # Public dashboard pipeline counters.
@@ -10616,205 +10626,29 @@ def _dashboard_html_base():
         )
 
         basis = row["valuation_basis"] or ""
-        evidence = sold_evidence_for_basis(
-            conn,
-            row,
-            basis
-        )
 
-        sold_logic = sold_price_logic_for_basis(
-            conn,
-            row,
-            basis
-        )
+        # Sold-price evidence is deliberately NOT reconstructed here.
+        # It is expensive and is only required when the visitor opens
+        # the valuation information control.
+        count = row["comparable_count"] or 0
 
-        if sold_logic:
-            evidence_rows = []
-
-            for entry in sold_logic[:35]:
-                sold = entry["row"]
-                decision = entry["decision"]
-                reasons = ", ".join(entry.get("condition_reasons") or [])
-
-                adjustment = entry.get("condition_adjustment_pct")
-                adjustment_text = (
-                    f"+{adjustment:.0f}%"
-                    if adjustment
-                    else "—"
-                )
-
-                normalised = entry.get("normalised_total")
-                normalised_text = (
-                    money(normalised)
-                    if normalised is not None
-                    else "—"
-                )
-
-                condition_key = entry.get("condition_class") or "WORKING_NORMAL"
-                condition_label = {
-                    "WORKING_NORMAL": "Normal",
-                    "WORKING_DAMAGED": "Damaged",
-                    "WORKING_MINOR_FAULT": "Minor fault",
-                    "FAULTY_OR_PARTS": "Faulty / parts",
-                    "NEW_CONDITION": "New",
-                }.get(condition_key, condition_key.replace("_", " ").title())
-
-                if decision == "USED":
-                    decision_label = "USED"
-                elif decision == "EXCLUDED_OUTLIER":
-                    decision_label = "EXCLUDED · PRICE OUTLIER"
-                elif condition_key == "NEW_CONDITION":
-                    decision_label = "EXCLUDED · NEW CONDITION"
-                else:
-                    decision_label = "EXCLUDED · FAULT/PARTS"
-
-                condition_html = (
-                    "<span class='evidence-condition'>"
-                    + html.escape(condition_label)
-                    + "</span>"
-                )
-                sold_condition_text = normalise(
-                    row_value(sold, "sold_condition", "")
-                )
-                if sold_condition_text:
-                    condition_html += (
-                        "<span class='evidence-reason'>"
-                        + html.escape("eBay: " + sold_condition_text)
-                        + "</span>"
-                    )
-                if reasons and reasons.lower() != sold_condition_text.lower():
-                    condition_html += (
-                        "<span class='evidence-reason'>"
-                        + html.escape(reasons)
-                        + "</span>"
-                    )
-
-                match_bits = []
-                if entry.get("spec_tier"):
-                    match_bits.append(str(entry["spec_tier"]))
-                if entry.get("tier"):
-                    match_bits.append(str(entry["tier"]))
-                match_text = " / ".join(match_bits) or "—"
-                match_text = {
-                    "EXACT / EXACT": "Exact spec",
-                    "EXACT / COMPATIBLE": "Exact spec",
-                    "RAM_NEAR / EXACT": "Near spec",
-                    "STORAGE_NEAR / EXACT": "Near spec",
-                }.get(match_text, match_text.replace("_", " ").title())
-
-                decision_class = (
-                    "evidence-decision-used"
-                    if decision == "USED"
-                    else "evidence-decision-excluded"
-                )
-                decision_display = {
-                    "USED": "Used",
-                    "EXCLUDED · PRICE OUTLIER": "Price outlier",
-                    "EXCLUDED · NEW CONDITION": "New condition",
-                    "EXCLUDED · FAULT/PARTS": "Fault / parts",
-                }.get(decision_label, decision_label)
-
-                sold_title = html.escape(sold["title"] or "")
-                sold_item_id = canonical_sold_item_id(
-                    row_value(sold, "item_id")
-                )
-                if sold_item_id and re.fullmatch(r"\d{9,15}", sold_item_id):
-                    sold_url = (
-                        "https://www.ebay.co.uk/itm/"
-                        + urllib.parse.quote(sold_item_id, safe="")
-                    )
-                    sold_title_html = (
-                        f"<a class='evidence-title-link' "
-                        f"href='{html.escape(sold_url, quote=True)}' "
-                        f"target='_blank' rel='noopener noreferrer' "
-                        f"title='Open sold eBay listing'>"
-                        f"{sold_title}<span class='evidence-external-link' aria-hidden='true'>↗</span>"
-                        f"</a>"
-                    )
-                else:
-                    sold_title_html = sold_title
-
-                evidence_rows.append(
-                    "<tr>"
-                    f"<td>{sold_title_html}</td>"
-                    f"<td class='money'>{money(entry['raw_total'])}</td>"
-                    f"<td>{condition_html}</td>"
-                    f"<td>{adjustment_text}</td>"
-                    f"<td class='money'>{normalised_text}</td>"
-                    f"<td class='{decision_class}'>{html.escape(decision_display)}</td>"
-                    f"<td>{html.escape(match_text)}</td>"
-                    f"<td>{html.escape(sold['last_sold'] or '')}</td>"
-                    "</tr>"
-                )
-
-            used_count = sum(
-                entry["decision"] == "USED"
-                for entry in sold_logic
-            )
-            adjusted_count = sum(
-                entry["decision"] == "USED"
-                and (entry.get("condition_adjustment_pct") or 0) > 0
-                for entry in sold_logic
-            )
-            new_condition_excluded = sum(
-                entry["decision"] == "EXCLUDED_CONDITION"
-                and entry.get("condition_class") == "NEW_CONDITION"
-                for entry in sold_logic
-            )
-            condition_excluded = sum(
-                entry["decision"] == "EXCLUDED_CONDITION"
-                and entry.get("condition_class") != "NEW_CONDITION"
-                for entry in sold_logic
-            )
-            outlier_excluded = sum(
-                entry["decision"] == "EXCLUDED_OUTLIER"
-                for entry in sold_logic
-            )
-
-            logic_summary = (
-                f"Used {used_count}; "
-                f"condition-adjusted {adjusted_count}; "
-                f"new-condition excluded {new_condition_excluded}; "
-                f"fault/parts excluded {condition_excluded}; "
-                f"price outliers excluded {outlier_excluded}. "
-                "New merchandise is excluded from used-laptop valuation. "
-                "Moderate working damage is normalised +12% and down-weighted; "
-                "minor faults +6% and down-weighted. Serious/non-working sales are not valued as working laptops."
-            )
-
-            evidence_html = (
-                "<details class='evidence'>"
-                "<summary>Show sold-price logic</summary>"
-                "<div class='small' style='margin:8px 0 10px'>"
-                + html.escape(logic_summary)
-                + "</div>"
-                "<div class='evidence-table-wrap'>"
-                "<table class='evidence-table'>"
-                "<thead><tr>"
-                "<th>Sold listing</th><th>Raw delivered</th>"
-                "<th>Condition</th><th>Adjustment</th>"
-                "<th>Value used</th><th>Decision</th>"
-                "<th>Match</th><th>Last sold</th>"
-                "</tr></thead><tbody>"
-                + "".join(evidence_rows)
-                + "</tbody></table></div></details>"
-            )
-
-            sales_wording = (
-                f"{sum(c['units'] for c in evidence)} sales "
-                f"from {len(evidence)} sold listings"
-            )
+        if basis.startswith("ACTIVE_FALLBACK"):
+            sales_wording = f"{count} active comparables"
         else:
-            evidence_html = ""
-            count = row["comparable_count"] or 0
-            if basis.startswith("ACTIVE_FALLBACK"):
-                sales_wording = f"{count} active comparables"
-            else:
-                sales_wording = f"{count} sold comparables"
+            sales_wording = f"{count} sold comparables"
 
-        sales_total = sum(
-            int(c["units"] or 1)
-            for c in evidence
+        hover_evidence_html = (
+            "<div class='valuation-evidence-lazy' "
+            "data-item-id='"
+            + html.escape(
+                str(row["item_id"] or ""),
+                quote=True,
+            )
+            + "'>"
+            "<div class='small valuation-evidence-loading'>"
+            "Open to load sold-price evidence"
+            "</div>"
+            "</div>"
         )
 
         def compact_mark(value):
@@ -10888,13 +10722,6 @@ def _dashboard_html_base():
                 "Win11-OK"
                 "</span>"
             )
-
-        hover_evidence_html = (
-            evidence_html
-            .replace("<details class='evidence'>", "<div class='evidence'>")
-            .replace("<summary>Show sold evidence</summary>", "")
-            .replace("</details>", "</div>")
-        )
 
         image_url = row["image_url"] or ""
 
@@ -11356,6 +11183,7 @@ def _dashboard_html_base():
     <!doctype html>
     <html>
     <head>
+    <link rel="icon" href="/favicon.ico" type="image/svg+xml">
         <meta charset="utf-8">
         <title>Laptop Lander</title>
         <style>{CSS}</style>
@@ -13539,6 +13367,95 @@ def _dashboard_html_base():
         }}
 
         schedule();
+    }})();
+    </script>
+
+    <script>
+    (() => {{
+        async function loadValuationEvidence(target) {{
+            const hover = target.closest(".valuation-hover");
+            if (!hover) return;
+
+            const container = hover.querySelector(
+                ".valuation-evidence-lazy"
+            );
+
+            if (
+                !container
+                || container.dataset.loaded === "1"
+                || container.dataset.loading === "1"
+            ) {{
+                return;
+            }}
+
+            const itemId = container.dataset.itemId;
+            if (!itemId) return;
+
+            container.dataset.loading = "1";
+            container.innerHTML =
+                "<div class='small'>Loading sold-price evidence…</div>";
+
+            try {{
+                const response = await fetch(
+                    "/valuation-evidence?item_id="
+                    + encodeURIComponent(itemId),
+                    {{
+                        cache: "force-cache"
+                    }}
+                );
+
+                if (!response.ok) {{
+                    throw new Error(
+                        "HTTP " + response.status
+                    );
+                }}
+
+                container.innerHTML =
+                    await response.text();
+
+                container.dataset.loaded = "1";
+
+            }} catch (error) {{
+                container.innerHTML =
+                    "<div class='small'>"
+                    + "Unable to load valuation evidence."
+                    + "</div>";
+            }} finally {{
+                delete container.dataset.loading;
+            }}
+        }}
+
+        document.addEventListener(
+            "click",
+            event => {{
+                const target = event.target.closest(
+                    ".valuation-info"
+                );
+
+                if (target) {{
+                    loadValuationEvidence(target);
+                }}
+            }}
+        );
+
+        document.addEventListener(
+            "focusin",
+            event => {{
+                const target = event.target.closest(
+                    ".valuation-hover"
+                );
+
+                if (target) {{
+                    const info = target.querySelector(
+                        ".valuation-info"
+                    );
+
+                    if (info) {{
+                        loadValuationEvidence(info);
+                    }}
+                }}
+            }}
+        );
     }})();
     </script>
 
@@ -15834,6 +15751,341 @@ def _live_deal_ids():
         conn.close()
 
 
+
+def _valuation_evidence_html(item_id):
+    """
+    Render sold-price evidence for one listing on demand.
+
+    This intentionally performs the expensive sold-history analysis only
+    after a visitor asks to see evidence for a particular deal.
+    """
+    conn = connect_db()
+
+    try:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM listings
+            WHERE item_id = ?
+            LIMIT 1
+            """,
+            (item_id,),
+        ).fetchone()
+
+        if row is None:
+            return (
+                "<div class='small'>"
+                "Valuation evidence is no longer available for this listing."
+                "</div>"
+            )
+
+        basis = row["valuation_basis"] or ""
+
+        evidence = sold_evidence_for_basis(
+            conn,
+            row,
+            basis,
+        )
+
+        sold_logic = sold_price_logic_for_basis(
+            conn,
+            row,
+            basis,
+        )
+
+        if not sold_logic:
+            count = row["comparable_count"] or 0
+
+            if basis.startswith("ACTIVE_FALLBACK"):
+                wording = f"{count} active comparables"
+            else:
+                wording = f"{count} sold comparables"
+
+            return (
+                "<div class='small'>"
+                + html.escape(wording)
+                + "</div>"
+            )
+
+        evidence_rows = []
+
+        for entry in sold_logic[:35]:
+            sold = entry["row"]
+            decision = entry["decision"]
+
+            reasons = ", ".join(
+                entry.get("condition_reasons") or []
+            )
+
+            adjustment = entry.get(
+                "condition_adjustment_pct"
+            )
+
+            adjustment_text = (
+                f"+{adjustment:.0f}%"
+                if adjustment
+                else "—"
+            )
+
+            normalised = entry.get(
+                "normalised_total"
+            )
+
+            normalised_text = (
+                money(normalised)
+                if normalised is not None
+                else "—"
+            )
+
+            condition_key = (
+                entry.get("condition_class")
+                or "WORKING_NORMAL"
+            )
+
+            condition_label = {
+                "WORKING_NORMAL": "Normal",
+                "WORKING_DAMAGED": "Damaged",
+                "WORKING_MINOR_FAULT": "Minor fault",
+                "FAULTY_OR_PARTS": "Faulty / parts",
+                "NEW_CONDITION": "New",
+            }.get(
+                condition_key,
+                condition_key.replace("_", " ").title(),
+            )
+
+            if decision == "USED":
+                decision_label = "USED"
+            elif decision == "EXCLUDED_OUTLIER":
+                decision_label = "EXCLUDED · PRICE OUTLIER"
+            elif condition_key == "NEW_CONDITION":
+                decision_label = "EXCLUDED · NEW CONDITION"
+            else:
+                decision_label = "EXCLUDED · FAULT/PARTS"
+
+            condition_html = (
+                "<span class='evidence-condition'>"
+                + html.escape(condition_label)
+                + "</span>"
+            )
+
+            sold_condition_text = normalise(
+                row_value(
+                    sold,
+                    "sold_condition",
+                    "",
+                )
+            )
+
+            if sold_condition_text:
+                condition_html += (
+                    "<span class='evidence-reason'>"
+                    + html.escape(
+                        "eBay: " + sold_condition_text
+                    )
+                    + "</span>"
+                )
+
+            if (
+                reasons
+                and reasons.lower()
+                != sold_condition_text.lower()
+            ):
+                condition_html += (
+                    "<span class='evidence-reason'>"
+                    + html.escape(reasons)
+                    + "</span>"
+                )
+
+            match_bits = []
+
+            if entry.get("spec_tier"):
+                match_bits.append(
+                    str(entry["spec_tier"])
+                )
+
+            if entry.get("tier"):
+                match_bits.append(
+                    str(entry["tier"])
+                )
+
+            match_text = (
+                " / ".join(match_bits)
+                or "—"
+            )
+
+            match_text = {
+                "EXACT / EXACT": "Exact spec",
+                "EXACT / COMPATIBLE": "Exact spec",
+                "RAM_NEAR / EXACT": "Near spec",
+                "STORAGE_NEAR / EXACT": "Near spec",
+            }.get(
+                match_text,
+                match_text.replace("_", " ").title(),
+            )
+
+            decision_class = (
+                "evidence-decision-used"
+                if decision == "USED"
+                else "evidence-decision-excluded"
+            )
+
+            decision_display = {
+                "USED": "Used",
+                "EXCLUDED · PRICE OUTLIER":
+                    "Price outlier",
+                "EXCLUDED · NEW CONDITION":
+                    "New condition",
+                "EXCLUDED · FAULT/PARTS":
+                    "Fault / parts",
+            }.get(
+                decision_label,
+                decision_label,
+            )
+
+            sold_title = html.escape(
+                sold["title"] or ""
+            )
+
+            sold_item_id = canonical_sold_item_id(
+                row_value(
+                    sold,
+                    "item_id",
+                )
+            )
+
+            if (
+                sold_item_id
+                and re.fullmatch(
+                    r"\d{9,15}",
+                    sold_item_id,
+                )
+            ):
+                sold_url = (
+                    "https://www.ebay.co.uk/itm/"
+                    + urllib.parse.quote(
+                        sold_item_id,
+                        safe="",
+                    )
+                )
+
+                sold_title_html = (
+                    "<a class='evidence-title-link' "
+                    "href='"
+                    + html.escape(
+                        sold_url,
+                        quote=True,
+                    )
+                    + "' target='_blank' "
+                    "rel='noopener noreferrer' "
+                    "title='Open sold eBay listing'>"
+                    + sold_title
+                    + "<span class='evidence-external-link' "
+                    "aria-hidden='true'>↗</span>"
+                    "</a>"
+                )
+            else:
+                sold_title_html = sold_title
+
+            evidence_rows.append(
+                "<tr>"
+                f"<td>{sold_title_html}</td>"
+                f"<td class='money'>{money(entry['raw_total'])}</td>"
+                f"<td>{condition_html}</td>"
+                f"<td>{adjustment_text}</td>"
+                f"<td class='money'>{normalised_text}</td>"
+                f"<td class='{decision_class}'>"
+                f"{html.escape(decision_display)}</td>"
+                f"<td>{html.escape(match_text)}</td>"
+                f"<td>{html.escape(sold['last_sold'] or '')}</td>"
+                "</tr>"
+            )
+
+        used_count = sum(
+            entry["decision"] == "USED"
+            for entry in sold_logic
+        )
+
+        adjusted_count = sum(
+            entry["decision"] == "USED"
+            and (
+                entry.get(
+                    "condition_adjustment_pct"
+                )
+                or 0
+            ) > 0
+            for entry in sold_logic
+        )
+
+        new_condition_excluded = sum(
+            entry["decision"]
+            == "EXCLUDED_CONDITION"
+            and entry.get("condition_class")
+            == "NEW_CONDITION"
+            for entry in sold_logic
+        )
+
+        condition_excluded = sum(
+            entry["decision"]
+            == "EXCLUDED_CONDITION"
+            and entry.get("condition_class")
+            != "NEW_CONDITION"
+            for entry in sold_logic
+        )
+
+        outlier_excluded = sum(
+            entry["decision"]
+            == "EXCLUDED_OUTLIER"
+            for entry in sold_logic
+        )
+
+        logic_summary = (
+            f"Used {used_count}; "
+            f"condition-adjusted {adjusted_count}; "
+            f"new-condition excluded {new_condition_excluded}; "
+            f"fault/parts excluded {condition_excluded}; "
+            f"price outliers excluded {outlier_excluded}. "
+            "New merchandise is excluded from used-laptop valuation. "
+            "Moderate working damage is normalised +12% and down-weighted; "
+            "minor faults +6% and down-weighted. "
+            "Serious/non-working sales are not valued as working laptops."
+        )
+
+        sales_count = sum(
+            int(c["units"] or 1)
+            for c in evidence
+        )
+
+        sales_wording = (
+            f"{sales_count} sales from "
+            f"{len(evidence)} sold listings"
+        )
+
+        return (
+            "<div class='small' style='margin:8px 0 10px'>"
+            + html.escape(sales_wording)
+            + "<br>"
+            + html.escape(logic_summary)
+            + "</div>"
+            "<div class='evidence-table-wrap'>"
+            "<table class='evidence-table'>"
+            "<thead><tr>"
+            "<th>Sold listing</th>"
+            "<th>Raw delivered</th>"
+            "<th>Condition</th>"
+            "<th>Adjustment</th>"
+            "<th>Value used</th>"
+            "<th>Decision</th>"
+            "<th>Match</th>"
+            "<th>Last sold</th>"
+            "</tr></thead><tbody>"
+            + "".join(evidence_rows)
+            + "</tbody></table></div>"
+        )
+
+    finally:
+        conn.close()
+
+
 class DashboardHandler(
     BaseHTTPRequestHandler
 ):
@@ -15880,6 +16132,32 @@ class DashboardHandler(
         ):
             pass
 
+    def _send_html_fragment(self, value, status=200):
+        content = str(value).encode("utf-8")
+
+        self.send_response(status)
+        self.send_header(
+            "Content-Type",
+            "text/html; charset=utf-8",
+        )
+        self.send_header(
+            "Content-Length",
+            str(len(content)),
+        )
+        self.send_header(
+            "Cache-Control",
+            "private, max-age=300",
+        )
+        self.end_headers()
+
+        try:
+            self.wfile.write(content)
+        except (
+            BrokenPipeError,
+            ConnectionResetError,
+        ):
+            pass
+
     def _redirect(self, location, headers=None):
         self.send_response(303)
         self.send_header("Location", location)
@@ -15906,6 +16184,65 @@ class DashboardHandler(
 
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
+
+        if path == "/favicon.ico":
+            # Tiny embedded SVG favicon: LaptopLander "L".
+            favicon = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="12" fill="#111827"/><path d="M18 14h10v27h20v9H18z" fill="white"/></svg>"""
+
+            self.send_response(200)
+            self.send_header(
+                "Content-Type",
+                "image/svg+xml",
+            )
+            self.send_header(
+                "Content-Length",
+                str(len(favicon)),
+            )
+            self.send_header(
+                "Cache-Control",
+                "public, max-age=86400",
+            )
+            self.end_headers()
+
+            try:
+                self.wfile.write(favicon)
+            except (
+                BrokenPipeError,
+                ConnectionResetError,
+            ):
+                pass
+
+            return
+
+        if path == "/valuation-evidence":
+            query = urllib.parse.parse_qs(
+                urllib.parse.urlparse(
+                    self.path
+                ).query
+            )
+
+            item_id = (
+                query.get(
+                    "item_id",
+                    [""],
+                )[0]
+            )
+
+            if not item_id:
+                self._send_html_fragment(
+                    "<div class='small'>"
+                    "Missing listing ID."
+                    "</div>",
+                    status=400,
+                )
+                return
+
+            self._send_html_fragment(
+                _valuation_evidence_html(
+                    item_id
+                )
+            )
+            return
 
         if path == "/live-deals":
             self._send_json({
