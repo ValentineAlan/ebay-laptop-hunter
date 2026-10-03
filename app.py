@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.12"
+APP_VERSION = "0.10.13"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -18725,7 +18725,8 @@ def mark_ended_listings(conn):
     cur = conn.execute("""
         UPDATE listings
         SET active=0,
-            inactive_since=COALESCE(inactive_since, ?)
+            inactive_since=COALESCE(inactive_since, ?),
+            inactive_reason='END_DATE_PASSED'
         WHERE COALESCE(active, 1)=1
           AND end_date IS NOT NULL
           AND end_date <> ''
