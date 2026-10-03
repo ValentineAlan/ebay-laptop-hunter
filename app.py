@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.9"
+APP_VERSION = "0.10.10"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -13559,7 +13559,7 @@ def _dashboard_html_base():
             return [
                 buy ? buy.innerHTML : "",
                 auctions ? auctions.innerHTML : ""
-            ].join("\n--LL--\n");
+            ].join("\\n--LL--\\n");
         }}
 
         let shownFingerprint = fingerprint(document);
