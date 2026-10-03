@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.10"
+APP_VERSION = "0.10.11"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -10429,47 +10429,61 @@ def _dashboard_html_base():
     )
 
 
-    # Exact pipeline state using the same eligibility rules as valuation.
-    # This avoids calling thousands of merely identifiable listings
-    # "awaiting valuation".
-    pipeline_rows = conn.execute("""
-        SELECT *
+    # Public dashboard pipeline counters.
+    #
+    # IMPORTANT: do not call target_valuation_problem() for every active
+    # listing here. That made a simple HTTP request perform thousands of
+    # Python/SQLite eligibility checks.
+    #
+    # The worker already persists blocked/reanalysis states in
+    # valuation_basis, so aggregate those states directly in SQLite.
+    pipeline_counts = conn.execute("""
+        SELECT
+            SUM(
+                CASE
+                    WHEN estimated_value IS NULL
+                     AND (
+                         valuation_basis IS NULL
+                         OR valuation_basis = ''
+                     )
+                    THEN 1 ELSE 0
+                END
+            ) AS ready_unvalued,
+
+            SUM(
+                CASE WHEN estimated_value IS NULL
+                      AND valuation_basis = 'REANALYSIS_REQUIRED'
+                     THEN 1 ELSE 0 END
+            ) AS reanalysis_backlog,
+
+            SUM(
+                CASE WHEN estimated_value IS NULL
+                      AND valuation_basis = 'INCOMPLETE_IDENTITY_OR_SPEC'
+                     THEN 1 ELSE 0 END
+            ) AS incomplete_spec,
+
+            SUM(
+                CASE WHEN estimated_value IS NULL
+                      AND valuation_basis = 'CONDITION_REQUIRES_REVIEW'
+                     THEN 1 ELSE 0 END
+            ) AS condition_review,
+
+            SUM(
+                CASE WHEN estimated_value IS NULL
+                      AND valuation_basis = 'UNKNOWN_DELIVERED_COST'
+                     THEN 1 ELSE 0 END
+            ) AS unknown_cost
+
         FROM listings
         WHERE COALESCE(active, 1) = 1
-    """).fetchall()
+    """).fetchone()
 
-    ready_unvalued = 0
-    reanalysis_backlog = 0
-    incomplete_spec = 0
-    condition_review = 0
-    unknown_cost = 0
+    ready_unvalued = int(pipeline_counts["ready_unvalued"] or 0)
+    reanalysis_backlog = int(pipeline_counts["reanalysis_backlog"] or 0)
+    incomplete_spec = int(pipeline_counts["incomplete_spec"] or 0)
+    condition_review = int(pipeline_counts["condition_review"] or 0)
+    unknown_cost = int(pipeline_counts["unknown_cost"] or 0)
 
-    for pipeline_row in pipeline_rows:
-
-        if pipeline_row["estimated_value"] is not None:
-            continue
-
-        problem = target_valuation_problem(
-            pipeline_row,
-            conn
-        )
-
-        if problem is None:
-            ready_unvalued += 1
-
-        elif problem == "REANALYSIS_REQUIRED":
-            reanalysis_backlog += 1
-
-        elif problem == "INCOMPLETE_IDENTITY_OR_SPEC":
-            incomplete_spec += 1
-
-        elif problem == "CONDITION_REQUIRES_REVIEW":
-            condition_review += 1
-
-        elif problem == "UNKNOWN_DELIVERED_COST":
-            unknown_cost += 1
-
-    # Backward-compatible name for the existing dashboard card.
     valuation_backlog = reanalysis_backlog
 
     session_state = _read_json_file(PRODUCT_RESEARCH_SESSION_STATE)
@@ -13539,6 +13553,7 @@ def _dashboard_html_base():
 
         function idsFrom(root) {{
             if (!root) return [];
+
             return Array.from(
                 root.querySelectorAll("tr[data-item-id]")
             )
@@ -13546,27 +13561,21 @@ def _dashboard_html_base():
                 .filter(Boolean);
         }}
 
-        function currentIds() {{
-            return new Set([
-                ...idsFrom(document.getElementById("buy-now-deals-body")),
-                ...idsFrom(document.getElementById("auction-deals-body"))
-            ]);
-        }}
+        // This is deliberately the set visible when THIS page was loaded.
+        // We do not update it during polling: a deal remains "new" until
+        // the visitor chooses to reload and see it.
+        const displayedIds = new Set([
+            ...idsFrom(
+                document.getElementById("buy-now-deals-body")
+            ),
+            ...idsFrom(
+                document.getElementById("auction-deals-body")
+            )
+        ]);
 
-        function fingerprint(doc) {{
-            const buy = doc.getElementById("buy-now-deals-body");
-            const auctions = doc.getElementById("auction-deals-body");
-            return [
-                buy ? buy.innerHTML : "",
-                auctions ? auctions.innerHTML : ""
-            ].join("\\n--LL--\\n");
-        }}
-
-        let shownFingerprint = fingerprint(document);
-        let pendingFingerprint = shownFingerprint;
         let checking = false;
 
-        function hideUpdateBar() {{
+        function hideLiveUpdate() {{
             bar.hidden = true;
             bar.classList.remove("has-updates", "offline");
             button.hidden = true;
@@ -13575,11 +13584,12 @@ def _dashboard_html_base():
 
         async function checkForUpdates() {{
             if (checking || document.hidden) return;
+
             checking = true;
 
             try {{
                 const response = await fetch(
-                    "/?live_check=" + Date.now(),
+                    "/live-deals?t=" + Date.now(),
                     {{ cache: "no-store" }}
                 );
 
@@ -13587,71 +13597,74 @@ def _dashboard_html_base():
                     throw new Error("HTTP " + response.status);
                 }}
 
-                const htmlText = await response.text();
-                const next = new DOMParser().parseFromString(
-                    htmlText,
-                    "text/html"
-                );
-
-                const nextFingerprint = fingerprint(next);
-                pendingFingerprint = nextFingerprint;
-
-                if (nextFingerprint === shownFingerprint) {{
-                    hideUpdateBar();
-                    return;
-                }}
-
-                const existing = currentIds();
-                const incoming = new Set([
-                    ...idsFrom(next.getElementById("buy-now-deals-body")),
-                    ...idsFrom(next.getElementById("auction-deals-body"))
-                ]);
+                const payload = await response.json();
+                const incoming = Array.isArray(payload.deal_ids)
+                    ? payload.deal_ids
+                    : [];
 
                 let newCount = 0;
+
                 incoming.forEach(id => {{
-                    if (!existing.has(id)) newCount += 1;
+                    if (!displayedIds.has(String(id))) {{
+                        newCount += 1;
+                    }}
                 }});
+
+                // Changes to valuations, prices, auctions or removed rows
+                // are intentionally silent. Only a newly displayable deal
+                // should interrupt the visitor.
+                if (newCount === 0) {{
+                    hideLiveUpdate();
+                    return;
+                }}
 
                 bar.hidden = false;
                 bar.classList.remove("offline");
                 bar.classList.add("has-updates");
                 button.hidden = false;
 
-                if (newCount > 0) {{
-                    status.textContent =
-                        newCount
-                        + (newCount === 1 ? " new deal" : " new deals")
-                        + " available";
-                    button.textContent =
-                        newCount === 1 ? "Show new deal" : "Show new deals";
-                }} else {{
-                    status.textContent = "Updated deal data available";
-                    button.textContent = "Show updates";
-                }}
+                status.textContent =
+                    newCount
+                    + (newCount === 1
+                        ? " new deal available"
+                        : " new deals available");
+
+                button.textContent =
+                    newCount === 1
+                        ? "Show new deal"
+                        : "Show new deals";
+
             }} catch (error) {{
-                // Background polling is an implementation detail.
-                // Do not surface transient polling failures to visitors.
-                hideUpdateBar();
+                // Polling is optional UI enhancement. A transient failure
+                // should not display an alarming public status message.
+                hideLiveUpdate();
             }} finally {{
                 checking = false;
             }}
         }}
 
         button.addEventListener("click", () => {{
-            // User-controlled refresh preserves a stable page while browsing.
-            // The next page contains the latest rows, valuation evidence and
-            // carousel state without silently moving anything under the user.
-            shownFingerprint = pendingFingerprint;
             window.location.reload();
         }});
 
-        document.addEventListener("visibilitychange", () => {{
-            if (!document.hidden) checkForUpdates();
-        }});
+        document.addEventListener(
+            "visibilitychange",
+            () => {{
+                if (!document.hidden) checkForUpdates();
+            }}
+        );
 
-        hideUpdateBar();
-        window.setInterval(checkForUpdates, POLL_MS);
-        window.setTimeout(checkForUpdates, 1500);
+        hideLiveUpdate();
+
+        window.setInterval(
+            checkForUpdates,
+            POLL_MS
+        );
+
+        window.setTimeout(
+            checkForUpdates,
+            1500
+        );
     }})();
     </script>
     </body>
@@ -15773,6 +15786,54 @@ def _change_settings_password(new_password):
         conn.close()
 
 
+
+def _live_deal_ids():
+    """
+    Return only IDs which currently qualify for display in the public
+    deal tables. Used by the lightweight browser poll.
+    """
+    conn = connect_db()
+
+    try:
+        rows = conn.execute("""
+            SELECT item_id
+            FROM listings
+            WHERE COALESCE(active, 1) = 1
+              AND estimated_value IS NOT NULL
+              AND deal_score > 0
+              AND undervaluation_gbp IS NOT NULL
+              AND undervaluation_gbp >= ?
+              AND undervaluation_pct IS NOT NULL
+              AND undervaluation_pct >= ?
+
+            UNION
+
+            SELECT item_id
+            FROM listings
+            WHERE COALESCE(active, 1) = 1
+              AND estimated_value IS NOT NULL
+              AND deal_score IS NULL
+              AND buying_options LIKE '%"AUCTION"%'
+              AND undervaluation_gbp IS NOT NULL
+              AND undervaluation_gbp >= ?
+              AND undervaluation_pct IS NOT NULL
+              AND undervaluation_pct >= ?
+        """, (
+            MIN_UNDERVALUE_GBP,
+            MIN_UNDERVALUE_PCT,
+            MIN_UNDERVALUE_GBP,
+            MIN_UNDERVALUE_PCT,
+        )).fetchall()
+
+        return [
+            str(row["item_id"])
+            for row in rows
+            if row["item_id"] is not None
+        ]
+    finally:
+        conn.close()
+
+
 class DashboardHandler(
     BaseHTTPRequestHandler
 ):
@@ -15794,6 +15855,29 @@ class DashboardHandler(
             ConnectionResetError,
         ):
             # Client closed the browser/socket before the response completed.
+            pass
+
+    def _send_json(self, value, status=200):
+        content = json.dumps(
+            value,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        self.send_response(status)
+        self.send_header(
+            "Content-Type",
+            "application/json; charset=utf-8",
+        )
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+        try:
+            self.wfile.write(content)
+        except (
+            BrokenPipeError,
+            ConnectionResetError,
+        ):
             pass
 
     def _redirect(self, location, headers=None):
@@ -15822,6 +15906,12 @@ class DashboardHandler(
 
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
+
+        if path == "/live-deals":
+            self._send_json({
+                "deal_ids": _live_deal_ids(),
+            })
+            return
 
         if path in ("/", "/index.html"):
             page = dashboard_html()
