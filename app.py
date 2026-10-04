@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.23"
+APP_VERSION = "0.10.24"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -6713,6 +6713,21 @@ def _product_research_fetch(url, cookie=None):
             )
 
         if response_payload is None:
+            # Cancel our own outstanding request. The helper may still be
+            # finishing it, but a restarted helper must not execute work that
+            # no caller is waiting for. Only remove the shared request when it
+            # still belongs to this request_id.
+            try:
+                pending = _read_json_file(
+                    PRODUCT_RESEARCH_BROWSER_REQUEST
+                )
+                if pending.get("request_id") == request_id:
+                    os.unlink(
+                        PRODUCT_RESEARCH_BROWSER_REQUEST
+                    )
+            except OSError:
+                pass
+
             _session_state_update(
                 status="NOT WORKING",
                 last_checked_at=iso_now(),
