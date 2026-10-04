@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.22"
+APP_VERSION = "0.10.23"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -5146,22 +5146,44 @@ def classify_faults(
             moderate.append(phrase)
 
     matches = []
+    occupied = []
 
+    # Longest phrases first prevents duplicate overlapping notes such as
+    # "scratch" + "scratches" or "spares" + "spares or repairs".
+    candidates = []
     for level, phrases in [
         ("HIGH_RISK", high),
         ("MODERATE", moderate),
         ("LOW_COST", low)
     ]:
-
         for phrase in phrases:
+            phrase = normalise(phrase).lower()
+            if phrase:
+                candidates.append((level, phrase))
 
-            if phrase in text:
-                matches.append(
-                    (
-                        level,
-                        phrase
-                    )
-                )
+    candidates.sort(key=lambda pair: len(pair[1]), reverse=True)
+
+    negation = re.compile(
+        r"\b(?:no|not|without|never|isn['’]?t|aren['’]?t|"
+        r"doesn['’]?t|does\s+not|free\s+from)\b",
+        re.I,
+    )
+
+    for level, phrase in candidates:
+        pattern = re.compile(
+            r"(?<![A-Za-z0-9])" + re.escape(phrase) + r"(?![A-Za-z0-9])",
+            re.I,
+        )
+        for match in pattern.finditer(text):
+            start, end = match.span()
+            window = text[max(0, start - 24):start]
+            if negation.search(window):
+                continue
+            if any(start < used_end and end > used_start
+                   for used_start, used_end in occupied):
+                continue
+            occupied.append((start, end))
+            matches.append((level, phrase))
 
     if not matches:
         return "NORMAL", []
@@ -5551,7 +5573,7 @@ def save_listing(
     now = iso_now()
 
     existing = conn.execute("""
-        SELECT item_id
+        SELECT item_id, total
         FROM listings
         WHERE item_id=?
     """, (
@@ -5759,6 +5781,9 @@ def save_listing(
         item
     )
 
+    if existing and existing["total"] != item["total"]:
+        refresh_price_economics(conn, item["item_id"])
+
     conn.commit()
 
     return inserted
@@ -5832,6 +5857,8 @@ def update_known_summary(
         item["end_date"],
         item_id
     ))
+
+    refresh_price_economics(conn, item_id)
 
     save_observation(
         conn,
@@ -8089,7 +8116,7 @@ def ordinary_laptop(title, condition="", allow_repairable=False):
     # directly comparable to one ordinary used laptop.
     return not re.search(
         r"\b(?:lot(?:\s+of)?\s*\d+|bundle|job\s*lot|\d+\s*[x×]\s*(?:laptops?|Dell|HP|Lenovo)|"
-        r"[x×]\s*\d+|\d+\s+laptops?|choose|choice|various|refurbished|renewed|"
+        r"[x×]\s*\d+|\d+\s+laptops?|choose|choice|various|"
         r"brand new|sealed|warranty|charger only|screen only|keyboard only|"
         r"replacement|for Dell|for HP|for Lenovo|no ram|no memory)\b|"
         r"\b\d+\s*(?:GB|TB)?\s*(?:/|or)\s*\d+\s*(?:GB|TB)\b", text, re.I
@@ -9744,6 +9771,73 @@ def revalue_all(conn, batch_size=50):
     return updated
 
 
+def refresh_price_economics(conn, item_id):
+    """Recompute deal economics locally whenever delivered price changes."""
+    row = conn.execute(
+        "SELECT * FROM listings WHERE item_id=?",
+        (item_id,)
+    ).fetchone()
+    if not row or row["estimated_value"] is None or row["total"] is None:
+        return False
+
+    value = float(row["estimated_value"])
+    total = float(row["total"])
+    if value <= 0 or total < 0:
+        return False
+
+    under = value - total
+    pct = (under / value) * 100.0
+    score = deal_score(
+        conn, row, value, under, pct, row["valuation_confidence"]
+    )
+    conn.execute(
+        """UPDATE listings
+           SET undervaluation_gbp=?, undervaluation_pct=?, deal_score=?
+           WHERE item_id=?""",
+        (round(under, 2), round(pct, 1), score, item_id)
+    )
+    return True
+
+
+def valuation_age_text(row):
+    stamp = row_value(row, "valuation_research_at")
+    if not stamp:
+        return "valuation age unknown"
+    try:
+        when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        hours = max(
+            0.0,
+            (utcnow() - when.astimezone(timezone.utc)).total_seconds() / 3600,
+        )
+        if hours < 1:
+            return f"valued {max(1, int(hours * 60))}m ago"
+        if hours < 48:
+            return f"valued {int(hours)}h ago"
+        return f"valued {int(hours // 24)}d ago"
+    except Exception:
+        return "valuation age unknown"
+
+
+def promotion_eligible(row):
+    """Stricter evidence gate for Telegram alerts and hero promotion."""
+    confidence = normalise(row_value(row, "valuation_confidence")).upper()
+    count = int(row_value(row, "comparable_count") or 0)
+    saving = safe_float(row_value(row, "undervaluation_gbp"))
+    q1 = safe_float(row_value(row, "valuation_q1"))
+    q3 = safe_float(row_value(row, "valuation_q3"))
+
+    if confidence not in {"MEDIUM", "HIGH"} or count < 3 or saving is None:
+        return False
+
+    spread_margin = 0.0
+    if q1 is not None and q3 is not None and q3 >= q1:
+        spread_margin = (q3 - q1) * 0.5
+
+    return saving >= max(float(MIN_UNDERVALUE_GBP), spread_margin)
+
+
 # ============================================================
 # TELEGRAM DEAL ALERTS
 # ============================================================
@@ -9955,6 +10049,8 @@ def notify_pending_telegram_deals(conn):
 
     sent = 0
     for row in rows:
+        if not promotion_eligible(row):
+            continue
         ok, error = send_telegram_message(telegram_deal_message(row))
         if ok:
             conn.execute(
@@ -10953,6 +11049,8 @@ def _dashboard_html_base():
 
                                 <br>
                                 {html.escape(sales_wording)}
+                                <br>
+                                {html.escape(valuation_age_text(row))}
                             </div>
 
                             {hover_evidence_html}
@@ -11020,7 +11118,12 @@ def _dashboard_html_base():
 
     hero_cards = []
 
-    for hero_index, hero_row in enumerate(buy_now_rows[:6]):
+    hero_rows = [
+        row for row in buy_now_rows
+        if promotion_eligible(row)
+    ][:6]
+
+    for hero_index, hero_row in enumerate(hero_rows):
         hero_url_raw = normalise(
             hero_row["url"] or ""
         )
@@ -19257,23 +19360,37 @@ def recheck_active_bin_listings(conn, token, maximum=None):
                 save_listing(conn, item)
 
                 if was_reanalysis:
+                    refreshed = conn.execute(
+                        "SELECT * FROM listings WHERE item_id=?",
+                        (row["item_id"],)
+                    ).fetchone()
+                    valuation = calculate_valuation(conn, refreshed)
                     conn.execute(
                         """
                         UPDATE listings
-                        SET
-                            estimated_value=NULL,
-                            valuation_q1=NULL,
-                            valuation_q3=NULL,
-                            comparable_count=NULL,
-                            valuation_confidence=NULL,
-                            undervaluation_gbp=NULL,
-                            undervaluation_pct=NULL,
-                            deal_score=NULL,
-                            valuation_basis=NULL,
-                            valuation_research_at=NULL
+                        SET estimated_value=?,
+                            valuation_q1=?,
+                            valuation_q3=?,
+                            comparable_count=?,
+                            valuation_confidence=?,
+                            undervaluation_gbp=?,
+                            undervaluation_pct=?,
+                            deal_score=?,
+                            valuation_basis=?
                         WHERE item_id=?
                         """,
-                        (row["item_id"],),
+                        (
+                            valuation["estimated_value"],
+                            valuation["q1"],
+                            valuation["q3"],
+                            valuation["count"],
+                            valuation["confidence"],
+                            valuation["undervaluation_gbp"],
+                            valuation["undervaluation_pct"],
+                            valuation["deal_score"],
+                            valuation["basis"],
+                            row["item_id"],
+                        ),
                     )
                     conn.commit()
         elif state == "ERROR":
