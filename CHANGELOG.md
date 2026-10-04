@@ -2,6 +2,73 @@
 
 Notable changes to Laptop Lander are recorded here.
 
+## 0.10.28
+
+### Valuation freshness and privacy
+- Public deal tables and live-deal polling now require recent SOLD evidence within the configured sold-cache age.
+- Public valuation age is based on the newest matching sold comparable's `collected_at`, not the last research attempt.
+- Removed the obsolete `product-research.curl` prerequisite from valuation processing; Chromium remains the Product Research transport.
+- Google Analytics is now loaded only after explicit analytics consent.
+- Added a public privacy notice and updated the Product Research pause banner.
+
+## 0.10.27
+
+### Fault rules, public endpoint hardening and scoring
+- Added plural `hinges` and `keycaps` moderate fault rules and revision-driven reanalysis.
+- Preserved SOLD/ACTIVE valuation provenance when classifier rules change.
+- Cached compiled fault patterns per rules revision.
+- Added application throttling and caching for public evidence/live-deal endpoints.
+- Kept price-refresh scoring consistent with the sold-valuation Q1 bonus.
+- Added expiry cleanup for in-memory analytics/login rate-limit keys.
+
+## 0.10.26
+
+### Valuation provenance, proxy handling and Product Research IPC
+- Prevented active asking-price fallback valuations from generating deal economics.
+- Tightened fault-negation handling so unrelated negated phrases do not hide real faults.
+- Added trusted-proxy handling for application rate-limit client keys.
+- Validated Product Research browser IPC requests and bounded browser fetch time.
+
+## 0.10.25
+
+### Operational hardening
+- Protected diagnostics with administrator authentication.
+- Added application-side analytics and login throttling.
+- Added public dashboard caching and analytics retention.
+- Treats silent Product Research parse failures as errors rather than fresh zero-result searches.
+- Added startup persistent-log rotation.
+
+## 0.10.24
+
+### Product Research IPC
+- Prevented timed-out Product Research IPC requests from deleting a newer request file.
+- Added matching request-ID checks to helper cleanup.
+
+## 0.10.23
+
+### Deal economics and promotion
+- Recomputed deal economics when listing prices change.
+- Tightened fault phrase matching and negation handling.
+- Allowed refurbished laptops through ordinary-laptop filtering.
+- Added stricter promotion eligibility for hero placement and Telegram alerts.
+
+## 0.10.22
+
+### Reanalysis valuation recovery
+- Recalculate valuation immediately after classifier reanalysis.
+- Recover valuations blanked by the earlier reanalysis path.
+
+## 0.10.21
+
+### Reanalysis priority
+- Prioritised visible deals, auctions and stale classifier rows in the reanalysis queue.
+
+## 0.10.20
+
+### Windows 11 classification
+- Classifies supported older Intel Core-i families as unofficial Windows 11 candidates even when benchmark data is absent or below the former performance gate.
+- Added the `Win11 unofficial` dashboard badge and caveat wording.
+
 ## 0.10.6
 
 ### Telegram routing
