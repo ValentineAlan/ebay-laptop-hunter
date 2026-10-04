@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.15"
+APP_VERSION = "0.10.16"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -1266,6 +1266,42 @@ def init_db():
             value_json TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS analytics_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            occurred_at TEXT NOT NULL,
+            visitor_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            page TEXT,
+            item_id TEXT,
+            device_type TEXT,
+            referrer_host TEXT,
+            engaged_seconds REAL,
+            metadata_json TEXT
+        )
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_analytics_events_time
+        ON analytics_events(occurred_at)
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_analytics_events_visitor_time
+        ON analytics_events(visitor_id, occurred_at)
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_analytics_events_session_time
+        ON analytics_events(session_id, occurred_at)
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_analytics_events_type_time
+        ON analytics_events(event_type, occurred_at)
     """)
 
     conn.execute("""
@@ -13606,6 +13642,7 @@ def _site_nav(active="deals"):
     links = (
         ("deals", "/", "Deals"),
         ("diagnostics", "/diagnostics", "Diagnostics"),
+        ("analytics", "/analytics", "Analytics"),
         ("settings", "/settings", "Settings"),
         ("telegram", "https://t.me/LaptopLander", "Telegram alerts ↗"),
     )
@@ -15317,6 +15354,278 @@ def diagnostics_html():
 
 
 
+
+ANALYTICS_EVENT_TYPES = {
+    "page_view",
+    "engaged_time",
+    "deal_impression",
+    "deal_click",
+    "evidence_open",
+    "sort_change",
+    "filter_change",
+    "telegram_click",
+    "refresh_deals",
+}
+
+
+def _analytics_clean_id(value):
+    value = str(value or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9_-]{8,80}", value):
+        return value
+    return ""
+
+
+def _record_analytics_event(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid analytics payload")
+
+    visitor_id = _analytics_clean_id(payload.get("visitor_id"))
+    session_id = _analytics_clean_id(payload.get("session_id"))
+    event_type = str(payload.get("event_type") or "").strip()
+
+    if not visitor_id or not session_id:
+        raise ValueError("Missing anonymous analytics identifier")
+
+    if event_type not in ANALYTICS_EVENT_TYPES:
+        raise ValueError("Unsupported analytics event")
+
+    page = str(payload.get("page") or "")[:200]
+    item_id = str(payload.get("item_id") or "")[:100]
+    device_type = str(payload.get("device_type") or "")[:30]
+    referrer_host = str(payload.get("referrer_host") or "")[:200]
+
+    engaged_seconds = safe_float(payload.get("engaged_seconds"))
+    if engaged_seconds is not None:
+        engaged_seconds = max(0.0, min(engaged_seconds, 1800.0))
+
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    # Keep first-party analytics deliberately small and non-identifying.
+    safe_metadata = {}
+    for key, value in list(metadata.items())[:12]:
+        key = str(key)[:50]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            safe_metadata[key] = str(value)[:200] if isinstance(value, str) else value
+
+    conn = connect_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO analytics_events(
+                occurred_at, visitor_id, session_id, event_type,
+                page, item_id, device_type, referrer_host,
+                engaged_seconds, metadata_json
+            )
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                iso_now(),
+                visitor_id,
+                session_id,
+                event_type,
+                page,
+                item_id or None,
+                device_type or None,
+                referrer_host or None,
+                engaged_seconds,
+                json.dumps(safe_metadata, separators=(",", ":"), sort_keys=True),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def analytics_html():
+    conn = connect_db()
+    try:
+        since = (utcnow() - timedelta(days=30)).isoformat()
+
+        def scalar(sql, params=()):
+            row = conn.execute(sql, params).fetchone()
+            return (row[0] if row and row[0] is not None else 0)
+
+        visitors = scalar(
+            "SELECT COUNT(DISTINCT visitor_id) FROM analytics_events WHERE occurred_at>=?",
+            (since,),
+        )
+        sessions = scalar(
+            "SELECT COUNT(DISTINCT session_id) FROM analytics_events WHERE occurred_at>=?",
+            (since,),
+        )
+        page_views = scalar(
+            "SELECT COUNT(*) FROM analytics_events WHERE occurred_at>=? AND event_type='page_view'",
+            (since,),
+        )
+        impressions = scalar(
+            "SELECT COUNT(*) FROM analytics_events WHERE occurred_at>=? AND event_type='deal_impression'",
+            (since,),
+        )
+        clicks = scalar(
+            "SELECT COUNT(*) FROM analytics_events WHERE occurred_at>=? AND event_type='deal_click'",
+            (since,),
+        )
+        evidence = scalar(
+            "SELECT COUNT(*) FROM analytics_events WHERE occurred_at>=? AND event_type='evidence_open'",
+            (since,),
+        )
+        telegram = scalar(
+            "SELECT COUNT(*) FROM analytics_events WHERE occurred_at>=? AND event_type='telegram_click'",
+            (since,),
+        )
+        engaged_seconds = float(scalar(
+            "SELECT COALESCE(SUM(engaged_seconds),0) FROM analytics_events WHERE occurred_at>=? AND event_type='engaged_time'",
+            (since,),
+        ))
+
+        returning = scalar(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT visitor_id
+                FROM analytics_events
+                WHERE occurred_at>=?
+                GROUP BY visitor_id
+                HAVING COUNT(DISTINCT substr(occurred_at,1,10)) >= 2
+            )
+            """,
+            (since,),
+        )
+
+        high_intent = scalar(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT session_id
+                FROM analytics_events
+                WHERE occurred_at>=?
+                GROUP BY session_id
+                HAVING
+                    SUM(CASE WHEN event_type IN ('deal_click','evidence_open','telegram_click') THEN 1 ELSE 0 END) > 0
+                    OR SUM(CASE WHEN event_type='deal_impression' THEN 1 ELSE 0 END) >= 3
+            )
+            """,
+            (since,),
+        )
+
+        ctr = (100.0 * clicks / impressions) if impressions else 0.0
+        return_rate = (100.0 * returning / visitors) if visitors else 0.0
+        intent_rate = (100.0 * high_intent / sessions) if sessions else 0.0
+        avg_engaged = (engaged_seconds / sessions) if sessions else 0.0
+        sessions_per_visitor = (sessions / visitors) if visitors else 0.0
+
+        daily = conn.execute(
+            """
+            SELECT substr(occurred_at,1,10) AS day,
+                   COUNT(DISTINCT visitor_id) AS visitors,
+                   COUNT(DISTINCT session_id) AS sessions,
+                   SUM(CASE WHEN event_type='deal_click' THEN 1 ELSE 0 END) AS clicks
+            FROM analytics_events
+            WHERE occurred_at>=?
+            GROUP BY day
+            ORDER BY day DESC
+            LIMIT 30
+            """,
+            (since,),
+        ).fetchall()
+
+        brands = conn.execute(
+            """
+            SELECT COALESCE(NULLIF(l.brand,''),'Unknown') AS brand, COUNT(*) AS clicks
+            FROM analytics_events a
+            LEFT JOIN listings l ON l.item_id=a.item_id
+            WHERE a.occurred_at>=? AND a.event_type='deal_click'
+            GROUP BY COALESCE(NULLIF(l.brand,''),'Unknown')
+            ORDER BY clicks DESC
+            LIMIT 10
+            """,
+            (since,),
+        ).fetchall()
+
+        devices = conn.execute(
+            """
+            SELECT COALESCE(NULLIF(device_type,''),'Unknown') AS device, COUNT(DISTINCT session_id) AS sessions
+            FROM analytics_events
+            WHERE occurred_at>=?
+            GROUP BY COALESCE(NULLIF(device_type,''),'Unknown')
+            ORDER BY sessions DESC
+            """,
+            (since,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    def card(label, value, note=""):
+        return (
+            '<div class="metric"><div class="metric-label">' + html.escape(label) + '</div>'
+            '<div class="metric-value">' + html.escape(str(value)) + '</div>'
+            + ('<div class="metric-note">' + html.escape(note) + '</div>' if note else '')
+            + '</div>'
+        )
+
+    daily_rows = "".join(
+        f"<tr><td>{html.escape(str(row['day']))}</td><td>{int(row['visitors']):,}</td>"
+        f"<td>{int(row['sessions']):,}</td><td>{int(row['clicks'] or 0):,}</td></tr>"
+        for row in daily
+    ) or "<tr><td colspan='4'>No analytics data yet</td></tr>"
+
+    brand_rows = "".join(
+        f"<tr><td>{html.escape(str(row['brand']))}</td><td>{int(row['clicks']):,}</td></tr>"
+        for row in brands
+    ) or "<tr><td colspan='2'>No deal clicks yet</td></tr>"
+
+    device_rows = "".join(
+        f"<tr><td>{html.escape(str(row['device']))}</td><td>{int(row['sessions']):,}</td></tr>"
+        for row in devices
+    ) or "<tr><td colspan='2'>No sessions yet</td></tr>"
+
+    return f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Laptop Lander Analytics</title>
+<style>
+body{{font-family:Inter,system-ui,sans-serif;background:#f4f7fb;color:#172033;margin:0;padding:28px}}
+.wrap{{max-width:1250px;margin:auto}}
+.site-nav{{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;margin-bottom:18px}}
+.nav-link{{padding:8px 13px;border-radius:9px;text-decoration:none;color:#344054;background:#fff;border:1px solid #d0d5dd;font-weight:600}}
+.nav-link.active{{background:#2563eb;color:#fff;border-color:#2563eb}}
+h1{{margin:0 0 5px}} .muted{{color:#667085}}
+.metrics{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:22px 0}}
+.metric,.panel{{background:#fff;border:1px solid #e3e8ef;border-radius:14px;box-shadow:0 4px 18px rgba(16,24,40,.05)}}
+.metric{{padding:18px}} .metric-label{{font-size:13px;color:#667085;font-weight:700}}
+.metric-value{{font-size:30px;font-weight:800;margin-top:5px}} .metric-note{{font-size:12px;color:#667085;margin-top:3px}}
+.grid{{display:grid;grid-template-columns:2fr 1fr 1fr;gap:14px}} .panel{{padding:18px;overflow:auto}}
+table{{width:100%;border-collapse:collapse}} th,td{{padding:9px;border-bottom:1px solid #eaecf0;text-align:left}}
+th{{font-size:12px;text-transform:uppercase;color:#667085}}
+@media(max-width:850px){{.grid{{grid-template-columns:1fr}}body{{padding:14px}}}}
+</style>
+</head>
+<body><div class="wrap">
+{_site_nav("analytics")}
+<h1>Advertiser Analytics</h1>
+<div class="muted">First-party, anonymous engagement · rolling 30 days · no visitor IP addresses stored</div>
+<div class="metrics">
+{card("Unique visitors", f"{visitors:,}")}
+{card("Sessions", f"{sessions:,}", f"{sessions_per_visitor:.2f} per visitor")}
+{card("Page views", f"{page_views:,}")}
+{card("Deal impressions", f"{impressions:,}")}
+{card("eBay deal clicks", f"{clicks:,}", f"{ctr:.1f}% impression CTR")}
+{card("High-intent sessions", f"{intent_rate:.1f}%", f"{high_intent:,} sessions")}
+{card("Returning visitors", f"{return_rate:.1f}%", f"{returning:,} visited on 2+ days")}
+{card("Avg engaged time", f"{avg_engaged:.0f}s", "per session")}
+{card("Evidence opens", f"{evidence:,}")}
+{card("Telegram clicks", f"{telegram:,}")}
+</div>
+<div class="grid">
+<section class="panel"><h2>Daily activity</h2><table><thead><tr><th>Day</th><th>Visitors</th><th>Sessions</th><th>eBay clicks</th></tr></thead><tbody>{daily_rows}</tbody></table></section>
+<section class="panel"><h2>Clicked brands</h2><table><thead><tr><th>Brand</th><th>Clicks</th></tr></thead><tbody>{brand_rows}</tbody></table></section>
+<section class="panel"><h2>Devices</h2><table><thead><tr><th>Device</th><th>Sessions</th></tr></thead><tbody>{device_rows}</tbody></table></section>
+</div>
+</div></body></html>"""
+
+
 def _settings_cookie_token(handler):
     raw = handler.headers.get("Cookie", "")
     cookie = SimpleCookie()
@@ -16187,6 +16496,16 @@ class DashboardHandler(
         body = self.rfile.read(length).decode("utf-8", errors="replace")
         return urllib.parse.parse_qs(body, keep_blank_values=True)
 
+    def _read_json(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length < 0 or length > 64 * 1024:
+            raise ValueError("Invalid JSON size")
+        body = self.rfile.read(length).decode("utf-8", errors="replace")
+        return json.loads(body or "{}")
+
     def _require_settings_auth(self):
         session = _settings_session(self)
         if not session:
@@ -16286,6 +16605,13 @@ class DashboardHandler(
             self._send_html(_settings_login_html(message))
             return
 
+        if path in ("/analytics", "/analytics/"):
+            session = self._require_settings_auth()
+            if not session:
+                return
+            self._send_html(analytics_html())
+            return
+
         if path in ("/settings", "/settings/"):
             session = self._require_settings_auth()
             if not session:
@@ -16298,6 +16624,17 @@ class DashboardHandler(
 
     def do_POST(self):
         path = urllib.parse.urlparse(self.path).path
+
+        if path == "/analytics/event":
+            try:
+                payload = self._read_json()
+                _record_analytics_event(payload)
+                self._send_json({"ok": True}, status=202)
+            except (ValueError, json.JSONDecodeError) as exc:
+                self._send_json({"ok": False, "error": str(exc)}, status=400)
+            except Exception:
+                self._send_json({"ok": False}, status=500)
+            return
 
         try:
             form = self._read_form()
@@ -16325,7 +16662,7 @@ class DashboardHandler(
 
             token, _ = _new_settings_session()
             cookie = (
-                f"ll_settings_session={token}; Path=/settings; "
+                f"ll_settings_session={token}; Path=/; "
                 f"Max-Age={SETTINGS_SESSION_SECONDS}; HttpOnly; SameSite=Strict"
             )
             self._redirect("/settings", [("Set-Cookie", cookie)])
@@ -16347,7 +16684,7 @@ class DashboardHandler(
                 token = _settings_cookie_token(self)
                 _SETTINGS_SESSIONS.pop(token, None)
                 cookie = (
-                    "ll_settings_session=; Path=/settings; "
+                    "ll_settings_session=; Path=/; "
                     "Max-Age=0; HttpOnly; SameSite=Strict"
                 )
                 self._redirect("/settings/login", [("Set-Cookie", cookie)])
@@ -17748,6 +18085,172 @@ def dashboard_html():
         else:
             page = health + page
 
+    analytics_script = r"""
+<script>
+(function () {
+    const endpoint = "/analytics/event";
+    const visitorKey = "ll_analytics_visitor";
+    const sessionKey = "ll_analytics_session";
+
+    function makeId() {
+        if (window.crypto && crypto.randomUUID) {
+            return crypto.randomUUID();
+        }
+        return Date.now().toString(36) + Math.random().toString(36).slice(2);
+    }
+
+    function stored(storage, key) {
+        try {
+            let value = storage.getItem(key);
+            if (!value) {
+                value = makeId();
+                storage.setItem(key, value);
+            }
+            return value;
+        } catch (e) {
+            return makeId();
+        }
+    }
+
+    const visitorId = stored(localStorage, visitorKey);
+    const sessionId = stored(sessionStorage, sessionKey);
+    const startedAt = Date.now();
+    const impressed = new Set();
+    const evidenceOpened = new Set();
+
+    function deviceType() {
+        if (window.innerWidth < 768) return "mobile";
+        if (window.innerWidth < 1100) return "tablet";
+        return "desktop";
+    }
+
+    function referrerHost() {
+        try {
+            return document.referrer ? new URL(document.referrer).hostname : "";
+        } catch (e) {
+            return "";
+        }
+    }
+
+    function event(type, data, beacon) {
+        const payload = Object.assign({
+            visitor_id: visitorId,
+            session_id: sessionId,
+            event_type: type,
+            page: location.pathname,
+            device_type: deviceType(),
+            referrer_host: referrerHost()
+        }, data || {});
+
+        const body = JSON.stringify(payload);
+
+        if (beacon && navigator.sendBeacon) {
+            navigator.sendBeacon(
+                endpoint,
+                new Blob([body], {type: "application/json"})
+            );
+            return;
+        }
+
+        fetch(endpoint, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: body,
+            keepalive: true,
+            credentials: "same-origin"
+        }).catch(() => {});
+    }
+
+    window.llAnalyticsEvent = event;
+    event("page_view");
+
+    const observer = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+            if (!entry.isIntersecting) return;
+            const row = entry.target;
+            const itemId = row.dataset.itemId || "";
+            if (!itemId || impressed.has(itemId)) return;
+            impressed.add(itemId);
+            event("deal_impression", {item_id: itemId});
+            observer.unobserve(row);
+        });
+    }, {threshold: 0.35});
+
+    document.querySelectorAll("tr[data-item-id]").forEach((row) => {
+        observer.observe(row);
+    });
+
+    document.addEventListener("click", (e) => {
+        const link = e.target.closest("a");
+        if (!link) return;
+
+        const href = link.href || "";
+        const row = link.closest("tr[data-item-id]");
+        const itemId = row ? (row.dataset.itemId || "") : "";
+
+        if (/https?:\/\/([^/]*\.)?ebay\.co\.uk\//i.test(href) && itemId) {
+            event("deal_click", {item_id: itemId});
+        }
+
+        if (/https?:\/\/t\.me\/LaptopLander/i.test(href)) {
+            event("telegram_click");
+        }
+
+        if (link.closest(".valuation-hover") && itemId && !evidenceOpened.has(itemId)) {
+            evidenceOpened.add(itemId);
+            event("evidence_open", {item_id: itemId});
+        }
+    }, true);
+
+    document.querySelectorAll(".valuation-hover").forEach((wrapper) => {
+        wrapper.addEventListener("mouseenter", () => {
+            const row = wrapper.closest("tr[data-item-id]");
+            const itemId = row ? (row.dataset.itemId || "") : "";
+            if (itemId && !evidenceOpened.has(itemId)) {
+                evidenceOpened.add(itemId);
+                event("evidence_open", {item_id: itemId});
+            }
+        }, {once: true});
+    });
+
+    document.addEventListener("change", (e) => {
+        const el = e.target;
+        if (!el) return;
+        if (el.matches("select,input[type=checkbox],input[type=radio]")) {
+            event("filter_change", {
+                metadata: {
+                    control: el.name || el.id || el.type || "unknown"
+                }
+            });
+        }
+    }, true);
+
+    document.querySelectorAll("th.sortable-header").forEach((th) => {
+        th.addEventListener("click", () => {
+            event("sort_change", {
+                metadata: {sort: th.dataset.sortName || th.textContent.trim().slice(0, 80)}
+            });
+        });
+    });
+
+    document.addEventListener("click", (e) => {
+        const button = e.target.closest("#live-update-button");
+        if (button) event("refresh_deals");
+    }, true);
+
+    let engagementSent = false;
+    function sendEngagement() {
+        if (engagementSent) return;
+        engagementSent = true;
+        const seconds = Math.min(1800, Math.max(0, (Date.now() - startedAt) / 1000));
+        event("engaged_time", {engaged_seconds: seconds}, true);
+    }
+
+    window.addEventListener("pagehide", sendEngagement);
+})();
+</script>
+"""
+
     valuation_tooltip_script = r"""
 <script>
 (function () {
@@ -17905,6 +18408,8 @@ def dashboard_html():
             "</body>",
             _DASHBOARD_UI_ENHANCEMENT
             + "\n"
+            + analytics_script
+            + "\n"
             + valuation_tooltip_script
             + "\n</body>",
             1,
@@ -17912,6 +18417,7 @@ def dashboard_html():
     else:
         page += (
             _DASHBOARD_UI_ENHANCEMENT
+            + analytics_script
             + valuation_tooltip_script
         )
 
@@ -18898,17 +19404,21 @@ def refresh_highlighted_auctions(
 
         checked_at = iso_now()
 
-        conn.execute(
-            """
-            UPDATE listings
-            SET auction_checked_at=?
-            WHERE item_id=?
-            """,
-            (
-                checked_at,
-                row["item_id"],
-            ),
-        )
+        # Only a definitive eBay response advances the refresh clock.
+        # Transient Browse errors remain due and are retried on the next
+        # worker pass rather than waiting another 5/10/15 minutes.
+        if state in ("ACTIVE", "INACTIVE"):
+            conn.execute(
+                """
+                UPDATE listings
+                SET auction_checked_at=?
+                WHERE item_id=?
+                """,
+                (
+                    checked_at,
+                    row["item_id"],
+                ),
+            )
 
         if state == "INACTIVE":
             conn.execute(
@@ -18939,8 +19449,8 @@ def refresh_highlighted_auctions(
             continue
 
         if state == "ERROR":
-            # Record that an attempt was made, but never hide a listing on an
-            # ambiguous/transient API failure.
+            # Never hide a listing or advance auction_checked_at on an
+            # ambiguous/transient API failure; retry next worker pass.
             conn.commit()
 
             refreshed += 1
