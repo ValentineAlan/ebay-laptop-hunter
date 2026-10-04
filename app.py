@@ -16343,7 +16343,7 @@ def _cached_live_deal_ids():
     with _public_cache_lock:
         _live_deals_cache["deal_ids"] = tuple(deal_ids)
         _live_deals_cache["expires"] = (
-            now + PUBLIC_READ_CACHE_SECONDS
+            now + PUBLIC_DASHBOARD_CACHE_SECONDS
         )
     return deal_ids
 
