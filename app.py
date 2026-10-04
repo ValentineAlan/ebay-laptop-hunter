@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.24"
+APP_VERSION = "0.10.25"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -239,6 +239,22 @@ CPU_BENCHMARK_USER_AGENT = (
 SETTINGS_PASSWORD_ENV = "SETTINGS_PASSWORD"
 SETTINGS_SESSION_SECONDS = 8 * 60 * 60
 SETTINGS_PBKDF2_ITERATIONS = 310000
+PUBLIC_DASHBOARD_CACHE_SECONDS = 20
+ANALYTICS_RETENTION_DAYS = 30
+ANALYTICS_RATE_WINDOW_SECONDS = 60
+ANALYTICS_RATE_MAX_EVENTS = 120
+LOGIN_RATE_WINDOW_SECONDS = 15 * 60
+LOGIN_RATE_MAX_FAILURES = 5
+LOG_MAX_BYTES = 10 * 1024 * 1024
+LOG_BACKUPS = 5
+
+_dashboard_cache_lock = threading.Lock()
+_dashboard_cache_page = None
+_dashboard_cache_expires = 0.0
+_analytics_rate_lock = threading.Lock()
+_analytics_rate = {}
+_login_rate_lock = threading.Lock()
+_login_failures = {}
 
 # Only application behaviour belongs here. TrueNAS remains responsible for
 # ports, bind addresses, volumes, networking, secrets and container wiring.
@@ -7836,17 +7852,24 @@ def collect_sold_search(conn, keywords):
 
         # Replace this query's cached rows atomically after successful retrieval.
         parsed = []
+        raw_result_count = 0
         for page in range(PRODUCT_RESEARCH_MAX_PAGES):
             results = product_research_search(
                 keywords,
                 offset=page * PRODUCT_RESEARCH_LIMIT,
             )
+            raw_result_count += len(results)
             for result in results:
                 row = _parse_sold_result(result)
                 if row["delivered_price"] and row["delivered_price"] > 0:
                     parsed.append(row)
             if len(results) < PRODUCT_RESEARCH_LIMIT:
                 break
+
+        if raw_result_count > 0 and not parsed:
+            raise RuntimeError(
+                f"Product Research returned {raw_result_count} results but none parsed into usable sold rows"
+            )
 
         conn.execute("DELETE FROM sold_comparables WHERE query_key=?", (key,))
         for row in parsed:
@@ -15513,6 +15536,34 @@ def _analytics_clean_id(value):
     return ""
 
 
+def _rate_key(handler):
+    try:
+        return str(handler.client_address[0])
+    except Exception:
+        return "unknown"
+
+
+def _sliding_window_allowed(store, lock, key, window_seconds, maximum):
+    now = time.monotonic()
+    cutoff = now - window_seconds
+    with lock:
+        recent = [stamp for stamp in store.get(key, []) if stamp >= cutoff]
+        allowed = len(recent) < maximum
+        if allowed:
+            recent.append(now)
+        store[key] = recent
+        return allowed
+
+
+def _analytics_item_valid(conn, item_id):
+    if not item_id:
+        return True
+    return bool(conn.execute(
+        "SELECT 1 FROM listings WHERE item_id=? LIMIT 1",
+        (item_id,)
+    ).fetchone())
+
+
 def _record_analytics_event(payload):
     if not isinstance(payload, dict):
         raise ValueError("Invalid analytics payload")
@@ -15549,6 +15600,15 @@ def _record_analytics_event(payload):
 
     conn = connect_db()
     try:
+        if item_id and not _analytics_item_valid(conn, item_id):
+            raise ValueError("Unknown listing ID")
+
+        cutoff = (utcnow() - timedelta(days=ANALYTICS_RETENTION_DAYS)).isoformat()
+        conn.execute(
+            "DELETE FROM analytics_events WHERE occurred_at < ?",
+            (cutoff,)
+        )
+
         conn.execute(
             """
             INSERT INTO analytics_events(
@@ -15743,7 +15803,7 @@ th{{font-size:12px;text-transform:uppercase;color:#667085}}
 <body><div class="wrap">
 {_site_nav("analytics")}
 <h1>Advertiser Analytics</h1>
-<div class="muted">First-party, anonymous engagement · rolling 30 days · no visitor IP addresses stored</div>
+<div class="muted">First-party, anonymous engagement · rolling 30 days · no visitor IP addresses stored · client-reported clicks are directional engagement signals, not independently verified advertiser proof</div>
 <div class="metrics">
 {card("Unique visitors", f"{visitors:,}")}
 {card("Sessions", f"{sessions:,}", f"{sessions_per_visitor:.2f} per visitor")}
@@ -16725,6 +16785,9 @@ class DashboardHandler(
             return
 
         if path in ("/diagnostics", "/diagnostics/"):
+            session = self._require_settings_auth()
+            if not session:
+                return
             page = diagnostics_html()
             self._send_html(page)
             return
@@ -16764,6 +16827,15 @@ class DashboardHandler(
         path = urllib.parse.urlparse(self.path).path
 
         if path == "/analytics/event":
+            if not _sliding_window_allowed(
+                _analytics_rate,
+                _analytics_rate_lock,
+                _rate_key(self),
+                ANALYTICS_RATE_WINDOW_SECONDS,
+                ANALYTICS_RATE_MAX_EVENTS,
+            ):
+                self._send_json({"ok": False, "error": "rate limited"}, status=429)
+                return
             try:
                 payload = self._read_json()
                 _record_analytics_event(payload)
@@ -16784,6 +16856,22 @@ class DashboardHandler(
             return
 
         if path == "/settings/login":
+            login_key = _rate_key(self)
+            with _login_rate_lock:
+                now = time.monotonic()
+                cutoff = now - LOGIN_RATE_WINDOW_SECONDS
+                recent_failures = [
+                    stamp for stamp in _login_failures.get(login_key, [])
+                    if stamp >= cutoff
+                ]
+                _login_failures[login_key] = recent_failures
+                if len(recent_failures) >= LOGIN_RATE_MAX_FAILURES:
+                    self._send_html(
+                        _settings_login_html("Too many failed attempts. Try again later."),
+                        status=429,
+                    )
+                    return
+
             password = form.get("password", [""])[0]
             conn = connect_db()
             row = conn.execute(
@@ -16792,11 +16880,16 @@ class DashboardHandler(
             conn.close()
 
             if not row or not _password_matches(password, row["value"]):
+                with _login_rate_lock:
+                    _login_failures.setdefault(login_key, []).append(time.monotonic())
                 self._send_html(
                     _settings_login_html("Incorrect password or password not configured."),
                     status=401,
                 )
                 return
+
+            with _login_rate_lock:
+                _login_failures.pop(login_key, None)
 
             token, _ = _new_settings_session()
             cookie = (
@@ -18199,6 +18292,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
 
 def dashboard_html():
+    global _dashboard_cache_page, _dashboard_cache_expires
+
+    now = time.monotonic()
+    with _dashboard_cache_lock:
+        if _dashboard_cache_page is not None and now < _dashboard_cache_expires:
+            return _dashboard_cache_page
+
     refresh_runtime_settings()
     refresh_classifier_rules()
     page = _dashboard_html_base()
@@ -18625,6 +18725,10 @@ def dashboard_html():
             + analytics_script
             + valuation_tooltip_script
         )
+
+    with _dashboard_cache_lock:
+        _dashboard_cache_page = page
+        _dashboard_cache_expires = time.monotonic() + PUBLIC_DASHBOARD_CACHE_SECONDS
 
     return page
 
@@ -20523,6 +20627,21 @@ def start_persistent_logging():
         return
     try:
         os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+
+        try:
+            if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) >= LOG_MAX_BYTES:
+                oldest = f"{LOG_FILE}.{LOG_BACKUPS}"
+                if os.path.exists(oldest):
+                    os.unlink(oldest)
+                for index in range(LOG_BACKUPS - 1, 0, -1):
+                    source = f"{LOG_FILE}.{index}"
+                    target = f"{LOG_FILE}.{index + 1}"
+                    if os.path.exists(source):
+                        os.replace(source, target)
+                os.replace(LOG_FILE, f"{LOG_FILE}.1")
+        except OSError as exc:
+            print("Could not rotate persistent log:", repr(exc))
+
         _log_handle = open(LOG_FILE, "a", buffering=1, encoding="utf-8")
         sys.stdout = Tee(sys.__stdout__, _log_handle)
         sys.stderr = Tee(sys.__stderr__, _log_handle)
