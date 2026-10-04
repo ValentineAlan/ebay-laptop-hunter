@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.14"
+APP_VERSION = "0.10.15"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -166,6 +166,17 @@ ACTIVE_BIN_RECHECKS_PER_CYCLE = 40
 ACTIVE_BIN_RECHECKS_DURING_REANALYSIS = 5
 ACTIVE_BIN_RECHECK_MIN_AGE_MINUTES = 10
 ACTIVE_BIN_RECHECK_INTERVAL_MINUTES = 15
+
+# Highlighted auction current-bid refresh.
+#
+# Auction deals need a much fresher current price than the normal 15-minute
+# discovery cycle, especially near the end of the auction.  This worker uses
+# Browse getItem only; it never performs Product Research searches.
+AUCTION_REFRESH_WORKER_SLEEP_SECONDS = 60
+AUCTION_REFRESH_OVER_24H_MINUTES = 15
+AUCTION_REFRESH_4_TO_24H_MINUTES = 10
+AUCTION_REFRESH_UNDER_4H_MINUTES = 5
+AUCTION_REFRESH_MAX_PER_PASS = 20
 
 CATEGORY = "177"
 MARKETPLACE = "EBAY_GB"
@@ -1068,6 +1079,7 @@ def init_db():
         "active": "INTEGER DEFAULT 1",
         "inactive_since": "TEXT",
         "availability_checked_at": "TEXT",
+        "auction_checked_at": "TEXT",
         "inactive_reason": "TEXT",
     }
 
@@ -18712,6 +18724,401 @@ def backfill_dashboard_images(
 
 
 # ============================================================
+# HIGHLIGHTED AUCTION BID REFRESH
+# ============================================================
+
+def _parse_ebay_datetime(value):
+    if not value:
+        return None
+
+    try:
+        text = str(value).strip()
+
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+
+        dt = datetime.fromisoformat(text)
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        return dt.astimezone(timezone.utc)
+
+    except Exception:
+        return None
+
+
+def _auction_refresh_interval_minutes(row, now=None):
+    """
+    Return the required current-bid refresh interval for an auction.
+
+      >24 hours remaining : 15 minutes
+      4-24 hours          : 10 minutes
+      <4 hours            : 5 minutes
+    """
+    now = now or utcnow()
+
+    end = _parse_ebay_datetime(
+        row["end_date"]
+    )
+
+    if end is None:
+        # Unknown end time: use the normal conservative interval.
+        return AUCTION_REFRESH_OVER_24H_MINUTES
+
+    remaining = (
+        end - now
+    ).total_seconds()
+
+    if remaining <= 4 * 60 * 60:
+        return AUCTION_REFRESH_UNDER_4H_MINUTES
+
+    if remaining <= 24 * 60 * 60:
+        return AUCTION_REFRESH_4_TO_24H_MINUTES
+
+    return AUCTION_REFRESH_OVER_24H_MINUTES
+
+
+def _auction_refresh_due(row, now=None):
+    now = now or utcnow()
+
+    checked = _parse_ebay_datetime(
+        row["auction_checked_at"]
+    )
+
+    if checked is None:
+        return True
+
+    interval = _auction_refresh_interval_minutes(
+        row,
+        now
+    )
+
+    return (
+        now - checked
+    ).total_seconds() >= interval * 60
+
+
+def refresh_highlighted_auctions(
+    conn,
+    token,
+    maximum=AUCTION_REFRESH_MAX_PER_PASS,
+):
+    """
+    Refresh current bids only for auctions which currently qualify for the
+    public deal tables.
+
+    This deliberately uses Browse getItem only.  Existing cached sold evidence
+    is reused to recalculate valuation economics and DealScore; no Product
+    Research request is made here.
+    """
+    if maximum <= 0:
+        return 0
+
+    if ebay_detail_rate_limited():
+        return 0
+
+    now = utcnow()
+
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM listings
+        WHERE COALESCE(active, 1)=1
+          AND estimated_value IS NOT NULL
+          AND buying_options LIKE '%"AUCTION"%'
+          AND undervaluation_gbp IS NOT NULL
+          AND undervaluation_gbp >= ?
+          AND undervaluation_pct IS NOT NULL
+          AND undervaluation_pct >= ?
+          AND (
+                deal_score > 0
+                OR deal_score IS NULL
+              )
+        ORDER BY
+            CASE
+                WHEN auction_checked_at IS NULL THEN 0
+                ELSE 1
+            END,
+            COALESCE(auction_checked_at, '1970-01-01') ASC,
+            end_date ASC
+        """,
+        (
+            MIN_UNDERVALUE_GBP,
+            MIN_UNDERVALUE_PCT,
+        ),
+    ).fetchall()
+
+    due = [
+        row
+        for row in rows
+        if _auction_refresh_due(
+            row,
+            now
+        )
+    ]
+
+    if not due:
+        return 0
+
+    refreshed = 0
+
+    for row in due:
+        if refreshed >= maximum:
+            break
+
+        if ebay_detail_rate_limited():
+            break
+
+        if not can_detail(conn):
+            break
+
+        old_price = safe_float(
+            row["price"]
+        )
+
+        old_total = safe_float(
+            row["total"]
+        )
+
+        old_score = safe_float(
+            row["deal_score"]
+        )
+
+        record_api_call(
+            conn,
+            "BROWSE",
+            "GET_ITEM"
+        )
+
+        state, detail = ebay_get_item(
+            token,
+            row["item_id"]
+        )
+
+        checked_at = iso_now()
+
+        conn.execute(
+            """
+            UPDATE listings
+            SET auction_checked_at=?
+            WHERE item_id=?
+            """,
+            (
+                checked_at,
+                row["item_id"],
+            ),
+        )
+
+        if state == "INACTIVE":
+            conn.execute(
+                """
+                UPDATE listings
+                SET active=0,
+                    inactive_since=COALESCE(inactive_since, ?),
+                    inactive_reason='EBAY_NO_LONGER_AVAILABLE'
+                WHERE item_id=?
+                """,
+                (
+                    checked_at,
+                    row["item_id"],
+                ),
+            )
+
+            conn.commit()
+
+            refreshed += 1
+
+            print(
+                "Auction refresh: inactive -> "
+                f"{row['item_id']} "
+                f"{row['title'] or ''}",
+                flush=True,
+            )
+
+            continue
+
+        if state == "ERROR":
+            # Record that an attempt was made, but never hide a listing on an
+            # ambiguous/transient API failure.
+            conn.commit()
+
+            refreshed += 1
+
+            print(
+                "Auction refresh: check error -> "
+                f"{row['item_id']}: {detail}",
+                flush=True,
+            )
+
+            continue
+
+        if state != "ACTIVE" or not detail:
+            conn.commit()
+            refreshed += 1
+            continue
+
+        item = analyse_listing(
+            conn,
+            token,
+            detail,
+            fetch_detail=False,
+            supplied_detail=detail,
+        )
+
+        if not item:
+            conn.commit()
+            refreshed += 1
+            continue
+
+        save_listing(
+            conn,
+            item
+        )
+
+        # save_listing() updates the live auction price but intentionally does
+        # not overwrite valuation fields.  Reload the row so valuation uses
+        # the new delivered price.
+        updated = conn.execute(
+            """
+            SELECT *
+            FROM listings
+            WHERE item_id=?
+            """,
+            (
+                row["item_id"],
+            ),
+        ).fetchone()
+
+        if updated is not None:
+            valuation = calculate_sold_valuation(
+                conn,
+                updated
+            )
+
+            if valuation is not None:
+                persist_listing_valuation(
+                    conn,
+                    updated,
+                    valuation
+                )
+
+        # persist_listing_valuation commits, but make the timestamp durable
+        # even when no usable cached sold valuation was available.
+        conn.commit()
+
+        latest = conn.execute(
+            """
+            SELECT
+                price,
+                total,
+                deal_score,
+                undervaluation_gbp,
+                undervaluation_pct
+            FROM listings
+            WHERE item_id=?
+            """,
+            (
+                row["item_id"],
+            ),
+        ).fetchone()
+
+        refreshed += 1
+
+        if latest is not None:
+            print(
+                "Auction refresh: "
+                f"{row['item_id']} "
+                f"price {old_price!r}->{safe_float(latest['price'])!r}; "
+                f"delivered {old_total!r}->{safe_float(latest['total'])!r}; "
+                f"score {old_score!r}->{safe_float(latest['deal_score'])!r}; "
+                f"saving £{safe_float(latest['undervaluation_gbp'])!r} "
+                f"({safe_float(latest['undervaluation_pct'])!r}%)",
+                flush=True,
+            )
+
+    return refreshed
+
+
+def _auction_refresh_worker():
+    """
+    Independently keep highlighted auction bids current between the normal
+    15-minute Browse discovery cycles.
+    """
+    print(
+        "Auction refresh worker : "
+        "15m >24h / 10m 4-24h / 5m <4h",
+        flush=True,
+    )
+
+    while True:
+        conn = None
+
+        try:
+            conn = connect_db()
+
+            refresh_runtime_settings(
+                conn
+            )
+
+            token = get_token()
+
+            refreshed = refresh_highlighted_auctions(
+                conn,
+                token,
+            )
+
+            if refreshed:
+                print(
+                    f"Auction refresh worker : "
+                    f"{refreshed} checked",
+                    flush=True,
+                )
+
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).lower():
+                print(
+                    "Auction refresh worker: "
+                    "database busy; retrying later",
+                    flush=True,
+                )
+            else:
+                print(
+                    "Auction refresh worker DB ERROR:",
+                    repr(exc),
+                    flush=True,
+                )
+
+        except Exception as exc:
+            print(
+                "Auction refresh worker ERROR:",
+                repr(exc),
+                flush=True,
+            )
+
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        time.sleep(
+            AUCTION_REFRESH_WORKER_SLEEP_SECONDS
+        )
+
+
+def start_auction_refresh_worker():
+    thread = threading.Thread(
+        target=_auction_refresh_worker,
+        name="auction-refresh-worker",
+        daemon=True,
+    )
+
+    thread.start()
+
+
+# ============================================================
 # ACTIVE LISTING HOUSEKEEPING
 # ============================================================
 
@@ -19286,6 +19693,7 @@ def main():
     start_product_research_session_monitor()
     start_product_research_worker()
     start_cpu_benchmark_refresh_worker()
+    start_auction_refresh_worker()
 
     cycle = 0
 
