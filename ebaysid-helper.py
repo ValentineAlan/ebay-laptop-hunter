@@ -806,8 +806,20 @@ def process_research_request(context):
             response_payload,
         )
 
+        # A timed-out caller may already have removed request A and
+        # published request B at the same pathname while A was still running.
+        # Never let A's cleanup delete B.
         try:
-            RESEARCH_REQUEST_FILE.unlink()
+            current_request = read_json(
+                RESEARCH_REQUEST_FILE
+            )
+
+            if (
+                current_request.get("request_id")
+                == request_id
+            ):
+                RESEARCH_REQUEST_FILE.unlink()
+
         except FileNotFoundError:
             pass
 
