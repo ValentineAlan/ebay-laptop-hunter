@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.18"
+APP_VERSION = "0.10.19"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -18538,7 +18538,43 @@ def ebay_get_item(token, item_id):
     )
     try:
         with ebay_urlopen(request, timeout=20) as response:
-            return "ACTIVE", json.loads(response.read().decode("utf-8"))
+            detail = json.loads(response.read().decode("utf-8"))
+
+            # A Browse getItem HTTP 200 does not necessarily mean the item is
+            # purchasable. eBay can keep an out-of-stock fixed-price listing
+            # alive so the seller can replenish it later. Treat explicit
+            # OUT_OF_STOCK availability (or a known zero remaining quantity)
+            # as inactive so it cannot remain on the live-deals homepage.
+            availabilities = detail.get("estimatedAvailabilities") or []
+
+            for availability in availabilities:
+                if not isinstance(availability, dict):
+                    continue
+
+                status = normalise(
+                    availability.get("estimatedAvailabilityStatus")
+                ).upper()
+
+                if status == "OUT_OF_STOCK":
+                    return "INACTIVE", detail
+
+                remaining = availability.get(
+                    "estimatedRemainingQuantity"
+                )
+
+                if remaining is None:
+                    remaining = availability.get(
+                        "estimatedAvailableQuantity"
+                    )
+
+                if remaining is not None:
+                    try:
+                        if int(remaining) <= 0:
+                            return "INACTIVE", detail
+                    except (TypeError, ValueError):
+                        pass
+
+            return "ACTIVE", detail
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         # Browse commonly returns 404 for an item that is no longer retrievable.
