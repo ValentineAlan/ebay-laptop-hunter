@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.17"
+APP_VERSION = "0.10.18"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -18086,6 +18086,9 @@ def dashboard_html():
             page = health + page
 
     analytics_script = r"""
+<!-- Google tag is loaded on every page so Google can detect the installation.
+     Consent Mode remains denied until the visitor explicitly opts in. -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-2YX980D04E"></script>
 <script>
 (function () {
     const endpoint = "/analytics/event";
@@ -18146,10 +18149,6 @@ def dashboard_html():
     function loadGA() {
         if (gaLoaded) return;
         gaLoaded = true;
-        const script = document.createElement("script");
-        script.async = true;
-        script.src = "https://www.googletagmanager.com/gtag/js?id=" + encodeURIComponent(measurementId);
-        document.head.appendChild(script);
         gtag("js", new Date());
         gtag("config", measurementId, {send_page_view: false});
     }
