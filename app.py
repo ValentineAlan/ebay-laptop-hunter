@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.20"
+APP_VERSION = "0.10.21"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -18819,13 +18819,41 @@ def drain_reanalysis_queue(
                 OR COALESCE(rules_revision,0)<>?
               )
         ORDER BY
+            -- Public-facing deals must receive classifier migrations first.
+            -- Otherwise stale Win11/spec classifications can remain visible
+            -- while low-value backlog rows consume the reanalysis allowance.
             CASE
-                WHEN estimated_value IS NULL
+                WHEN deal_score IS NOT NULL
+                 AND deal_score > 0
+                 AND estimated_value IS NOT NULL
+                 AND undervaluation_gbp IS NOT NULL
+                 AND undervaluation_gbp >= ?
+                 AND undervaluation_pct IS NOT NULL
+                 AND undervaluation_pct >= ?
+                THEN 0
+                ELSE 1
+            END,
+            -- Next prioritise live auctions by soonest finishing time.
+            CASE
+                WHEN buying_options LIKE '%"AUCTION"%'
+                 AND end_date IS NOT NULL
                 THEN 0
                 ELSE 1
             END,
             CASE
+                WHEN buying_options LIKE '%"AUCTION"%'
+                 AND end_date IS NOT NULL
+                THEN end_date
+                ELSE NULL
+            END ASC,
+            CASE
                 WHEN valuation_basis='REANALYSIS_REQUIRED'
+                THEN 0
+                ELSE 1
+            END,
+            -- Unvalued backlog comes after public deals and urgent auctions.
+            CASE
+                WHEN estimated_value IS NULL
                 THEN 0
                 ELSE 1
             END,
@@ -18839,6 +18867,8 @@ def drain_reanalysis_queue(
         (
             CLASSIFIER_VERSION,
             current_rules_revision(conn),
+            MIN_UNDERVALUE_GBP,
+            MIN_UNDERVALUE_PCT,
             maximum,
         )
     ).fetchall()
