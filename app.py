@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.26"
+APP_VERSION = "0.10.27"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -260,6 +260,16 @@ _analytics_rate_lock = threading.Lock()
 _analytics_rate = {}
 _login_rate_lock = threading.Lock()
 _login_failures = {}
+_public_read_rate_lock = threading.Lock()
+_public_read_rate = {}
+_rate_store_last_prune = {}
+PUBLIC_READ_CACHE_SECONDS = 5 * 60
+_public_cache_lock = threading.Lock()
+_valuation_evidence_cache = {}
+_live_deals_cache = {"expires": 0.0, "deal_ids": None}
+_fault_pattern_cache_lock = threading.Lock()
+_fault_pattern_cache = {"revision": None, "key": None, "candidates": None}
+_RUNTIME_RULES_REVISION = 0
 
 # Only application behaviour belongs here. TrueNAS remains responsible for
 # ports, bind addresses, volumes, networking, secrets and container wiring.
@@ -346,7 +356,9 @@ DEFAULT_RULE_GROUPS = {'fault_high': ['liquid damage',
                     'missing key',
                     'missing keys',
                     'keycap',
+                    'keycaps',
                     'hinge',
+                    'hinges',
                     'case damage',
                     'case dmg',
                     'damaged case',
@@ -882,7 +894,7 @@ def current_rules_revision(conn=None):
 
 
 def refresh_classifier_rules(conn=None):
-    global _RUNTIME_RULES
+    global _RUNTIME_RULES, _RUNTIME_RULES_REVISION
     own = conn is None
     if own:
         conn = connect_db()
@@ -900,6 +912,7 @@ def refresh_classifier_rules(conn=None):
             ).fetchall()
             result[category] = [r["value"] for r in rows] if rows else list(fallback)
         _RUNTIME_RULES = result
+        _RUNTIME_RULES_REVISION = current_rules_revision(conn)
     finally:
         if own:
             conn.close()
@@ -920,6 +933,7 @@ def _seed_classifier_rules(conn):
     built-in defaults are appended only when that exact rule does not already
     exist in the category.
     """
+    added = 0
     for category, values in DEFAULT_RULE_GROUPS.items():
         existing_rows = conn.execute(
             """
@@ -971,6 +985,9 @@ def _seed_classifier_rules(conn):
 
             existing.add(value)
             next_position += 1
+            added += 1
+
+    return added
 
 
 def _bump_rules_revision(conn):
@@ -983,15 +1000,8 @@ def _bump_rules_revision(conn):
         """,
         (str(revision),),
     )
-    # Existing rows are now stale for the rule set. The reanalysis worker
-    # understands rules_revision separately from the Python classifier version.
-    conn.execute(
-        """
-        UPDATE listings
-        SET valuation_basis='REANALYSIS_REQUIRED'
-        WHERE COALESCE(active,1)=1
-        """
-    )
+    # Existing rows become stale through their stored rules_revision. Preserve
+    # valuation_basis so SOLD versus ACTIVE provenance is never destroyed.
     return revision
 
 
@@ -1381,7 +1391,9 @@ def init_db():
         )
     """)
 
-    _seed_classifier_rules(conn)
+    added_default_rules = _seed_classifier_rules(conn)
+    if added_default_rules:
+        _bump_rules_revision(conn)
     _ensure_settings_password(conn)
 
     conn.commit()
@@ -5169,20 +5181,38 @@ def classify_faults(
     matches = []
     occupied = []
 
-    # Longest phrases first prevents duplicate overlapping notes such as
-    # "scratch" + "scratches" or "spares" + "spares or repairs".
-    candidates = []
-    for level, phrases in [
-        ("HIGH_RISK", high),
-        ("MODERATE", moderate),
-        ("LOW_COST", low)
-    ]:
-        for phrase in phrases:
-            phrase = normalise(phrase).lower()
-            if phrase:
-                candidates.append((level, phrase))
-
-    candidates.sort(key=lambda pair: len(pair[1]), reverse=True)
+    # Compile fault regexes once per rules revision instead of once per
+    # classification. The tuple key also covers an in-flight rules refresh.
+    rule_key = (tuple(high), tuple(moderate), tuple(low))
+    with _fault_pattern_cache_lock:
+        if (
+            _fault_pattern_cache["revision"] != _RUNTIME_RULES_REVISION
+            or _fault_pattern_cache["key"] != rule_key
+        ):
+            compiled = []
+            for level, phrases in [
+                ("HIGH_RISK", high),
+                ("MODERATE", moderate),
+                ("LOW_COST", low),
+            ]:
+                for phrase in phrases:
+                    phrase = normalise(phrase).lower()
+                    if phrase:
+                        compiled.append((
+                            level,
+                            phrase,
+                            re.compile(
+                                r"(?<![A-Za-z0-9])" + re.escape(phrase) + r"(?![A-Za-z0-9])",
+                                re.I,
+                            ),
+                        ))
+            compiled.sort(key=lambda item: len(item[1]), reverse=True)
+            _fault_pattern_cache.update(
+                revision=_RUNTIME_RULES_REVISION,
+                key=rule_key,
+                candidates=tuple(compiled),
+            )
+        candidates = _fault_pattern_cache["candidates"]
 
     # Only negate a fault phrase when the negator directly governs it.
     # A broad look-behind can hide a real fault in text such as
@@ -5193,11 +5223,7 @@ def classify_faults(
         re.I,
     )
 
-    for level, phrase in candidates:
-        pattern = re.compile(
-            r"(?<![A-Za-z0-9])" + re.escape(phrase) + r"(?![A-Za-z0-9])",
-            re.I,
-        )
+    for level, phrase, pattern in candidates:
         for match in pattern.finditer(text):
             start, end = match.span()
 
@@ -9864,6 +9890,32 @@ def refresh_price_economics(conn, item_id):
     score = deal_score(
         conn, row, value, under, pct, row["valuation_confidence"]
     )
+
+    # Preserve the same Q1 bonus used by calculate_sold_valuation(). NEFF is
+    # embedded in the SOLD basis, so price-only refreshes stay inexpensive.
+    neff_match = re.search(
+        r"(?:^|/)NEFF=([0-9]+(?:\.[0-9]+)?)",
+        str(row["valuation_basis"] or ""),
+    )
+    effective_n = float(neff_match.group(1)) if neff_match else 0.0
+    q1 = safe_float(row["valuation_q1"])
+    if (
+        score is not None
+        and score > 0
+        and q1 is not None
+        and effective_n >= 4
+        and total < q1
+    ):
+        score = round(
+            min(
+                100,
+                score + 10 * deal_confidence_multiplier(
+                    row["valuation_confidence"]
+                ),
+            ),
+            1,
+        )
+
     conn.execute(
         """UPDATE listings
            SET undervaluation_gbp=?, undervaluation_pct=?, deal_score=?
@@ -15584,11 +15636,28 @@ def _sliding_window_allowed(store, lock, key, window_seconds, maximum):
     now = time.monotonic()
     cutoff = now - window_seconds
     with lock:
+        store_id = id(store)
+        if now - _rate_store_last_prune.get(store_id, 0.0) >= 60:
+            for stale_key in list(store):
+                kept = [
+                    stamp for stamp in store[stale_key]
+                    if stamp >= cutoff
+                ]
+                if kept:
+                    store[stale_key] = kept
+                else:
+                    store.pop(stale_key, None)
+            _rate_store_last_prune[store_id] = now
+
         recent = [stamp for stamp in store.get(key, []) if stamp >= cutoff]
         allowed = len(recent) < maximum
         if allowed:
             recent.append(now)
-        store[key] = recent
+            store[key] = recent
+        elif recent:
+            store[key] = recent
+        else:
+            store.pop(key, None)
         return allowed
 
 
@@ -16260,6 +16329,46 @@ def _change_settings_password(new_password):
 
 
 
+def _cached_live_deal_ids():
+    now = time.monotonic()
+    with _public_cache_lock:
+        cached = _live_deals_cache.get("deal_ids")
+        if (
+            cached is not None
+            and now < _live_deals_cache.get("expires", 0.0)
+        ):
+            return list(cached)
+
+    deal_ids = _live_deal_ids()
+    with _public_cache_lock:
+        _live_deals_cache["deal_ids"] = tuple(deal_ids)
+        _live_deals_cache["expires"] = (
+            now + PUBLIC_READ_CACHE_SECONDS
+        )
+    return deal_ids
+
+
+def _cached_valuation_evidence_html(item_id):
+    now = time.monotonic()
+    with _public_cache_lock:
+        cached = _valuation_evidence_cache.get(item_id)
+        if cached and now < cached[0]:
+            return cached[1]
+
+    fragment = _valuation_evidence_html(item_id)
+    with _public_cache_lock:
+        for stale_id, (expires, _) in list(
+            _valuation_evidence_cache.items()
+        ):
+            if expires <= now:
+                _valuation_evidence_cache.pop(stale_id, None)
+        _valuation_evidence_cache[item_id] = (
+            now + PUBLIC_READ_CACHE_SECONDS,
+            fragment,
+        )
+    return fragment
+
+
 def _live_deal_ids():
     """
     Return only IDs which currently qualify for display in the public
@@ -16781,6 +16890,19 @@ class DashboardHandler(
             return
 
         if path == "/valuation-evidence":
+            if not _sliding_window_allowed(
+                _public_read_rate,
+                _public_read_rate_lock,
+                _rate_key(self),
+                ANALYTICS_RATE_WINDOW_SECONDS,
+                ANALYTICS_RATE_MAX_EVENTS,
+            ):
+                self._send_html_fragment(
+                    "<div class='small'>Rate limited.</div>",
+                    status=429,
+                )
+                return
+
             query = urllib.parse.parse_qs(
                 urllib.parse.urlparse(
                     self.path
@@ -16804,15 +16926,28 @@ class DashboardHandler(
                 return
 
             self._send_html_fragment(
-                _valuation_evidence_html(
+                _cached_valuation_evidence_html(
                     item_id
                 )
             )
             return
 
         if path == "/live-deals":
+            if not _sliding_window_allowed(
+                _public_read_rate,
+                _public_read_rate_lock,
+                _rate_key(self),
+                ANALYTICS_RATE_WINDOW_SECONDS,
+                ANALYTICS_RATE_MAX_EVENTS,
+            ):
+                self._send_json(
+                    {"ok": False, "error": "rate limited"},
+                    status=429,
+                )
+                return
+
             self._send_json({
-                "deal_ids": _live_deal_ids(),
+                "deal_ids": _cached_live_deal_ids(),
             })
             return
 
@@ -16897,11 +17032,32 @@ class DashboardHandler(
             with _login_rate_lock:
                 now = time.monotonic()
                 cutoff = now - LOGIN_RATE_WINDOW_SECONDS
+                store_id = id(_login_failures)
+                if (
+                    now - _rate_store_last_prune.get(store_id, 0.0)
+                    >= 60
+                ):
+                    for stale_key in list(_login_failures):
+                        kept = [
+                            stamp
+                            for stamp in _login_failures[stale_key]
+                            if stamp >= cutoff
+                        ]
+                        if kept:
+                            _login_failures[stale_key] = kept
+                        else:
+                            _login_failures.pop(stale_key, None)
+                    _rate_store_last_prune[store_id] = now
+
                 recent_failures = [
                     stamp for stamp in _login_failures.get(login_key, [])
                     if stamp >= cutoff
                 ]
-                _login_failures[login_key] = recent_failures
+                if recent_failures:
+                    _login_failures[login_key] = recent_failures
+                else:
+                    _login_failures.pop(login_key, None)
+
                 if len(recent_failures) >= LOGIN_RATE_MAX_FAILURES:
                     self._send_html(
                         _settings_login_html("Too many failed attempts. Try again later."),
