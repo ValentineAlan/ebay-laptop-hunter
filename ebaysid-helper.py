@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import time
 import urllib.parse
 from datetime import datetime, timezone
@@ -610,6 +611,29 @@ def watch_manual_recovery(context):
             flush=True,
         )
 
+ALLOWED_RESEARCH_HOST = "www.ebay.co.uk"
+ALLOWED_RESEARCH_PATH = "/sh/research/api/search"
+
+
+def valid_research_request(request_id, url):
+    if not isinstance(request_id, str) or not re.fullmatch(r"[0-9a-f]{32}", request_id):
+        return False
+    if not isinstance(url, str):
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except Exception:
+        return False
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname == ALLOWED_RESEARCH_HOST
+        and parsed.port in (None, 443)
+        and parsed.path == ALLOWED_RESEARCH_PATH
+        and not parsed.username
+        and not parsed.password
+    )
+
+
 def process_research_request(context):
     if not RESEARCH_REQUEST_FILE.exists():
         return
@@ -626,7 +650,7 @@ def process_research_request(context):
         "url"
     )
 
-    if not request_id or not url:
+    if not valid_research_request(request_id, url):
         try:
             RESEARCH_REQUEST_FILE.unlink()
         except FileNotFoundError:
@@ -658,10 +682,13 @@ def process_research_request(context):
         result = page.evaluate(
             """
             async (url) => {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), 40000);
                 try {
                     const response = await fetch(url, {
                         method: "GET",
                         credentials: "include",
+                        signal: controller.signal,
                         headers: {
                             "Accept": "*/*",
                             "X-Requested-With": "XMLHttpRequest"
@@ -691,6 +718,8 @@ def process_research_request(context):
                         body: "",
                         error: String(error)
                     };
+                } finally {
+                    clearTimeout(timer);
                 }
             }
             """,
