@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.21"
+APP_VERSION = "0.10.22"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -18759,6 +18759,72 @@ def dynamic_reanalysis_allowance(
     )
 
 
+def recover_blank_reanalysis_valuations(conn, maximum=500):
+    """
+    Repair rows affected by v0.10.21, which refreshed classifier data and
+    then blanked valuation fields before the normal valuation path ran.
+    Uses only existing local evidence; no eBay API calls are made.
+    """
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND classifier_version=?
+          AND estimated_value IS NULL
+          AND valuation_basis IS NULL
+          AND cpu IS NOT NULL
+          AND trim(cpu) <> ''
+        ORDER BY first_seen DESC
+        LIMIT ?
+        """,
+        (CLASSIFIER_VERSION, maximum)
+    ).fetchall()
+
+    repaired = 0
+
+    for row in rows:
+        valuation = calculate_valuation(conn, row)
+
+        conn.execute(
+            """
+            UPDATE listings
+            SET estimated_value=?,
+                valuation_q1=?,
+                valuation_q3=?,
+                comparable_count=?,
+                valuation_confidence=?,
+                undervaluation_gbp=?,
+                undervaluation_pct=?,
+                deal_score=?,
+                valuation_basis=?
+            WHERE item_id=?
+            """,
+            (
+                valuation["estimated_value"],
+                valuation["q1"],
+                valuation["q3"],
+                valuation["count"],
+                valuation["confidence"],
+                valuation["undervaluation_gbp"],
+                valuation["undervaluation_pct"],
+                valuation["deal_score"],
+                valuation["basis"],
+                row["item_id"],
+            )
+        )
+        repaired += 1
+
+    if repaired:
+        conn.commit()
+        print(
+            f"Reanalysis valuation recovery: repaired {repaired} "
+            "current-classifier rows from local evidence"
+        )
+
+    return repaired
+
+
 def drain_reanalysis_queue(
     conn,
     token,
@@ -18975,25 +19041,46 @@ def drain_reanalysis_queue(
             item
         )
 
-        # Force valuation to be recalculated using the freshly
-        # classified identity/specification.
+        # Recalculate immediately from existing evidence. Do not blank a
+        # visible deal between classifier refresh and the valuation worker:
+        # doing so makes valid BIN deals disappear from the public dashboard.
+        refreshed = conn.execute(
+            "SELECT * FROM listings WHERE item_id=?",
+            (row["item_id"],)
+        ).fetchone()
+
+        valuation = calculate_valuation(
+            conn,
+            refreshed
+        )
+
         conn.execute(
             """
             UPDATE listings
             SET
-                estimated_value=NULL,
-                valuation_q1=NULL,
-                valuation_q3=NULL,
-                comparable_count=NULL,
-                valuation_confidence=NULL,
-                undervaluation_gbp=NULL,
-                undervaluation_pct=NULL,
-                deal_score=NULL,
-                valuation_basis=NULL,
-                valuation_research_at=NULL
+                estimated_value=?,
+                valuation_q1=?,
+                valuation_q3=?,
+                comparable_count=?,
+                valuation_confidence=?,
+                undervaluation_gbp=?,
+                undervaluation_pct=?,
+                deal_score=?,
+                valuation_basis=?,
+                valuation_research_at=COALESCE(valuation_research_at, ?)
             WHERE item_id=?
             """,
             (
+                valuation["estimated_value"],
+                valuation["q1"],
+                valuation["q3"],
+                valuation["count"],
+                valuation["confidence"],
+                valuation["undervaluation_gbp"],
+                valuation["undervaluation_pct"],
+                valuation["deal_score"],
+                valuation["basis"],
+                iso_now(),
                 row["item_id"],
             )
         )
@@ -20166,6 +20253,12 @@ def run_cycle(
         f"{budget_status['used']} used; "
         f"{current_search_reserve()} search reserve; "
         f"{_format_quota_countdown(budget_status['reset_seconds']) if budget_status.get('reset_seconds') is not None else 'unknown'} until reset"
+    )
+
+    # Repair any rows blanked by the v0.10.21 reanalysis behaviour
+    # before consuming more detail quota.
+    recover_blank_reanalysis_valuations(
+        conn
     )
 
     if reanalysis_allowance > 0:
