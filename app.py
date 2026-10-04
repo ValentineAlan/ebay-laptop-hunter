@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.27"
+APP_VERSION = "0.10.28"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -105,7 +105,6 @@ def mark_ebay_rate_limited(seconds=EBAY_429_COOLDOWN_SECONDS):
 
 DB = "/data/hunter.db"
 LOG_FILE = "/data/hunter.log"
-PRODUCT_RESEARCH_CURL = "/data/product-research.curl"
 PRODUCT_RESEARCH_LIVE_SID = "/data/ebaysid.current"
 PRODUCT_RESEARCH_REFRESH_REQUEST = "/data/ebaysid.refresh-request"
 PRODUCT_RESEARCH_SESSION_STATE = "/data/product-research-session.json"
@@ -5930,34 +5929,6 @@ def update_known_summary(
 # PRODUCT RESEARCH / SOLD DATA
 # ============================================================
 
-def _curl_cookie_header():
-    """Read the Cookie header from the user's locally saved Copy-as-cURL file."""
-    try:
-        raw = open(PRODUCT_RESEARCH_CURL, encoding="utf-8").read()
-    except OSError:
-        return None
-
-    # Copy-as-cURL normally uses backslash-newline continuations.
-    raw = raw.replace("\\\n", " ")
-    try:
-        args = shlex.split(raw)
-    except ValueError:
-        return None
-
-    for i, arg in enumerate(args):
-        if arg in ("-H", "--header") and i + 1 < len(args):
-            header = args[i + 1]
-            if header.lower().startswith("cookie:"):
-                return header.split(":", 1)[1].strip()
-
-    # Chrome may emit -b/--cookie instead.
-    for i, arg in enumerate(args):
-        if arg in ("-b", "--cookie") and i + 1 < len(args):
-            return args[i + 1].strip()
-
-    return None
-
-
 def _sid_hash(value):
     if not value:
         return None
@@ -6002,72 +5973,6 @@ def _read_live_ebaysid():
         return value or None
     except OSError:
         return None
-
-
-def _extract_ebaysid(cookie):
-    if not cookie:
-        return None
-    m = re.search(r"(?:^|;\s*)ebaysid=([^;]+)", cookie)
-    return m.group(1).strip() if m else None
-
-
-def _replace_ebaysid(cookie, sid):
-    if not cookie or not sid:
-        return cookie
-    if re.search(r"(?:^|;\s*)ebaysid=", cookie):
-        return re.sub(
-            r"(?:(?<=^)|(?<=;\s))ebaysid=[^;]+",
-            "ebaysid=" + sid,
-            cookie,
-            count=1,
-        )
-    return cookie.rstrip("; ") + "; ebaysid=" + sid
-
-
-def _cookie_with_live_sid(cookie):
-    """Overlay the browser helper's current ebaysid onto the saved curl cookies."""
-    live = _read_live_ebaysid()
-    if not live:
-        return cookie, False
-    old = _extract_ebaysid(cookie)
-    if old == live:
-        return cookie, False
-    cookie = _replace_ebaysid(cookie, live)
-    live_hash = _sid_hash(live)
-    state = _read_json_file(PRODUCT_RESEARCH_SESSION_STATE)
-    if state.get("ebaysid_hash") != live_hash:
-        _session_state_update(
-            last_refresh_at=iso_now(),
-            last_refresh_source="TrueNAS Chromium",
-            ebaysid_hash=live_hash,
-        )
-        print(
-            "Product Research session: applied new TrueNAS Chromium ebaysid "
-            f"{live_hash}"
-        )
-    return cookie, True
-
-
-def _request_browser_sid_refresh(keywords, current_sid):
-    request = {
-        "requested_at": iso_now(),
-        "keywords": keywords,
-        "current_ebaysid_hash": _sid_hash(current_sid),
-    }
-    _atomic_json_write(PRODUCT_RESEARCH_REFRESH_REQUEST, request)
-    print("Product Research session: requested Chromium ebaysid refresh")
-
-
-def _wait_for_new_live_sid(previous_sid):
-    deadline = time.time() + PRODUCT_RESEARCH_REFRESH_WAIT_SECONDS
-    previous_hash = _sid_hash(previous_sid)
-    while time.time() < deadline:
-        sid = _read_live_ebaysid()
-        if sid and _sid_hash(sid) != previous_hash:
-            return sid
-        time.sleep(PRODUCT_RESEARCH_REFRESH_POLL_SECONDS)
-    return None
-
 
 
 def _product_research_invalid_session(raw, modules):
@@ -8008,9 +7913,8 @@ def collect_needed_sold_data(conn, maximum=None):
     count appear stuck. v0.7.2 prioritises never-valued / oldest-attempted
     listings and persists the last valuation-research attempt.
     """
-    if not os.path.exists(PRODUCT_RESEARCH_CURL):
-        return 0
-
+    # Chromium is the Product Research transport; no local cookie/cURL seed
+    # file is required before the valuation backlog can be processed.
     # Only attempt listings with enough identity to form a meaningful query.
     rows = conn.execute("""
         SELECT * FROM listings
@@ -9926,9 +9830,9 @@ def refresh_price_economics(conn, item_id):
 
 
 def valuation_age_text(row):
-    stamp = row_value(row, "valuation_research_at")
+    stamp = row_value(row, "sold_evidence_at")
     if not stamp:
-        return "valuation age unknown"
+        return "sold evidence age unknown"
     try:
         when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
         if when.tzinfo is None:
@@ -9943,7 +9847,7 @@ def valuation_age_text(row):
             return f"valued {int(hours)}h ago"
         return f"valued {int(hours // 24)}d ago"
     except Exception:
-        return "valuation age unknown"
+        return "sold evidence age unknown"
 
 
 def promotion_eligible(row):
@@ -10632,8 +10536,16 @@ def money(value):
 def _dashboard_html_base():
     conn = connect_db()
 
+    sold_cutoff = (
+        utcnow() - timedelta(days=SOLD_CACHE_MAX_AGE_DAYS)
+    ).isoformat()
+
     buy_now_rows = conn.execute("""
-        SELECT *
+        SELECT listings.*,
+               (SELECT MAX(s.collected_at)
+                FROM sold_comparables s
+                WHERE s.brand=listings.brand
+                  AND s.model=listings.model) AS sold_evidence_at
         FROM listings
         WHERE COALESCE(active, 1) = 1
           AND estimated_value IS NOT NULL
@@ -10642,6 +10554,13 @@ def _dashboard_html_base():
           AND undervaluation_gbp >= ?
           AND undervaluation_pct IS NOT NULL
           AND undervaluation_pct >= ?
+          AND valuation_basis LIKE 'SOLD_%'
+          AND EXISTS (
+              SELECT 1 FROM sold_comparables s
+              WHERE s.brand=listings.brand
+                AND s.model=listings.model
+                AND s.collected_at >= ?
+          )
         ORDER BY
             deal_score DESC,
             undervaluation_gbp DESC,
@@ -10650,10 +10569,15 @@ def _dashboard_html_base():
     """, (
         MIN_UNDERVALUE_GBP,
         MIN_UNDERVALUE_PCT,
+        sold_cutoff,
     )).fetchall()
 
     auction_rows = conn.execute("""
-        SELECT *
+        SELECT listings.*,
+               (SELECT MAX(s.collected_at)
+                FROM sold_comparables s
+                WHERE s.brand=listings.brand
+                  AND s.model=listings.model) AS sold_evidence_at
         FROM listings
         WHERE COALESCE(active, 1) = 1
           AND estimated_value IS NOT NULL
@@ -10663,6 +10587,13 @@ def _dashboard_html_base():
           AND undervaluation_gbp >= ?
           AND undervaluation_pct IS NOT NULL
           AND undervaluation_pct >= ?
+          AND valuation_basis LIKE 'SOLD_%'
+          AND EXISTS (
+              SELECT 1 FROM sold_comparables s
+              WHERE s.brand=listings.brand
+                AND s.model=listings.model
+                AND s.collected_at >= ?
+          )
         ORDER BY
             CASE
                 WHEN end_date IS NULL THEN 1
@@ -10674,6 +10605,7 @@ def _dashboard_html_base():
     """, (
         MIN_UNDERVALUE_GBP,
         MIN_UNDERVALUE_PCT,
+        sold_cutoff,
     )).fetchall()
 
     rows = list(buy_now_rows) + list(auction_rows)
@@ -16375,6 +16307,9 @@ def _live_deal_ids():
     deal tables. Used by the lightweight browser poll.
     """
     conn = connect_db()
+    sold_cutoff = (
+        utcnow() - timedelta(days=SOLD_CACHE_MAX_AGE_DAYS)
+    ).isoformat()
 
     try:
         rows = conn.execute("""
@@ -16387,6 +16322,13 @@ def _live_deal_ids():
               AND undervaluation_gbp >= ?
               AND undervaluation_pct IS NOT NULL
               AND undervaluation_pct >= ?
+              AND valuation_basis LIKE 'SOLD_%'
+              AND EXISTS (
+                  SELECT 1 FROM sold_comparables s
+                  WHERE s.brand=listings.brand
+                    AND s.model=listings.model
+                    AND s.collected_at >= ?
+              )
 
             UNION
 
@@ -16400,11 +16342,20 @@ def _live_deal_ids():
               AND undervaluation_gbp >= ?
               AND undervaluation_pct IS NOT NULL
               AND undervaluation_pct >= ?
+              AND valuation_basis LIKE 'SOLD_%'
+              AND EXISTS (
+                  SELECT 1 FROM sold_comparables s
+                  WHERE s.brand=listings.brand
+                    AND s.model=listings.model
+                    AND s.collected_at >= ?
+              )
         """, (
             MIN_UNDERVALUE_GBP,
             MIN_UNDERVALUE_PCT,
+            sold_cutoff,
             MIN_UNDERVALUE_GBP,
             MIN_UNDERVALUE_PCT,
+            sold_cutoff,
         )).fetchall()
 
         return [
@@ -16889,6 +16840,20 @@ class DashboardHandler(
 
             return
 
+        if path == "/privacy":
+            self._send_html("""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LaptopLander privacy notice</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 20px;line-height:1.55;color:#172033">
+<h1>Privacy notice</h1>
+<p>LaptopLander uses essential browser storage for site operation. Optional analytics are disabled until you choose “Allow analytics”.</p>
+<p>If you consent, LaptopLander records first-party usage events such as page views, deal impressions, deal clicks, evidence views and filter changes, and loads Google Analytics. No advertising cookies are enabled by LaptopLander.</p>
+<p>If you choose “No thanks”, Google Analytics is not loaded and LaptopLander does not send its optional first-party analytics events.</p>
+<p>Your analytics choice is stored in your browser so the site can remember it.</p>
+<p><a href="/">Back to LaptopLander</a></p>
+</body></html>""")
+            return
+
         if path == "/valuation-evidence":
             if not _sliding_window_allowed(
                 _public_read_rate,
@@ -17334,15 +17299,14 @@ def _dashboard_health_alert():
             "</div>"
 
             "<div class='health-notice-copy'>"
-            "eBay isn't happy that we're doing so much searching of "
-            "sold-history prices — which we need to do to work out "
-            "what laptops are really worth — and has temporarily "
-            "blocked us from doing more."
+            "eBay Product Research is temporarily unavailable, so "
+            "LaptopLander has paused new sold-price research."
             "<br><br>"
-            "That's why you may not be seeing new deals at the moment."
+            "Existing deals with sufficiently recent sold evidence remain "
+            "visible; new valuations may be delayed."
             "<br><br>"
-            "We're on it. As soon as we've regained access to eBay's "
-            "sales history, new deals will start coming through again."
+            "LaptopLander will test for recovery after the cooldown and "
+            "resume valuation processing when Product Research succeeds."
             "</div>"
 
             "</div>"
@@ -18517,9 +18481,7 @@ def dashboard_html():
             page = health + page
 
     analytics_script = r"""
-<!-- Google tag is loaded on every page so Google can detect the installation.
-     Consent Mode remains denied until the visitor explicitly opts in. -->
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-2YX980D04E"></script>
+<!-- Analytics code is inert until the visitor explicitly opts in. -->
 <script>
 (function () {
     const endpoint = "/analytics/event";
@@ -18580,6 +18542,11 @@ def dashboard_html():
     function loadGA() {
         if (gaLoaded) return;
         gaLoaded = true;
+        const script = document.createElement("script");
+        script.async = true;
+        script.src = "https://www.googletagmanager.com/gtag/js?id=" +
+            encodeURIComponent(measurementId);
+        document.head.appendChild(script);
         gtag("js", new Date());
         gtag("config", measurementId, {send_page_view: false});
     }
@@ -18657,7 +18624,7 @@ def dashboard_html():
         box.setAttribute("aria-label", "Analytics choice");
         box.innerHTML =
             '<div style="font-weight:800;margin-bottom:4px">Help improve LaptopLander?</div>' +
-            '<div style="font-size:13px;line-height:1.4">We use anonymous first-party analytics and Google Analytics to understand which deals people find useful. No advertising cookies are enabled.</div>' +
+            '<div style="font-size:13px;line-height:1.4">We use first-party analytics and Google Analytics to understand which deals people find useful. Google Analytics is not loaded unless you allow analytics. No advertising cookies are enabled. <a href="/privacy" target="_blank" rel="noopener">Privacy notice</a>.</div>' +
             '<div style="display:flex;gap:8px;margin-top:10px">' +
             '<button id="ll-consent-yes" style="border:0;border-radius:8px;padding:8px 12px;background:#2563eb;color:white;font-weight:700;cursor:pointer">Allow analytics</button>' +
             '<button id="ll-consent-no" style="border:1px solid #d0d5dd;border-radius:8px;padding:8px 12px;background:white;color:#344054;font-weight:700;cursor:pointer">No thanks</button>' +
