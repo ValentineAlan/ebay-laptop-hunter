@@ -5176,6 +5176,14 @@ def classify_faults(
         )
         for match in pattern.finditer(text):
             start, end = match.span()
+
+            # "no power supply/adapter/charger" describes a missing accessory,
+            # not a machine that fails to power on.
+            if phrase == "no power":
+                suffix = text[end:end + 16]
+                if re.match(r"\s+(?:supply|adapter|adaptor|charger)\b", suffix, re.I):
+                    continue
+
             window = text[max(0, start - 24):start]
             if negation.search(window):
                 continue
