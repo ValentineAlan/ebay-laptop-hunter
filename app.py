@@ -57,8 +57,8 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.19"
-CLASSIFIER_VERSION = "0.8.3"
+APP_VERSION = "0.10.20"
+CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
 IMAGE_BACKFILL_PER_CYCLE = 100
@@ -4738,38 +4738,39 @@ def windows11_cpu_assessment(conn, cpu):
 
     family_ok = unofficial_windows11_family_ok(cpu)
 
-    if (
-        family_ok
-        and cpu_mark is not None
-        and cpu_mark >= WIN11_UNOFFICIAL_MIN_CPU_MARK
-    ):
+    if family_ok:
+        performance_note = ""
+
+        if cpu_mark is None:
+            performance_note = (
+                "; CPU benchmark performance is unavailable"
+            )
+        elif cpu_mark < WIN11_UNOFFICIAL_MIN_CPU_MARK:
+            performance_note = (
+                f"; CPU Mark {cpu_mark:,} is below Laptop Lander's "
+                f"{WIN11_UNOFFICIAL_MIN_CPU_MARK:,} preferred performance threshold"
+            )
+        else:
+            performance_note = (
+                f"; CPU Mark {cpu_mark:,} meets Laptop Lander's "
+                f"{WIN11_UNOFFICIAL_MIN_CPU_MARK:,} preferred performance threshold"
+            )
+
         return {
             "state": WIN11_UNOFFICIAL_OK,
             "value": True,
             "official": False,
             "cpu_mark": cpu_mark,
-            "confidence": "HIGH",
+            "confidence": "HIGH" if cpu_mark is not None else "MEDIUM",
             "source": "LAPTOP_LANDER_UNOFFICIAL_POLICY",
             "evidence":
                 (
-                    "CPU is not officially supported by Microsoft, "
-                    "but is from a known practical Windows 11 family "
-                    "and has CPU Mark "
-                    f"{cpu_mark:,}, above the "
-                    f"{WIN11_UNOFFICIAL_MIN_CPU_MARK:,} threshold"
+                    "CPU is not officially supported by Microsoft. "
+                    "Windows 11 can generally be installed using an "
+                    "unsupported-hardware route, but Microsoft support "
+                    "and updates are not guaranteed"
+                    + performance_note
                 ),
-        }
-
-    if family_ok and cpu_mark is None:
-        return {
-            "state": WIN11_UNKNOWN,
-            "value": None,
-            "official": False,
-            "cpu_mark": None,
-            "confidence": "UNKNOWN",
-            "source": "PASSMARK_UNAVAILABLE",
-            "evidence":
-                "Unsupported CPU family may be suitable, but no CPU Mark is available",
         }
 
     return {
@@ -10764,10 +10765,21 @@ def _dashboard_html_base():
             "win11_state" in row.keys()
             and row["win11_state"] == WIN11_UNOFFICIAL_OK
         ):
+            cpu_mark_note = ""
+
+            if row["win11_cpu_mark"] is not None:
+                cpu_mark_note = (
+                    f" CPU Mark: {int(row['win11_cpu_mark']):,}."
+                )
+
             notes_html += (
                 "<span class='win11-ok-note' "
-                "title='Runs Windows 11 well, but the CPU is not officially supported by Microsoft.'>"
-                "Win11-OK"
+                "title='Windows 11 is not officially supported by Microsoft on this CPU. "
+                "It can generally be installed using an unsupported-hardware route, "
+                "but Microsoft support and updates are not guaranteed."
+                + html.escape(cpu_mark_note, quote=True)
+                + "'>"
+                "△ Win11 unofficial"
                 "</span>"
             )
 
