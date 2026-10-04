@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.16"
+APP_VERSION = "0.10.17"
 CLASSIFIER_VERSION = "0.8.3"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -18089,13 +18089,30 @@ def dashboard_html():
 <script>
 (function () {
     const endpoint = "/analytics/event";
+    const measurementId = "G-2YX980D04E";
     const visitorKey = "ll_analytics_visitor";
     const sessionKey = "ll_analytics_session";
+    const consentKey = "ll_analytics_consent";
+    const startedAt = Date.now();
+    const impressed = new Set();
+    const evidenceOpened = new Set();
+    let visitorId = "";
+    let sessionId = "";
+    let analyticsEnabled = false;
+    let gaLoaded = false;
+    let engagementSent = false;
+
+    window.dataLayer = window.dataLayer || [];
+    window.gtag = window.gtag || function(){dataLayer.push(arguments);};
+    gtag("consent", "default", {
+        analytics_storage: "denied",
+        ad_storage: "denied",
+        ad_user_data: "denied",
+        ad_personalization: "denied"
+    });
 
     function makeId() {
-        if (window.crypto && crypto.randomUUID) {
-            return crypto.randomUUID();
-        }
+        if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
         return Date.now().toString(36) + Math.random().toString(36).slice(2);
     }
 
@@ -18112,12 +18129,6 @@ def dashboard_html():
         }
     }
 
-    const visitorId = stored(localStorage, visitorKey);
-    const sessionId = stored(sessionStorage, sessionKey);
-    const startedAt = Date.now();
-    const impressed = new Set();
-    const evidenceOpened = new Set();
-
     function deviceType() {
         if (window.innerWidth < 768) return "mobile";
         if (window.innerWidth < 1100) return "tablet";
@@ -18132,7 +18143,33 @@ def dashboard_html():
         }
     }
 
+    function loadGA() {
+        if (gaLoaded) return;
+        gaLoaded = true;
+        const script = document.createElement("script");
+        script.async = true;
+        script.src = "https://www.googletagmanager.com/gtag/js?id=" + encodeURIComponent(measurementId);
+        document.head.appendChild(script);
+        gtag("js", new Date());
+        gtag("config", measurementId, {send_page_view: false});
+    }
+
+    function gaEvent(type, data) {
+        if (!analyticsEnabled) return;
+        const params = {};
+        if (data && data.item_id) params.item_id = data.item_id;
+        if (data && data.engaged_seconds != null) params.engaged_seconds = data.engaged_seconds;
+        if (data && data.metadata) {
+            Object.keys(data.metadata).forEach((key) => {
+                params[key] = data.metadata[key];
+            });
+        }
+        gtag("event", type, params);
+    }
+
     function event(type, data, beacon) {
+        if (!analyticsEnabled) return;
+
         const payload = Object.assign({
             visitor_id: visitorId,
             session_id: sessionId,
@@ -18142,13 +18179,11 @@ def dashboard_html():
             referrer_host: referrerHost()
         }, data || {});
 
+        gaEvent(type, data || {});
         const body = JSON.stringify(payload);
 
         if (beacon && navigator.sendBeacon) {
-            navigator.sendBeacon(
-                endpoint,
-                new Blob([body], {type: "application/json"})
-            );
+            navigator.sendBeacon(endpoint, new Blob([body], {type: "application/json"}));
             return;
         }
 
@@ -18162,11 +18197,60 @@ def dashboard_html():
     }
 
     window.llAnalyticsEvent = event;
-    event("page_view");
+
+    function enableAnalytics() {
+        if (analyticsEnabled) return;
+        analyticsEnabled = true;
+        visitorId = stored(localStorage, visitorKey);
+        sessionId = stored(sessionStorage, sessionKey);
+        gtag("consent", "update", {analytics_storage: "granted"});
+        loadGA();
+        event("page_view");
+    }
+
+    function consentValue() {
+        try { return localStorage.getItem(consentKey) || ""; }
+        catch (e) { return ""; }
+    }
+
+    function setConsent(value) {
+        try { localStorage.setItem(consentKey, value); } catch (e) {}
+        const banner = document.getElementById("ll-consent");
+        if (banner) banner.remove();
+        if (value === "yes") enableAnalytics();
+    }
+
+    function showConsent() {
+        const box = document.createElement("div");
+        box.id = "ll-consent";
+        box.setAttribute("role", "dialog");
+        box.setAttribute("aria-label", "Analytics choice");
+        box.innerHTML =
+            '<div style="font-weight:800;margin-bottom:4px">Help improve LaptopLander?</div>' +
+            '<div style="font-size:13px;line-height:1.4">We use anonymous first-party analytics and Google Analytics to understand which deals people find useful. No advertising cookies are enabled.</div>' +
+            '<div style="display:flex;gap:8px;margin-top:10px">' +
+            '<button id="ll-consent-yes" style="border:0;border-radius:8px;padding:8px 12px;background:#2563eb;color:white;font-weight:700;cursor:pointer">Allow analytics</button>' +
+            '<button id="ll-consent-no" style="border:1px solid #d0d5dd;border-radius:8px;padding:8px 12px;background:white;color:#344054;font-weight:700;cursor:pointer">No thanks</button>' +
+            '</div>';
+        Object.assign(box.style, {
+            position:"fixed", left:"16px", bottom:"16px", zIndex:"100000",
+            width:"min(390px,calc(100vw - 32px))", boxSizing:"border-box",
+            padding:"16px", background:"#fff", color:"#172033",
+            border:"1px solid #d0d5dd", borderRadius:"12px",
+            boxShadow:"0 12px 32px rgba(16,24,40,.18)"
+        });
+        document.body.appendChild(box);
+        document.getElementById("ll-consent-yes").onclick = () => setConsent("yes");
+        document.getElementById("ll-consent-no").onclick = () => setConsent("no");
+    }
+
+    const choice = consentValue();
+    if (choice === "yes") enableAnalytics();
+    else if (choice !== "no") showConsent();
 
     const observer = new IntersectionObserver((entries) => {
         entries.forEach((entry) => {
-            if (!entry.isIntersecting) return;
+            if (!entry.isIntersecting || !analyticsEnabled) return;
             const row = entry.target;
             const itemId = row.dataset.itemId || "";
             if (!itemId || impressed.has(itemId)) return;
@@ -18176,71 +18260,55 @@ def dashboard_html():
         });
     }, {threshold: 0.35});
 
-    document.querySelectorAll("tr[data-item-id]").forEach((row) => {
-        observer.observe(row);
-    });
+    document.querySelectorAll("tr[data-item-id]").forEach((row) => observer.observe(row));
 
     document.addEventListener("click", (e) => {
+        if (!analyticsEnabled) return;
         const link = e.target.closest("a");
-        if (!link) return;
-
-        const href = link.href || "";
-        const row = link.closest("tr[data-item-id]");
-        const itemId = row ? (row.dataset.itemId || "") : "";
-
-        if (/https?:\/\/([^/]*\.)?ebay\.co\.uk\//i.test(href) && itemId) {
-            event("deal_click", {item_id: itemId});
+        if (link) {
+            const href = link.href || "";
+            const row = link.closest("tr[data-item-id]");
+            const itemId = row ? (row.dataset.itemId || "") : "";
+            if (/https?:\/\/([^/]*\.)?ebay\.co\.uk\//i.test(href) && itemId) {
+                event("deal_click", {item_id: itemId});
+            }
+            if (/https?:\/\/t\.me\/LaptopLander/i.test(href)) event("telegram_click");
+            if (link.closest(".valuation-hover") && itemId && !evidenceOpened.has(itemId)) {
+                evidenceOpened.add(itemId);
+                event("evidence_open", {item_id: itemId});
+            }
         }
-
-        if (/https?:\/\/t\.me\/LaptopLander/i.test(href)) {
-            event("telegram_click");
-        }
-
-        if (link.closest(".valuation-hover") && itemId && !evidenceOpened.has(itemId)) {
-            evidenceOpened.add(itemId);
-            event("evidence_open", {item_id: itemId});
-        }
+        if (e.target.closest("#live-update-button")) event("refresh_deals");
     }, true);
 
     document.querySelectorAll(".valuation-hover").forEach((wrapper) => {
         wrapper.addEventListener("mouseenter", () => {
+            if (!analyticsEnabled) return;
             const row = wrapper.closest("tr[data-item-id]");
             const itemId = row ? (row.dataset.itemId || "") : "";
             if (itemId && !evidenceOpened.has(itemId)) {
                 evidenceOpened.add(itemId);
                 event("evidence_open", {item_id: itemId});
             }
-        }, {once: true});
+        });
     });
 
     document.addEventListener("change", (e) => {
+        if (!analyticsEnabled) return;
         const el = e.target;
-        if (!el) return;
-        if (el.matches("select,input[type=checkbox],input[type=radio]")) {
-            event("filter_change", {
-                metadata: {
-                    control: el.name || el.id || el.type || "unknown"
-                }
-            });
+        if (el && el.matches("select,input[type=checkbox],input[type=radio]")) {
+            event("filter_change", {metadata:{control:el.name || el.id || el.type || "unknown"}});
         }
     }, true);
 
     document.querySelectorAll("th.sortable-header").forEach((th) => {
         th.addEventListener("click", () => {
-            event("sort_change", {
-                metadata: {sort: th.dataset.sortName || th.textContent.trim().slice(0, 80)}
-            });
+            event("sort_change", {metadata:{sort:th.dataset.sortName || th.textContent.trim().slice(0,80)}});
         });
     });
 
-    document.addEventListener("click", (e) => {
-        const button = e.target.closest("#live-update-button");
-        if (button) event("refresh_deals");
-    }, true);
-
-    let engagementSent = false;
     function sendEngagement() {
-        if (engagementSent) return;
+        if (engagementSent || !analyticsEnabled) return;
         engagementSent = true;
         const seconds = Math.min(1800, Math.max(0, (Date.now() - startedAt) / 1000));
         event("engaged_time", {engaged_seconds: seconds}, true);
