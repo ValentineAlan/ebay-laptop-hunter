@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.25"
+APP_VERSION = "0.10.26"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -245,6 +245,11 @@ ANALYTICS_RATE_WINDOW_SECONDS = 60
 ANALYTICS_RATE_MAX_EVENTS = 120
 LOGIN_RATE_WINDOW_SECONDS = 15 * 60
 LOGIN_RATE_MAX_FAILURES = 5
+TRUSTED_PROXIES = {
+    value.strip()
+    for value in os.environ.get("TRUSTED_PROXIES", "").split(",")
+    if value.strip()
+}
 LOG_MAX_BYTES = 10 * 1024 * 1024
 LOG_BACKUPS = 5
 
@@ -5179,9 +5184,12 @@ def classify_faults(
 
     candidates.sort(key=lambda pair: len(pair[1]), reverse=True)
 
+    # Only negate a fault phrase when the negator directly governs it.
+    # A broad look-behind can hide a real fault in text such as
+    # "no charger, cracked screen".
     negation = re.compile(
-        r"\b(?:no|not|without|never|isn['’]?t|aren['’]?t|"
-        r"doesn['’]?t|does\s+not|free\s+from)\b",
+        r"(?:^|[\s,;:/(])(?:no|not|without|never)\s+"
+        r"(?:(?:any|a|the|have|has|show|visible)\s+)*$",
         re.I,
     )
 
@@ -5200,7 +5208,7 @@ def classify_faults(
                 if re.match(r"\s+(?:supply|adapter|adaptor|charger)\b", suffix, re.I):
                     continue
 
-            window = text[max(0, start - 24):start]
+            window = text[max(0, start - 18):start]
             if negation.search(window):
                 continue
             if any(start < used_end and end > used_start
@@ -9823,8 +9831,28 @@ def refresh_price_economics(conn, item_id):
         "SELECT * FROM listings WHERE item_id=?",
         (item_id,)
     ).fetchone()
-    if not row or row["estimated_value"] is None or row["total"] is None:
+    if not row or row["estimated_value"] is None:
         return False
+
+    # Only sold-evidence valuations can create deal economics. Active-market
+    # fallback is an asking-price reference, not evidence of realised value.
+    if not str(row["valuation_basis"] or "").startswith("SOLD_"):
+        conn.execute(
+            """UPDATE listings
+               SET undervaluation_gbp=NULL, undervaluation_pct=NULL, deal_score=NULL
+               WHERE item_id=?""",
+            (item_id,)
+        )
+        return True
+
+    if row["total"] is None:
+        conn.execute(
+            """UPDATE listings
+               SET undervaluation_gbp=NULL, undervaluation_pct=NULL, deal_score=NULL
+               WHERE item_id=?""",
+            (item_id,)
+        )
+        return True
 
     value = float(row["estimated_value"])
     total = float(row["total"])
@@ -15538,9 +15566,18 @@ def _analytics_clean_id(value):
 
 def _rate_key(handler):
     try:
-        return str(handler.client_address[0])
+        peer = str(handler.client_address[0])
     except Exception:
         return "unknown"
+
+    # Forwarded client addresses are attacker-controlled unless the immediate
+    # TCP peer is explicitly trusted as our reverse proxy.
+    if peer in TRUSTED_PROXIES:
+        real = (handler.headers.get("X-Real-IP") or "").strip()
+        if real and re.fullmatch(r"[0-9A-Fa-f:.]+", real):
+            return real
+
+    return peer
 
 
 def _sliding_window_allowed(store, lock, key, window_seconds, maximum):
@@ -20678,6 +20715,17 @@ def main():
 
     init_db()
     with connect_db() as migration_conn:
+        # v0.10.23 could accidentally derive deal economics from ACTIVE_FALLBACK
+        # asking-price references after a listing price changed.
+        migration_conn.execute(
+            """UPDATE listings
+               SET undervaluation_gbp=NULL,
+                   undervaluation_pct=NULL,
+                   deal_score=NULL
+               WHERE valuation_basis LIKE 'ACTIVE_FALLBACK%'"""
+        )
+        migration_conn.commit()
+
         repair_v078_model_and_sold_cache(migration_conn)
         repair_v080_valuation_cache(migration_conn)
         repair_v0944_telegram_notification_baseline(migration_conn)
