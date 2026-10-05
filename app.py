@@ -56,8 +56,8 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.44"
-CLASSIFIER_VERSION = "0.8.4"
+APP_VERSION = "0.10.45"
+CLASSIFIER_VERSION = "0.8.5"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
 IMAGE_BACKFILL_PER_CYCLE = 100
@@ -3106,6 +3106,9 @@ MODEL_PATTERNS = [
     # Hyphenated seller form, e.g. "XPS 15-7590".
     r"\bXPS\s+(?:13|15|17)-\d{4}\b",
 
+    # XPS Plus seller form, e.g. "XPS 13 Plus 9320".
+    r"\bXPS\s+(?:13|15|17)\s+Plus\s+\d{4}\b",
+
     # Family-only XPS is retained only as a discovery identity; it is never
     # precise enough for exact-model valuation.
     r"\bXPS\s+(?:13|15|17)\b",
@@ -3156,11 +3159,11 @@ MODEL_PATTERNS = [
     # Lenovo generation spacing variants: "Gen1", "Gen2".
     r"\bThinkPad\s+P15\s+Gen\s*[12]\b",
 
-    # Lenovo
+    # Lenovo. Accept Gen1 / Gen 1 / G1 seller forms and canonicalise later.
     r"\bThinkPad\s+"
     r"(?:T|X|E|L|P)"
     r"\d{2,3}[A-Za-z]?"
-    r"(?:\s+Gen\s+\d+)?\b",
+    r"(?:\s+(?:Gen\s*\d+|G\d+))?\b",
 
     r"\bThinkPad\s+"
     r"X1\s+Carbon"
@@ -3213,8 +3216,8 @@ MODEL_PATTERNS = [
     r"[A-Z]{1,3}\d{3,4}[A-Z0-9-]*\b",
 
     # Acer - family plus real platform code.
-    # Examples: Aspire V7-581, Aspire A515-55, Swift 5 SF514-52T.
-    r"\bAspire\s+"
+    # Examples: Aspire V7-581, Aspire A515-55, Aspire 5 A514-55.
+    r"\bAspire(?:\s+\d+)?\s+"
     r"(?:V\d-\d{3}[A-Z]?|A\d{3}-\d{2}[A-Z0-9-]*)\b",
 
     r"\bSwift(?:\s+\d)?\s+"
@@ -3236,6 +3239,10 @@ MODEL_PATTERNS = [
     # Geo machines where a numbered model is explicitly stated.
     r"\bGeoBook\s+[A-Za-z0-9-]+\b",
     r"\bGeoFlex\s+\d+[A-Za-z0-9-]*\b",
+
+    # Lenovo V-series platform identities.
+    r"\bV\d{2,3}-\d{2}[A-Z]{3}\b",
+    r"\bV15\s+G\d+\s+(?:ITL|ALC|IJL|GML|ADA|IAP|IRU)\b",
 
     # Microsoft
     r"\bSurface\s+Pro\s+\d{1,2}(?:\+|\s+Plus)?(?!\w)",
@@ -3323,10 +3330,28 @@ def clean_model(model):
         flags=re.I,
     )
 
-    # Lenovo commonly omits the space in generation names.
+    # Lenovo commonly omits the space in generation names or abbreviates
+    # generation as G1/G2.
     model = re.sub(
-        r"^(ThinkPad\s+P15)\s+Gen\s*([12])$",
+        r"^(ThinkPad\s+(?:(?:T|X|E|L|P)\d{2,3}[A-Za-z]?|X1\s+(?:Carbon|Yoga)))\s+(?:Gen\s*|G)(\d+)$",
         r"\1 Gen \2",
+        model,
+        flags=re.I,
+    )
+
+    # Acer marketing family number is redundant once the platform code is
+    # present: "Aspire 5 A514-55" -> "Aspire A514-55".
+    model = re.sub(
+        r"^(Aspire)\s+\d+\s+((?:V\d-\d{3}[A-Z]?|A\d{3}-\d{2}[A-Z0-9-]*))$",
+        r"\1 \2",
+        model,
+        flags=re.I,
+    )
+
+    # XPS 13 Plus 9320 is unambiguously the XPS 13 9320 platform.
+    model = re.sub(
+        r"^XPS\s+(13|15|17)\s+Plus\s+(\d{4})$",
+        r"XPS \1 \2",
         model,
         flags=re.I,
     )
@@ -3416,10 +3441,15 @@ def precise_model_for_valuation(brand, model):
         r"^(?:Inspiron|Vostro|Precision)\s+\d{4}$",
         r"^XPS\s+(?:13|15|17)\s+(?:L\d{3,4}X|\d{4})$",
         r"^(?:ProBook|EliteBook)\s+\d{3}\s+G\d{1,2}$",
+        r"^ZBook\s+[A-Za-z0-9 ]+\s+G\d{1,2}$",
         r"^(?:240|245|250|255|340|348|430|440|450|455|470)\s+G\d{1,2}$",
         r"^ThinkPad\s+(?:(?:T|X|E|L|P)\d{2,3}[A-Za-z]?|X1\s+(?:Carbon|Yoga))(?:\s+Gen\s+\d+)?$",
         r"^IdeaPad\s+(?:Slim\s+)?[A-Za-z0-9-]+(?:\s+[A-Za-z0-9-]+)?$",
         r"^Surface\s+(?:Pro|Laptop)\s+\d{1,2}\+?$",
+        r"^Galaxy\s+Book\s+NP[A-Z0-9-]{5,}$",
+        r"^A\d{4}$",
+        r"^V\d{2,3}-\d{2}[A-Z]{3}$",
+        r"^V15\s+G\d+\s+(?:ITL|ALC|IJL|GML|ADA|IAP|IRU)$",
         r"^GeoBook\\s+[A-Za-z0-9-]+$",
 
         # Lenovo Legion with explicit platform code.
@@ -3473,6 +3503,29 @@ def identify_model(
         ]
     )
 
+    brand = identify_brand(title, detail)
+
+    # Apple A-numbers identify a concrete hardware platform.
+    if brand == "Apple":
+        match = re.search(
+            r"\bA\d{4}\b",
+            title,
+            re.I,
+        )
+        if match:
+            return match.group(0).upper()
+
+    # Samsung NP platform codes are more precise than generic Galaxy Book
+    # family names and should win before the broad Galaxy Book recognizer.
+    if brand == "Samsung":
+        match = re.search(
+            r"\bNP[A-Z0-9-]{5,}\b",
+            title,
+            re.I,
+        )
+        if match:
+            return "Galaxy Book " + match.group(0).upper()
+
     # Prefer a recognizable model in title because seller
     # "Model" aspects can sometimes contain generic garbage.
     for pattern in classifier_rule_values("model_patterns", MODEL_PATTERNS):
@@ -3491,7 +3544,7 @@ def identify_model(
     # Some ASUS titles contain only the machine/platform code rather than a
     # family-qualified model. Restrict these codes to ASUS so GPU names such
     # as NVIDIA K2100M cannot be mistaken for laptop models.
-    if identify_brand(title, detail) == "ASUS":
+    if brand == "ASUS":
         match = re.search(
             r"\b(?:UX|UM|X|K|F|G|GL|GU|GX|FX|FA)"
             r"\d{3,4}[A-Z0-9-]*\b",
