@@ -2,6 +2,20 @@
 
 Notable changes to Laptop Lander are recorded here.
 
+## 0.10.29
+
+### Evidence freshness, rule seeding and public hardening
+- Persist the newest `collected_at` timestamp from the exact SOLD evidence set used by each valuation and gate public deals/alerts on that timestamp.
+- Added a case-insensitive sold-model expression index and compatibility backfill for existing valuations.
+- Prioritise currently displayed SOLD deals by evidence age so refresh work is less likely to starve.
+- Built-in classifier defaults are now seeded once; later user deletions survive restarts.
+- Validate public valuation-evidence item IDs and return a controlled 500 fragment on evidence-rendering failures.
+- Replaced detailed public infrastructure errors with a generic delayed-data notice.
+- Added analytics-consent withdrawal and `_ga*` cookie cleanup.
+- Removed dead dashboard/settings code and the unused `shlex` import.
+- Stopped persisting the live eBay SID cookie; the app now reads only its hash from helper status.
+- Hardened Product Research URL validation against malformed ports.
+
 ## 0.10.28
 
 ### Valuation freshness and privacy
