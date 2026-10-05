@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.47"
+APP_VERSION = "0.10.48"
 CLASSIFIER_VERSION = "0.8.6"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -16106,6 +16106,132 @@ def diagnostics_html(hp_model_probe=False):
         for row in win11_state_rows
     }
 
+
+    win11_unknown_rows = safe_rows(
+        """
+        SELECT
+            cpu,
+            cpu_confidence,
+            cpu_generation,
+            classifier_version,
+            rules_revision,
+            win11_state
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND COALESCE(win11_state,'UNCLASSIFIED')
+              IN ('UNKNOWN','UNCLASSIFIED')
+        """
+    )
+
+    win11_unknown_reason_counts = {
+        "No CPU identified": 0,
+        "CPU generation only": 0,
+        "Exact CPU, support rule unknown": 0,
+        "Awaiting classifier reanalysis": 0,
+        "Other / unclassified": 0,
+    }
+
+    win11_exact_unknown_cpu_counts = {}
+
+    current_revision = current_rules_revision(conn)
+
+    for blocked in win11_unknown_rows:
+        cpu_name = normalise(
+            row_value(blocked, "cpu")
+        )
+
+        cpu_confidence = normalise(
+            row_value(blocked, "cpu_confidence")
+        ).upper()
+
+        classifier_version = normalise(
+            row_value(blocked, "classifier_version")
+        )
+
+        row_rules_revision = int(
+            row_value(blocked, "rules_revision")
+            or 0
+        )
+
+        if (
+            classifier_version != CLASSIFIER_VERSION
+            or row_rules_revision != current_revision
+        ):
+            win11_unknown_reason_counts[
+                "Awaiting classifier reanalysis"
+            ] += 1
+            continue
+
+        if not cpu_name:
+            win11_unknown_reason_counts[
+                "No CPU identified"
+            ] += 1
+            continue
+
+        parsed = parse_cpu(
+            cpu_name,
+            "DIAGNOSTICS",
+        )
+
+        parsed_confidence = normalise(
+            parsed.get("confidence")
+            if parsed
+            else ""
+        ).upper()
+
+        if (
+            cpu_confidence == "GENERATION"
+            or parsed_confidence == "GENERATION"
+        ):
+            win11_unknown_reason_counts[
+                "CPU generation only"
+            ] += 1
+            continue
+
+        if (
+            cpu_confidence == "EXACT"
+            or parsed_confidence == "EXACT"
+        ):
+            descriptor = (
+                parsed
+                if parsed
+                else _stored_cpu_descriptor(
+                    cpu_name,
+                    row_value(blocked, "cpu_generation"),
+                )
+            )
+
+            official = microsoft_windows11_cpu_status(
+                descriptor
+            )
+
+            if official is None:
+                win11_unknown_reason_counts[
+                    "Exact CPU, support rule unknown"
+                ] += 1
+                win11_exact_unknown_cpu_counts[cpu_name] = (
+                    win11_exact_unknown_cpu_counts.get(
+                        cpu_name,
+                        0,
+                    ) + 1
+                )
+                continue
+
+        win11_unknown_reason_counts[
+            "Other / unclassified"
+        ] += 1
+
+    win11_unknown_reason_items = [
+        (label, count)
+        for label, count
+        in win11_unknown_reason_counts.items()
+    ]
+
+    win11_exact_unknown_cpu_items = sorted(
+        win11_exact_unknown_cpu_counts.items(),
+        key=lambda item: (-item[1], item[0]),
+    )[:40]
+
     win11_items = [
         (
             "Officially supported",
@@ -17138,6 +17264,30 @@ def diagnostics_html(hp_model_probe=False):
             </div>
             <table>
                 {table_rows(win11_items)}
+            </table>
+        </section>
+
+
+        <section class="panel">
+            <h2>Windows 11 unknown — actual causes</h2>
+            <div class="status-line">
+                Breaks the Unknown total into missing identity, generation-only
+                CPU descriptions, stale classifier rows and exact CPUs that
+                still lack a support rule.
+            </div>
+            <table>
+                {table_rows(win11_unknown_reason_items)}
+            </table>
+        </section>
+
+        <section class="panel">
+            <h2>Exact CPUs with unknown Windows 11 support — top 40</h2>
+            <div class="status-line">
+                These have an exact CPU identity but the current Microsoft
+                support rules still return Unknown.
+            </div>
+            <table>
+                {table_rows(win11_exact_unknown_cpu_items)}
             </table>
         </section>
 
