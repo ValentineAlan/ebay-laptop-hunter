@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.43"
+APP_VERSION = "0.10.44"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -14977,6 +14977,27 @@ def diagnostics_html():
 
         return "".join(output)
 
+    def diagnostic_rows(items):
+        if not items:
+            return (
+                "<tr>"
+                "<td colspan='3' class='muted'>No data</td>"
+                "</tr>"
+            )
+
+        output = []
+
+        for model_value, count, example in items:
+            output.append(
+                "<tr>"
+                f"<td>{html.escape(str(model_value))}</td>"
+                f"<td class='number'>{html.escape(str(count))}</td>"
+                f"<td>{html.escape(str(example))}</td>"
+                "</tr>"
+            )
+
+        return "".join(output)
+
     def queue_card(
         title,
         remaining,
@@ -15322,6 +15343,90 @@ def diagnostics_html():
         incomplete_reason_counts.items(),
         key=lambda item: (-item[1], item[0]),
     )
+
+
+    vague_model_groups = {}
+    missing_model_examples = {}
+
+    for blocked in incomplete_rows:
+        brand = normalise(
+            row_value(blocked, "brand")
+        )
+        model = normalise(
+            row_value(blocked, "model")
+        )
+        title = normalise(
+            row_value(blocked, "title")
+        )
+
+        if model and not precise_model_for_valuation(
+            brand,
+            model,
+        ):
+            key = (
+                brand or "Unknown brand",
+                model,
+            )
+
+            group = vague_model_groups.setdefault(
+                key,
+                {
+                    "count": 0,
+                    "example": title,
+                },
+            )
+
+            group["count"] += 1
+
+            # Prefer an example title that appears to contain numbers, since
+            # those are most useful for spotting model-parser misses.
+            if (
+                title
+                and not re.search(r"\d", group["example"] or "")
+                and re.search(r"\d", title)
+            ):
+                group["example"] = title
+
+        elif not model:
+            brand_key = brand or "Unknown brand"
+            info = missing_model_examples.setdefault(
+                brand_key,
+                {
+                    "count": 0,
+                    "example": title,
+                },
+            )
+            info["count"] += 1
+
+    vague_model_items = sorted(
+        (
+            (
+                (
+                    (brand + " / " + model)
+                    if brand
+                    else model
+                ),
+                info["count"],
+                info["example"] or "—",
+            )
+            for (brand, model), info
+            in vague_model_groups.items()
+        ),
+        key=lambda item: (-item[1], item[0]),
+    )[:40]
+
+    missing_model_items = sorted(
+        (
+            (
+                brand,
+                info["count"],
+                info["example"] or "—",
+            )
+            for brand, info
+            in missing_model_examples.items()
+        ),
+        key=lambda item: (-item[1], item[0]),
+    )[:25]
 
     condition_rows = safe_rows(
         """
@@ -16673,6 +16778,47 @@ def diagnostics_html():
             </div>
             <table>
                 {table_rows(condition_reason_items)}
+            </table>
+        </section>
+
+
+        <section class="panel">
+            <h2>Vague model values — top 40</h2>
+            <div class="status-line">
+                Stored model values currently rejected as too vague, with a
+                representative listing title to show what the parser missed.
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Stored brand / model</th>
+                        <th class="number">Count</th>
+                        <th>Example listing title</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {diagnostic_rows(vague_model_items)}
+                </tbody>
+            </table>
+        </section>
+
+        <section class="panel">
+            <h2>Missing model — by brand</h2>
+            <div class="status-line">
+                Listings with no stored model at all, grouped by brand and
+                showing one representative title.
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Brand</th>
+                        <th class="number">Count</th>
+                        <th>Example listing title</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {diagnostic_rows(missing_model_items)}
+                </tbody>
             </table>
         </section>
 
