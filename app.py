@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.30"
+APP_VERSION = "0.10.31"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -135,8 +135,8 @@ PRODUCT_RESEARCH_LIMIT = 50
 PRODUCT_RESEARCH_MAX_PAGES = 2
 PRODUCT_RESEARCH_SEARCHES_PER_CYCLE = 12  # legacy batch default; worker uses one query at a time
 LEGACY_PRODUCT_RESEARCH_RATE_STATE = "/data/product-research-rate.json"
-PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS = 15.0
-PRODUCT_RESEARCH_MIN_INTERVAL_SECONDS = 15.0
+PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS = 20.0
+PRODUCT_RESEARCH_MIN_INTERVAL_SECONDS = 20.0
 PRODUCT_RESEARCH_MAX_INTERVAL_SECONDS = 300.0
 PRODUCT_RESEARCH_STABLE_SUCCESSES = 100
 PRODUCT_RESEARCH_429_FALLBACK_SECONDS = 300
@@ -6157,6 +6157,19 @@ def _product_research_load_rate_state():
                 "last_success_at"
             ),
         })
+
+        # Persist the effective state after applying configured bounds.
+        # This prevents durable rate state from continuing to report an
+        # obsolete interval (for example 5s) while the worker is actually
+        # constrained to a newer fixed minimum such as 20s.
+        saved_interval = saved.get("interval_seconds")
+        try:
+            saved_interval = float(saved_interval)
+        except Exception:
+            saved_interval = None
+
+        if saved_interval != interval:
+            _product_research_save_rate_state()
 
         _product_research_rate_loaded = True
 
