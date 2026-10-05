@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.41"
+APP_VERSION = "0.10.42"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -10712,6 +10712,317 @@ def dashboard_fault_flags(row):
     return clean, critical
 
 
+
+def listing_report_html(item_id):
+    """Public, human-readable report for one LaptopLander listing."""
+    conn = connect_db()
+    try:
+        row = conn.execute(
+            "SELECT * FROM listings WHERE item_id=? LIMIT 1",
+            (item_id,),
+        ).fetchone()
+
+        if not row:
+            return None
+
+        title_raw = normalise(row_value(row, "title")) or "Laptop listing"
+        title = html.escape(title_raw)
+        ebay_url = html.escape(
+            normalise(row_value(row, "url")) or "#",
+            quote=True,
+        )
+        image_url = normalise(row_value(row, "image_url"))
+        is_auction = auction_listing(row)
+
+        price = safe_float(row_value(row, "total"))
+        estimated = safe_float(row_value(row, "estimated_value"))
+        saving = safe_float(row_value(row, "undervaluation_gbp"))
+        saving_pct = safe_float(row_value(row, "undervaluation_pct"))
+        score = safe_float(row_value(row, "deal_score"))
+
+        confidence = normalise(
+            row_value(row, "valuation_confidence")
+        ).upper()
+        count = int(row_value(row, "comparable_count") or 0)
+
+        specs = []
+        identity = " ".join(
+            x for x in (
+                normalise(row_value(row, "brand")),
+                normalise(row_value(row, "model")),
+            )
+            if x
+        )
+        if identity:
+            specs.append(("Model", identity))
+        if row_value(row, "cpu"):
+            specs.append(("Processor", normalise(row_value(row, "cpu"))))
+        if row_value(row, "ram_gb"):
+            specs.append(("Memory", f"{row_value(row, 'ram_gb')} GB RAM"))
+        if row_value(row, "storage_gb"):
+            specs.append(("Storage", f"{row_value(row, 'storage_gb')} GB"))
+        if row_value(row, "win11"):
+            specs.append(("Windows 11", normalise(row_value(row, "win11"))))
+        if row_value(row, "usbc_pd"):
+            specs.append(("USB-C charging", normalise(row_value(row, "usbc_pd"))))
+
+        flags, critical = dashboard_fault_flags(row)
+
+        benchmark = cpu_benchmark_for_cpu(
+            conn,
+            row_value(row, "cpu"),
+        )
+        cpu_mark = (
+            int(benchmark["cpu_mark"])
+            if benchmark and benchmark.get("cpu_mark")
+            else None
+        )
+        power_per_pound = (
+            cpu_mark / price
+            if cpu_mark is not None and price and price > 0
+            else None
+        )
+
+        age_source = (
+            row_value(row, "listed_at")
+            or row_value(row, "first_seen")
+        )
+        age_text = relative_age(age_source) if age_source else "Unknown"
+
+        evidence_html = ""
+        try:
+            evidence_html = _cached_valuation_evidence_html(item_id)
+        except Exception:
+            evidence_html = (
+                "<p class='muted'>Sold-price evidence is temporarily unavailable.</p>"
+            )
+
+        image_html = (
+            "<img class='report-image' src='"
+            + html.escape(image_url, quote=True)
+            + "' alt=''>"
+            if image_url
+            else "<div class='report-image-placeholder'>Laptop</div>"
+        )
+
+        saving_text = money(saving) if saving is not None else "—"
+        saving_pct_text = (
+            f"{saving_pct:.0f}%"
+            if saving_pct is not None
+            else "—"
+        )
+        score_text = f"{score:.0f}/100" if score is not None else "Not scored"
+        confidence_text = (
+            confidence.title()
+            if confidence in {"LOW", "MEDIUM", "HIGH"}
+            else "Unknown"
+        )
+
+        flag_html = (
+            "".join(
+                "<span class='report-flag"
+                + (" report-flag-critical" if critical else "")
+                + "'>"
+                + html.escape(flag)
+                + "</span>"
+                for flag in flags
+            )
+            if flags
+            else "<span class='muted'>No specific risk flags detected.</span>"
+        )
+
+        spec_html = "".join(
+            "<div class='report-spec'><span>"
+            + html.escape(label)
+            + "</span><strong>"
+            + html.escape(str(value))
+            + "</strong></div>"
+            for label, value in specs
+        ) or "<p class='muted'>Specifications incomplete.</p>"
+
+        cpu_value_html = (
+            "<div class='report-spec'><span>CPU Mark</span><strong>"
+            + f"{cpu_mark:,}"
+            + "</strong></div>"
+            "<div class='report-spec'><span>CPU Mark / £</span><strong>"
+            + f"{power_per_pound:.1f}"
+            + "</strong></div>"
+            if cpu_mark is not None and power_per_pound is not None
+            else ""
+        )
+
+        format_note = (
+            "Current auction bid — final selling price may rise."
+            if is_auction
+            else "Buy It Now price."
+        )
+
+        return f"""<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,follow">
+<title>{title} | LaptopLander report</title>
+<style>
+:root {{
+  --text:#172033; --muted:#667085; --border:#e3e8ef;
+  --blue:#155eef; --green:#15803d; --red:#b42318; --bg:#f5f7fb;
+}}
+* {{ box-sizing:border-box; }}
+body {{
+  margin:0; background:var(--bg); color:var(--text);
+  font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+}}
+.report-shell {{ max-width:1100px; margin:0 auto; padding:24px 18px 56px; }}
+.report-top {{
+  display:flex; justify-content:space-between; gap:12px; align-items:center;
+  margin-bottom:18px;
+}}
+.report-top a {{ color:var(--blue); text-decoration:none; font-weight:750; }}
+.report-hero {{
+  display:grid; grid-template-columns:220px minmax(0,1fr); gap:24px;
+  padding:22px; background:#fff; border:1px solid var(--border);
+  border-radius:18px; box-shadow:0 8px 28px rgba(16,24,40,.06);
+}}
+.report-image, .report-image-placeholder {{
+  width:100%; height:180px; object-fit:contain; background:#f8fafc;
+  border:1px solid var(--border); border-radius:14px;
+}}
+.report-image-placeholder {{
+  display:grid; place-items:center; color:#98a2b3; font-weight:800;
+}}
+h1 {{ margin:0 0 10px; font-size:clamp(24px,4vw,34px); line-height:1.1; }}
+.muted {{ color:var(--muted); }}
+.report-price-grid {{
+  display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px;
+  margin-top:18px;
+}}
+.report-price {{
+  padding:14px; border-radius:12px; background:#f8fafc; border:1px solid var(--border);
+}}
+.report-price span {{ display:block; color:var(--muted); font-size:12px; font-weight:700; }}
+.report-price strong {{ display:block; margin-top:4px; font-size:24px; }}
+.report-price.save strong {{ color:var(--green); }}
+.report-actions {{ display:flex; flex-wrap:wrap; gap:10px; margin-top:16px; }}
+.report-button {{
+  display:inline-block; padding:10px 14px; border-radius:10px;
+  background:var(--blue); color:#fff !important; text-decoration:none; font-weight:800;
+}}
+.report-button.secondary {{ background:#fff; color:var(--blue) !important; border:1px solid var(--blue); }}
+.report-grid {{
+  display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px;
+}}
+.report-card {{
+  padding:18px; background:#fff; border:1px solid var(--border);
+  border-radius:16px; box-shadow:0 5px 18px rgba(16,24,40,.04);
+}}
+.report-card h2 {{ margin:0 0 14px; font-size:18px; }}
+.report-spec {{
+  display:flex; justify-content:space-between; gap:18px;
+  padding:9px 0; border-bottom:1px solid #edf1f5;
+}}
+.report-spec:last-child {{ border-bottom:0; }}
+.report-spec span {{ color:var(--muted); }}
+.report-spec strong {{ text-align:right; }}
+.report-flags {{ display:flex; flex-wrap:wrap; gap:7px; }}
+.report-flag {{
+  padding:5px 8px; border-radius:999px; background:#fff7ed;
+  border:1px solid #fed7aa; color:#9a3412; font-size:12px; font-weight:800;
+}}
+.report-flag-critical {{ background:#fef3f2; border-color:#fecaca; color:var(--red); }}
+.report-evidence {{ margin-top:16px; overflow:auto; }}
+.report-evidence table {{ min-width:760px; width:100%; border-collapse:collapse; }}
+.report-evidence th,.report-evidence td {{
+  padding:8px; border-bottom:1px solid var(--border); text-align:left; font-size:12px;
+}}
+.report-evidence a {{ color:var(--blue); }}
+@media (max-width:720px) {{
+  .report-hero {{ grid-template-columns:1fr; }}
+  .report-image,.report-image-placeholder {{ height:220px; }}
+  .report-price-grid {{ grid-template-columns:1fr; }}
+  .report-grid {{ grid-template-columns:1fr; }}
+}}
+</style>
+</head>
+<body>
+<main class="report-shell">
+  <div class="report-top">
+    <a href="/">← Back to deals</a>
+    <span class="muted">LaptopLander full report</span>
+  </div>
+
+  <section class="report-hero">
+    <div>{image_html}</div>
+    <div>
+      <h1>{title}</h1>
+      <div class="muted">Listed {html.escape(age_text)} · {html.escape(format_note)}</div>
+
+      <div class="report-price-grid">
+        <div class="report-price">
+          <span>{"Current price inc. delivery" if is_auction else "Price inc. delivery"}</span>
+          <strong>{money(price)}</strong>
+        </div>
+        <div class="report-price">
+          <span>Normally sells for</span>
+          <strong>{money(estimated)}</strong>
+        </div>
+        <div class="report-price save">
+          <span>Potential saving</span>
+          <strong>{saving_text}</strong>
+          <span>{saving_pct_text} below typical sold price</span>
+        </div>
+      </div>
+
+      <div class="report-actions">
+        <a class="report-button" href="{ebay_url}" target="_blank" rel="noopener noreferrer">
+          View on eBay ↗
+        </a>
+        <a class="report-button secondary" href="#valuation-evidence">See valuation evidence</a>
+      </div>
+    </div>
+  </section>
+
+  <div class="report-grid">
+    <section class="report-card">
+      <h2>Deal assessment</h2>
+      <div class="report-spec"><span>DealScore</span><strong>{score_text}</strong></div>
+      <div class="report-spec"><span>Valuation confidence</span><strong>{html.escape(confidence_text)}</strong></div>
+      <div class="report-spec"><span>Sold comparables</span><strong>{count}</strong></div>
+      <div class="report-spec"><span>Valuation evidence age</span><strong>{html.escape(valuation_age_text(row))}</strong></div>
+    </section>
+
+    <section class="report-card">
+      <h2>Specification</h2>
+      {spec_html}
+      {cpu_value_html}
+    </section>
+
+    <section class="report-card">
+      <h2>Buyer checks</h2>
+      <div class="report-flags">{flag_html}</div>
+    </section>
+
+    <section class="report-card">
+      <h2>Why this is on LaptopLander</h2>
+      <p class="muted">
+        LaptopLander compares this listing with recent sold evidence and estimates what
+        a comparable machine normally sells for. The headline saving is an estimate,
+        not a guaranteed resale value.
+      </p>
+    </section>
+  </div>
+
+  <section class="report-card report-evidence" id="valuation-evidence">
+    <h2>Sold-price evidence</h2>
+    {evidence_html}
+  </section>
+</main>
+</body>
+</html>"""
+    finally:
+        conn.close()
+
 def _dashboard_html_base():
     conn = connect_db()
 
@@ -11189,6 +11500,45 @@ def _dashboard_html_base():
             power_per_pound_value = -1
             power_per_pound_html = "—"
 
+        report_url = (
+            "/report?item_id="
+            + urllib.parse.quote(
+                str(row["item_id"] or ""),
+                safe="",
+            )
+        )
+
+        normally_price = money(
+            row["estimated_value"]
+        )
+
+        saving_line = (
+            "Save about "
+            + money(row["undervaluation_gbp"])
+            if row["undervaluation_gbp"] is not None
+            else ""
+        )
+
+        normal_price_html = (
+            "<strong>"
+            + normally_price
+            + "</strong>"
+            + (
+                "<div class='small normal-saving'>"
+                + html.escape(saving_line)
+                + "</div>"
+                if saving_line
+                else ""
+            )
+            + (
+                "<div class='small auction-current-note'>"
+                "Current bid · auction may rise"
+                "</div>"
+                if is_auction
+                else ""
+            )
+        )
+
         target_rows.append(
             f"""
             <tr data-item-id="{html.escape(str(row['item_id'] or ''), quote=True)}"
@@ -11196,33 +11546,27 @@ def _dashboard_html_base():
                 data-price="{row['total'] if row['total'] is not None else ''}"
                 data-score="{row['deal_score'] if row['deal_score'] is not None else ''}"
                 data-age="{html.escape(str(age_source or ''), quote=True)}">
-                <td class="product-thumb-cell">
-                    {thumb_html}
-                </td>
-
-                <td>
-                    <a href="{url}" target="_blank" class="listing-title">
-                        {title}
-                    </a>
-                    <div class="small">
-                        {html.escape(spec_text)}
+                <td class="listing-simple">
+                    <div class="listing-simple-image">
+                        {thumb_html}
                     </div>
-                    {group_html}
-
-                    <div class="mobile-notes">
-                        {
-                            notes_html
-                            or "<span class='notes-clear'>No notes</span>"
-                        }
+                    <div class="listing-simple-copy">
+                        <a href="{html.escape(report_url, quote=True)}"
+                           class="listing-title">
+                            {title}
+                        </a>
+                        <div class="small">
+                            {html.escape(spec_text)}
+                        </div>
+                        {group_html}
+                        <a class="full-report-link"
+                           href="{html.escape(report_url, quote=True)}">
+                            Full report →
+                        </a>
                     </div>
                 </td>
 
-                <td class="power-per-pound"
-                    data-sort="{power_per_pound_value}">
-                    {power_per_pound_html}
-                </td>
-
-                <td>
+                <td class="listing-age">
                     {
                         auction_time_html
                         if is_auction
@@ -11230,9 +11574,9 @@ def _dashboard_html_base():
                     }
                 </td>
 
-                <td class="money"
+                <td class="money listing-price"
                     data-sort="{row['total'] if row['total'] is not None else -1}">
-                    {money(row["total"])}
+                    <strong>{money(row["total"])}</strong>
                     {
                         (
                             "<div class='small'>current bid</div>"
@@ -11242,63 +11586,13 @@ def _dashboard_html_base():
                     }
                 </td>
 
-                <td class="money good"
-                    data-sort="{row['undervaluation_gbp'] if row['undervaluation_gbp'] is not None else -999999}">
-                    <div class="valuation-hover" tabindex="0">
-                        {under}
-                        <span
-                            class="valuation-info"
-                            role="img"
-                            aria-label="View valuation evidence"
-                            title="View valuation evidence"
-                        >i</span>
-
-                        <div class="valuation-tooltip">
-                            <div class="valuation-summary">
-                                <strong>Estimated value:</strong>
-                                {money(row["estimated_value"])}
-
-                                {
-                                    (
-                                        "<br>Q1: "
-                                        + money(row["valuation_q1"])
-                                        + " · Median: "
-                                        + money(row["estimated_value"])
-                                        + " · Q3: "
-                                        + money(row["valuation_q3"])
-                                    )
-                                    if row["valuation_q1"] is not None
-                                    else ""
-                                }
-
-                                <br>
-                                {html.escape(sales_wording)}
-                                <br>
-                                {html.escape(valuation_age_text(row))}
-                                {confidence_html}
-                            </div>
-
-                            {hover_evidence_html}
-                        </div>
-                    </div>
-                </td>
-
-                <td data-sort="{row['deal_score'] if row['deal_score'] is not None else -1}">
-                    <span class="big"
-                          title="Deal score: {score}/100&#10;Higher means a stronger deal">
-                        {score}
-                    </span>
-                </td>
-
-                <td class="notes-cell">
-                    {
-                        notes_html
-                        or "<span class='notes-clear'>—</span>"
-                    }
+                <td class="money normal-price"
+                    data-sort="{row['estimated_value'] if row['estimated_value'] is not None else -1}">
+                    {normal_price_html}
                 </td>
             </tr>
             """
-        )
+        ))
 
     conn.close()
 
@@ -11321,14 +11615,10 @@ def _dashboard_html_base():
 
         <thead>
         <tr>
-            <th class="image-header" aria-label="Product image"></th>
             <th>Listing</th>
-            <th title="PassMark CPU Mark points per £1 of delivered price. Higher is better.">Power/£</th>
             <th>Time left</th>
-            <th>Current bid</th>
-            <th title="Estimated saving if the current bid wins.">Saving at current bid</th>
-            <th title="Deal score out of 100. Higher means a stronger deal.">Deal score</th>
-            <th>Notes</th>
+            <th>Current price inc. delivery</th>
+            <th>Normally sells for</th>
         </tr>
         </thead>
 
@@ -11407,9 +11697,9 @@ def _dashboard_html_base():
         )
 
         hero_pct_text = (
-            f"{hero_pct:.0f}% under market"
-            if hero_pct is not None
-            else "Below estimate"
+            f"Save about {hero_saving}"
+            if hero_saving != "—"
+            else "Good value"
         )
 
         hero_score_text = (
@@ -11504,12 +11794,12 @@ def _dashboard_html_base():
                                 </span>
 
                                 <span class="hero-deal-estimate">
-                                    Est. value {hero_estimate}
+                                    Normally {hero_estimate}
                                 </span>
                             </div>
 
                             <span class="hero-deal-saving">
-                                {hero_saving} under market
+                                Normally sells for {hero_estimate}
                             </span>
 
                             <span class="hero-deal-confidence">
@@ -13761,6 +14051,178 @@ def _dashboard_html_base():
             }}
         }}
 
+
+        /* v0.10.42: intentionally simple public deal list. */
+        .deal-section table {
+            table-layout: fixed;
+        }
+
+        .deal-section th:nth-child(1),
+        .deal-section td:nth-child(1) {
+            width: 58%;
+            text-align: left;
+        }
+
+        .deal-section th:nth-child(2),
+        .deal-section td:nth-child(2) {
+            width: 12%;
+            text-align: right;
+            white-space: nowrap;
+        }
+
+        .deal-section th:nth-child(3),
+        .deal-section td:nth-child(3) {
+            width: 14%;
+            text-align: right;
+            white-space: nowrap;
+        }
+
+        .deal-section th:nth-child(4),
+        .deal-section td:nth-child(4) {
+            width: 16%;
+            text-align: right;
+            white-space: nowrap;
+        }
+
+        .deal-section th:nth-child(n+5),
+        .deal-section td:nth-child(n+5) {
+            display: none !important;
+        }
+
+        .listing-simple {
+            display: grid;
+            grid-template-columns: 74px minmax(0,1fr);
+            align-items: center;
+            gap: 12px;
+        }
+
+        .listing-simple-image .product-thumb-link,
+        .listing-simple-image .product-thumb-placeholder {
+            width: 68px;
+            height: 68px;
+        }
+
+        .listing-simple-copy {
+            min-width: 0;
+        }
+
+        .full-report-link {
+            display: inline-block;
+            margin-top: 5px;
+            color: #155eef;
+            font-size: 12px;
+            font-weight: 800;
+            text-decoration: none;
+        }
+
+        .normal-price strong {
+            color: #172033;
+            font-size: 15px;
+        }
+
+        .normal-saving {
+            margin-top: 3px;
+            color: #15803d;
+            font-weight: 800;
+        }
+
+        .auction-current-note {
+            margin-top: 3px;
+            color: #b45309;
+            white-space: normal;
+        }
+
+        @media (max-width: 700px) {
+            .deal-section table,
+            .deal-section tbody {
+                display: block;
+            }
+
+            .deal-section thead {
+                display: none;
+            }
+
+            .deal-section tbody {
+                display: grid;
+                gap: 10px;
+            }
+
+            .deal-section tbody tr {
+                display: grid;
+                grid-template-columns: minmax(0,1fr) auto;
+                grid-template-areas:
+                    "listing listing"
+                    "age age"
+                    "price normal";
+                gap: 9px 14px;
+                padding: 12px;
+                border: 1px solid rgba(15,23,42,.08);
+                border-radius: 14px;
+                background: #fff;
+            }
+
+            .deal-section tbody td {
+                display: block !important;
+                width: auto !important;
+                padding: 0 !important;
+                border: 0 !important;
+            }
+
+            .deal-section tbody td:nth-child(1) {
+                grid-area: listing;
+            }
+
+            .deal-section tbody td:nth-child(2) {
+                grid-area: age;
+                text-align: left !important;
+                color: #667085;
+                font-size: 12px;
+            }
+
+            .deal-section tbody td:nth-child(3) {
+                grid-area: price;
+                text-align: left !important;
+                font-size: 18px;
+            }
+
+            .deal-section tbody td:nth-child(4) {
+                grid-area: normal;
+                text-align: right !important;
+            }
+
+            .deal-section tbody td:nth-child(3)::before {
+                content: "Price inc. delivery";
+                display: block;
+                margin-bottom: 2px;
+                color: #98a2b3;
+                font-size: 9px;
+                font-weight: 800;
+                text-transform: uppercase;
+                letter-spacing: .04em;
+            }
+
+            .deal-section tbody td:nth-child(4)::before {
+                content: "Normally sells for";
+                display: block;
+                margin-bottom: 2px;
+                color: #98a2b3;
+                font-size: 9px;
+                font-weight: 800;
+                text-transform: uppercase;
+                letter-spacing: .04em;
+            }
+
+            .listing-simple {
+                grid-template-columns: 72px minmax(0,1fr);
+            }
+
+            .listing-simple-image .product-thumb-link,
+            .listing-simple-image .product-thumb-placeholder {
+                width: 68px !important;
+                height: 68px !important;
+            }
+        }
+
 </style>
     </head>
 
@@ -13879,8 +14341,8 @@ def _dashboard_html_base():
             <label class="deal-sort-label">
                 Sort
                 <select id="deal-sort">
-                    <option value="score">Best score</option>
                     <option value="newest">Newest</option>
+                    <option value="score">Best deal</option>
                     <option value="price">Lowest price</option>
                 </select>
             </label>
@@ -13890,16 +14352,10 @@ def _dashboard_html_base():
 
         <thead>
         <tr>
-            <th class="image-header" aria-label="Product image"></th>
             <th>Listing</th>
-            <th title="PassMark CPU Mark points per £1 of delivered price. Higher is better.">Power/£</th>
             <th>Listing age</th>
             <th>Price inc. delivery</th>
-            <th title="Difference between the listing price and estimated market value based on recent sold prices.">
-    Under market
-</th>
-            <th title="Deal score out of 100. Higher means a stronger deal.">Deal score</th>
-            <th>Notes</th>
+            <th>Normally sells for</th>
         </tr>
         </thead>
 
@@ -17485,6 +17941,31 @@ class DashboardHandler(
 <p>The site operator and contact details should be added here before treating this as a complete privacy notice.</p>
 <p><a href="/">Back to LaptopLander</a></p>
 </body></html>""")
+            return
+
+        if path == "/report":
+            query = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query
+            )
+            item_id = query.get("item_id", [""])[0]
+
+            if not re.fullmatch(r"v1\|\d{9,15}\|\d+", item_id or ""):
+                self._send_html(
+                    "<h1>Invalid listing</h1>",
+                    status=400,
+                )
+                return
+
+            page = listing_report_html(item_id)
+
+            if page is None:
+                self._send_html(
+                    "<h1>Listing not found</h1>",
+                    status=404,
+                )
+                return
+
+            self._send_html(page)
             return
 
         if path == "/valuation-evidence":
