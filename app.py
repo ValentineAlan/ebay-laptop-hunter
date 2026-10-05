@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.40"
+APP_VERSION = "0.10.41"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -16923,8 +16923,11 @@ def _cached_valuation_evidence_html(item_id):
 
 def _live_deal_ids():
     """
-    Return only IDs which currently qualify for display in the public
-    deal tables. Used by the lightweight browser poll.
+    Return the exact set of item IDs which the public dashboard renders.
+
+    Buy It Now rows must use the same duplicate-grouping logic as the page;
+    otherwise a hidden duplicate looks permanently "new" to the browser poll.
+    Auctions are not grouped and therefore retain their individual IDs.
     """
     conn = connect_db()
     sold_cutoff = (
@@ -16932,8 +16935,8 @@ def _live_deal_ids():
     ).isoformat()
 
     try:
-        rows = conn.execute("""
-            SELECT item_id
+        buy_now_rows = conn.execute("""
+            SELECT listings.*, valuation_evidence_at AS sold_evidence_at
             FROM listings
             WHERE COALESCE(active, 1) = 1
               AND estimated_value IS NOT NULL
@@ -16944,9 +16947,22 @@ def _live_deal_ids():
               AND undervaluation_pct >= ?
               AND valuation_basis LIKE 'SOLD_%'
               AND valuation_evidence_at >= ?
+            ORDER BY
+                deal_score DESC,
+                undervaluation_gbp DESC,
+                first_seen DESC
+            LIMIT 500
+        """, (
+            MIN_UNDERVALUE_GBP,
+            MIN_UNDERVALUE_PCT,
+            sold_cutoff,
+        )).fetchall()
 
-            UNION
+        buy_now_rows = group_dashboard_rows(
+            buy_now_rows
+        )
 
+        auction_rows = conn.execute("""
             SELECT item_id
             FROM listings
             WHERE COALESCE(active, 1) = 1
@@ -16959,19 +16975,24 @@ def _live_deal_ids():
               AND undervaluation_pct >= ?
               AND valuation_basis LIKE 'SOLD_%'
               AND valuation_evidence_at >= ?
+            ORDER BY
+                CASE
+                    WHEN end_date IS NULL THEN 1
+                    ELSE 0
+                END,
+                end_date ASC,
+                undervaluation_gbp DESC
+            LIMIT 500
         """, (
-            MIN_UNDERVALUE_GBP,
-            MIN_UNDERVALUE_PCT,
-            sold_cutoff,
             MIN_UNDERVALUE_GBP,
             MIN_UNDERVALUE_PCT,
             sold_cutoff,
         )).fetchall()
 
         return [
-            str(row["item_id"])
-            for row in rows
-            if row["item_id"] is not None
+            str(row_value(row, "item_id"))
+            for row in list(buy_now_rows) + list(auction_rows)
+            if row_value(row, "item_id") is not None
         ]
     finally:
         conn.close()
