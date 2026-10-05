@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.38"
+APP_VERSION = "0.10.39"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -13428,6 +13428,339 @@ def _dashboard_html_base():
                 margin-left: 0;
             }}
         }}
+
+        /* ======================================================
+           Mobile public layout: cards, not squeezed desktop table
+           ====================================================== */
+        @media (max-width: 700px) {
+            html,
+            body {
+                max-width: 100%;
+                overflow-x: hidden;
+            }
+
+            .home-hero {
+                width: 100%;
+                max-width: 100%;
+                box-sizing: border-box;
+                padding: 22px 16px 20px;
+                margin-bottom: 16px;
+                overflow: hidden;
+            }
+
+            .hero-copy,
+            .hero-deals,
+            .hero-deal-carousel-head,
+            .hero-deal-viewport,
+            .hero-deal-track {
+                min-width: 0;
+                max-width: 100%;
+            }
+
+            .hero-copy h1 {
+                max-width: 100%;
+                font-size: clamp(34px, 10vw, 42px);
+                line-height: .98;
+                overflow-wrap: normal;
+                word-break: normal;
+            }
+
+            .hero-subtitle {
+                max-width: 100%;
+                font-size: 16px;
+                line-height: 1.42;
+            }
+
+            .feed-status {
+                max-width: 100%;
+                box-sizing: border-box;
+                white-space: normal;
+                line-height: 1.25;
+            }
+
+            .hero-deals[data-hero-carousel] {
+                width: 100%;
+                max-width: 100%;
+            }
+
+            .hero-deal-carousel-head {
+                padding: 0 2px;
+            }
+
+            .hero-deal-viewport {
+                width: 100%;
+                height: auto;
+                overflow-x: auto;
+                overflow-y: hidden;
+                border-radius: 16px;
+                scroll-snap-type: x mandatory;
+                scrollbar-width: none;
+            }
+
+            .hero-deal-track {
+                display: flex;
+                flex-direction: row;
+                gap: 10px;
+                width: max-content;
+            }
+
+            .hero-deal-track .hero-deal-card,
+            .hero-deal-track .hero-deal-card:nth-child(n) {
+                flex: 0 0 calc(100vw - 64px);
+                width: calc(100vw - 64px) !important;
+                max-width: 350px !important;
+                height: 154px;
+            }
+
+            .hero-deal-track .hero-deal-card-inner {
+                grid-template-columns: 92px minmax(0, 1fr);
+                gap: 11px;
+                padding: 12px;
+            }
+
+            .hero-deal-track .hero-deal-image {
+                width: 92px;
+                height: 128px;
+            }
+
+            .hero-deal-title {
+                font-size: 13px !important;
+                line-height: 1.25 !important;
+            }
+
+            .hero-deal-bottom {
+                min-width: 0;
+            }
+
+            .hero-deal-price {
+                font-size: 21px !important;
+            }
+
+            .telegram-strip {
+                margin: 0 0 16px;
+            }
+
+            .deal-section {
+                margin-top: 16px;
+            }
+
+            .deal-section table,
+            .deal-section tbody {
+                display: block;
+                width: 100%;
+                table-layout: auto;
+            }
+
+            .deal-section thead {
+                display: none;
+            }
+
+            .deal-section tbody {
+                display: grid;
+                gap: 12px;
+            }
+
+            .deal-section tbody tr {
+                display: grid;
+                grid-template-columns: 82px minmax(0, 1fr) minmax(76px, .7fr);
+                grid-template-areas:
+                    "image listing listing"
+                    "image price saving"
+                    "image age power"
+                    "score score score";
+                gap: 7px 10px;
+                width: 100%;
+                box-sizing: border-box;
+                padding: 12px;
+                border: 1px solid rgba(15, 23, 42, .08);
+                border-radius: 15px;
+                background: #fff;
+                box-shadow: 0 5px 16px rgba(16, 24, 40, .05);
+            }
+
+            .deal-section tbody tr[hidden] {
+                display: none !important;
+            }
+
+            .deal-section tbody td {
+                display: block !important;
+                width: auto !important;
+                min-width: 0;
+                padding: 0 !important;
+                border: 0 !important;
+                text-align: left !important;
+                background: transparent !important;
+                white-space: normal !important;
+            }
+
+            .deal-section tbody td:nth-child(1) {
+                grid-area: image;
+                align-self: start;
+            }
+
+            .deal-section tbody td:nth-child(2) {
+                grid-area: listing;
+            }
+
+            .deal-section tbody td:nth-child(3) {
+                grid-area: power;
+                color: #475467;
+                font-size: 12px;
+            }
+
+            .deal-section tbody td:nth-child(4) {
+                grid-area: age;
+                color: #667085;
+                font-size: 12px;
+            }
+
+            .deal-section tbody td:nth-child(5) {
+                grid-area: price;
+                align-self: end;
+                font-size: 18px;
+                font-weight: 850;
+            }
+
+            .deal-section tbody td:nth-child(6) {
+                grid-area: saving;
+                align-self: end;
+                font-size: 16px;
+                font-weight: 850;
+                color: #15803d;
+            }
+
+            .deal-section tbody td:nth-child(7) {
+                grid-area: score;
+                display: flex !important;
+                align-items: center;
+                gap: 8px;
+                margin-top: 3px;
+                padding-top: 8px !important;
+                border-top: 1px solid rgba(15, 23, 42, .06) !important;
+            }
+
+            .deal-section tbody td:nth-child(8) {
+                display: none !important;
+            }
+
+            .deal-section tbody td:nth-child(3)::before {
+                content: "Power/£";
+                display: block;
+                color: #98a2b3;
+                font-size: 9px;
+                font-weight: 800;
+                text-transform: uppercase;
+                letter-spacing: .04em;
+            }
+
+            .deal-section tbody td:nth-child(4)::before {
+                content: "Age";
+                display: block;
+                color: #98a2b3;
+                font-size: 9px;
+                font-weight: 800;
+                text-transform: uppercase;
+                letter-spacing: .04em;
+            }
+
+            .deal-section tbody td:nth-child(5)::before {
+                content: "Price";
+                display: block;
+                margin-bottom: 2px;
+                color: #98a2b3;
+                font-size: 9px;
+                font-weight: 800;
+                text-transform: uppercase;
+                letter-spacing: .04em;
+            }
+
+            .deal-section tbody td:nth-child(6)::before {
+                content: "Under market";
+                display: block;
+                margin-bottom: 2px;
+                color: #98a2b3;
+                font-size: 9px;
+                font-weight: 800;
+                text-transform: uppercase;
+                letter-spacing: .04em;
+            }
+
+            .deal-section tbody td:nth-child(7)::before {
+                content: "Deal score";
+                color: #98a2b3;
+                font-size: 9px;
+                font-weight: 800;
+                text-transform: uppercase;
+                letter-spacing: .04em;
+            }
+
+            .deal-section .product-thumb-link,
+            .deal-section .product-thumb,
+            .deal-section .product-thumb-placeholder {
+                width: 82px !important;
+                height: 82px !important;
+                border-radius: 11px;
+            }
+
+            .deal-section .listing-title {
+                display: -webkit-box;
+                -webkit-box-orient: vertical;
+                -webkit-line-clamp: 2;
+                overflow: hidden;
+                margin-bottom: 4px;
+                font-size: 15px;
+                line-height: 1.25;
+                font-weight: 800;
+            }
+
+            .deal-section td:nth-child(2) > .small {
+                font-size: 11px;
+                line-height: 1.28;
+                color: #667085;
+            }
+
+            .mobile-notes {
+                margin-top: 6px;
+            }
+
+            .valuation-hover {
+                display: inline-flex;
+                align-items: center;
+                gap: 5px;
+            }
+
+            .valuation-tooltip {
+                position: fixed !important;
+                left: 12px !important;
+                right: 12px !important;
+                top: auto !important;
+                bottom: 12px !important;
+                width: auto !important;
+                max-width: none !important;
+                max-height: 65vh;
+                overflow: auto;
+                z-index: 2000;
+            }
+
+            .deal-toolbar {
+                position: static;
+                gap: 6px;
+            }
+
+            .deal-filter,
+            #deal-sort {
+                min-height: 38px;
+            }
+
+            .live-update-bar {
+                position: sticky;
+                top: 6px;
+                width: calc(100% - 16px);
+                box-sizing: border-box;
+                border-radius: 13px;
+            }
+        }
+
 </style>
     </head>
 
