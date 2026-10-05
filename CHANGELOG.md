@@ -2,6 +2,15 @@
 
 Notable changes to Laptop Lander are recorded here.
 
+## 0.10.32
+
+### Search landing pages
+- Added permanent, server-rendered SEO landing pages for `/cheap-laptops`, `/used-laptops`, `/laptops-under-200` and `/laptops-under-300`.
+- Each page has unique search-focused metadata, canonical URL, H1, explanatory copy and CollectionPage structured data.
+- Landing pages show current qualifying LaptopLander deals from the database; budget pages enforce the stated delivered-price ceiling.
+- Every page explicitly states that LaptopLander finds deals rather than selling laptops.
+- Added crawlable internal links between landing pages and from the homepage, and included all new pages in the sitemap.
+
 ## 0.10.31
 
 ### SEO and public positioning
