@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.34"
+APP_VERSION = "0.10.35"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -11368,7 +11368,7 @@ def _dashboard_html_base():
 
     return f"""
     <!doctype html>
-    <html>
+    <html lang="en-GB">
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -11386,92 +11386,6 @@ def _dashboard_html_base():
         <meta name="twitter:description" content="Find underpriced laptops on eBay UK using sold-price evidence and live listing analysis.">
         <link rel="icon" href="/favicon.ico" type="image/svg+xml">
         <style>{CSS}</style>
-    </head>
-
-    <body>
-
-    <div class="live-update-bar" id="live-update-bar" aria-live="polite" hidden>
-        <span class="live-update-state">
-            <span class="live-update-dot" aria-hidden="true"></span>
-            <span id="live-update-status"></span>
-        </span>
-        <button type="button" id="live-update-button" class="live-update-button" hidden>
-            Show updates
-        </button>
-    </div>
-
-    <section class="home-hero">
-
-        <div class="hero-copy">
-
-            <div class="hero-brand">
-                <a href="/"
-                   class="public-logo"
-                   aria-label="LaptopLander home">
-                    <img
-                        src="data:image/webp;base64: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"
-                        alt=""
-                        class="public-logo-image">
-                </a>
-                <div class="hero-brand-name">LaptopLander</div>
-            </div>
-
-            <div class="hero-kicker">UK LAPTOP DEAL FINDER</div>
-
-            <h1>Underpriced laptops on eBay UK</h1>
-
-            <p class="hero-subtitle">
-                Live listings checked against recent sold prices, so the bargains stand out.
-            </p>
-        </div>
-
-        <div class="hero-deals"
-             data-hero-carousel
-             role="region"
-             aria-roledescription="carousel"
-             aria-label="Current standout laptop deals">
-
-            <div class="hero-deal-carousel-head">
-
-                <div class="hero-deal-carousel-live">
-                    <span class="hero-live-dot"
-                          aria-hidden="true"></span>
-                    Live standout deals
-                </div>
-
-                <div class="hero-deal-carousel-controls">
-
-                    <span class="hero-deal-carousel-count">
-                        1 / {hero_card_count}
-                    </span>
-
-                    <button type="button"
-                            class="hero-deal-prev"
-                            aria-label="Previous deal">
-                        ‹
-                    </button>
-
-                    <button type="button"
-                            class="hero-deal-next"
-                            aria-label="Next deal">
-                        ›
-                    </button>
-
-                </div>
-
-            </div>
-
-            <div class="hero-deal-viewport">
-
-                <div class="hero-deal-track">
-                    {hero_cards_html}
-                </div>
-
-            </div>
-
-        </div>
-    </section>
-
     <style>
         /* ======================================================
            Laptop Lander public hero — authoritative styles
@@ -13223,6 +13137,93 @@ def _dashboard_html_base():
             }}
         }}
 </style>
+    </head>
+
+    <body>
+
+    <div class="live-update-bar" id="live-update-bar" aria-live="polite" hidden>
+        <span class="live-update-state">
+            <span class="live-update-dot" aria-hidden="true"></span>
+            <span id="live-update-status"></span>
+        </span>
+        <button type="button" id="live-update-button" class="live-update-button" hidden>
+            Show updates
+        </button>
+    </div>
+
+    <section class="home-hero">
+
+        <div class="hero-copy">
+
+            <div class="hero-brand">
+                <a href="/"
+                   class="public-logo"
+                   aria-label="LaptopLander home">
+                    <img
+                        src="data:image/webp;base64,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"
+                        alt=""
+                        class="public-logo-image">
+                </a>
+                <div class="hero-brand-name">LaptopLander</div>
+            </div>
+
+            <div class="hero-kicker">UK LAPTOP DEAL FINDER</div>
+
+            <h1>Underpriced laptops on eBay UK</h1>
+
+            <p class="hero-subtitle">
+                Live listings checked against recent sold prices, so the bargains stand out.
+            </p>
+        </div>
+
+        <div class="hero-deals"
+             data-hero-carousel
+             role="region"
+             aria-roledescription="carousel"
+             aria-label="Current standout laptop deals">
+
+            <div class="hero-deal-carousel-head">
+
+                <div class="hero-deal-carousel-live">
+                    <span class="hero-live-dot"
+                          aria-hidden="true"></span>
+                    Live standout deals
+                </div>
+
+                <div class="hero-deal-carousel-controls">
+
+                    <span class="hero-deal-carousel-count">
+                        1 / {hero_card_count}
+                    </span>
+
+                    <button type="button"
+                            class="hero-deal-prev"
+                            aria-label="Previous deal">
+                        ‹
+                    </button>
+
+                    <button type="button"
+                            class="hero-deal-next"
+                            aria-label="Next deal">
+                        ›
+                    </button>
+
+                </div>
+
+            </div>
+
+            <div class="hero-deal-viewport">
+
+                <div class="hero-deal-track">
+                    {hero_cards_html}
+                </div>
+
+            </div>
+
+        </div>
+    </section>
+
+    
 
     <section class="deal-section">
 
