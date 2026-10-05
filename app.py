@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.42"
+APP_VERSION = "0.10.43"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -15228,6 +15228,206 @@ def diagnostics_html():
         """
     )
 
+
+    # Explain the two largest valuation blockers using the same current
+    # identity/spec and fault logic as the worker. Counts may overlap because
+    # one listing can have more than one incomplete field/reason.
+    incomplete_rows = safe_rows(
+        """
+        SELECT *
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND valuation_basis='INCOMPLETE_IDENTITY_OR_SPEC'
+        """
+    )
+
+    incomplete_reason_counts = {}
+
+    def bump_incomplete(label):
+        incomplete_reason_counts[label] = (
+            incomplete_reason_counts.get(label, 0) + 1
+        )
+
+    for blocked in incomplete_rows:
+        if (
+            exact_spec_identity(blocked)
+            or auction_generation_identity(blocked)
+        ):
+            bump_incomplete(
+                "Now eligible under current rules — awaiting reprocessing"
+            )
+            continue
+
+        brand = normalise(
+            row_value(blocked, "brand")
+        )
+        model = normalise(
+            row_value(blocked, "model")
+        )
+
+        if not brand:
+            bump_incomplete("Missing brand")
+
+        if not model:
+            bump_incomplete("Missing model")
+        elif not precise_model_for_valuation(
+            brand,
+            model,
+        ):
+            bump_incomplete("Model too vague for valuation")
+
+        cpu_text = normalise(
+            row_value(blocked, "cpu")
+        )
+
+        parsed_cpu = parse_cpu(
+            cpu_text,
+            "DIAGNOSTICS",
+        ) if cpu_text else None
+
+        cpu_confidence = normalise(
+            row_value(blocked, "cpu_confidence")
+        ).upper()
+
+        if not cpu_text or not parsed_cpu:
+            bump_incomplete("CPU missing or unrecognised")
+        else:
+            parsed_confidence = normalise(
+                parsed_cpu.get("confidence")
+            ).upper()
+
+            if parsed_confidence == "GENERATION":
+                bump_incomplete("CPU identifies generation only")
+            elif parsed_confidence != "EXACT":
+                bump_incomplete(
+                    "CPU identity not exact"
+                )
+
+            if cpu_confidence and cpu_confidence != "EXACT":
+                bump_incomplete(
+                    "Stored CPU confidence is not exact"
+                )
+
+        ram, storage = effective_ram_storage(
+            blocked
+        )
+
+        if not ram:
+            bump_incomplete("RAM missing / ambiguous")
+
+        if not storage:
+            bump_incomplete("Storage missing / ambiguous")
+
+    incomplete_reason_items = sorted(
+        incomplete_reason_counts.items(),
+        key=lambda item: (-item[1], item[0]),
+    )
+
+    condition_rows = safe_rows(
+        """
+        SELECT *
+        FROM listings
+        WHERE COALESCE(active,1)=1
+          AND valuation_basis='CONDITION_REQUIRES_REVIEW'
+        """
+    )
+
+    condition_reason_counts = {}
+
+    def bump_condition(label):
+        condition_reason_counts[label] = (
+            condition_reason_counts.get(label, 0) + 1
+        )
+
+    for blocked in condition_rows:
+        raw_reasons = row_value(
+            blocked,
+            "fault_reasons",
+        ) or ""
+
+        try:
+            reasons = json.loads(raw_reasons)
+        except Exception:
+            reasons = [
+                part.strip()
+                for part in re.split(
+                    r"[,;|]",
+                    str(raw_reasons),
+                )
+                if part.strip()
+            ]
+
+        if isinstance(reasons, str):
+            reasons = [reasons]
+
+        if not isinstance(reasons, (list, tuple)):
+            reasons = []
+
+        clean_reasons = []
+        seen_reasons = set()
+
+        for reason in reasons:
+            label = re.sub(
+                r"\s+",
+                " ",
+                normalise(reason),
+            ).strip()
+
+            if not label:
+                continue
+
+            key = label.lower()
+
+            if key in seen_reasons:
+                continue
+
+            seen_reasons.add(key)
+            clean_reasons.append(label)
+
+        if clean_reasons:
+            for reason in clean_reasons:
+                bump_condition(reason)
+        else:
+            fault_level, detected = classify_faults(
+                row_value(blocked, "title"),
+                row_value(blocked, "condition"),
+            )
+
+            detected = [
+                normalise(reason)
+                for reason in (detected or [])
+                if normalise(reason)
+            ]
+
+            if detected:
+                for reason in detected:
+                    bump_condition(reason)
+            else:
+                status = normalise(
+                    row_value(blocked, "status")
+                ).upper()
+
+                if status and status != "NORMAL":
+                    bump_condition(
+                        "Status: " + status
+                    )
+                elif not ordinary_laptop(
+                    row_value(blocked, "title"),
+                    row_value(blocked, "condition"),
+                ):
+                    bump_condition(
+                        "Ordinary-laptop eligibility rule"
+                    )
+                else:
+                    bump_condition(
+                        "No explicit fault reason stored"
+                    )
+
+    condition_reason_items = sorted(
+        condition_reason_counts.items(),
+        key=lambda item: (-item[1], item[0]),
+    )
+
     api_budget = browse_budget_status(conn)
 
     api_used = int(
@@ -15954,11 +16154,11 @@ def diagnostics_html():
     ]
 
     missing_items = [
-        ("Missing brand", missing_brand),
-        ("Missing model", missing_model),
-        ("Missing CPU", missing_cpu),
-        ("Missing RAM", missing_ram),
-        ("Missing storage", missing_storage),
+        ("Missing brand (raw column)", missing_brand),
+        ("Missing model (raw column)", missing_model),
+        ("Missing CPU (raw column)", missing_cpu),
+        ("Missing RAM (raw column)", missing_ram),
+        ("Missing storage (raw column)", missing_storage),
     ]
 
     api_items = [
@@ -16450,6 +16650,29 @@ def diagnostics_html():
             <h2>Incomplete specification</h2>
             <table>
                 {table_rows(missing_items)}
+            </table>
+        </section>
+
+
+        <section class="panel">
+            <h2>Incomplete identity/spec — actual causes</h2>
+            <div class="status-line">
+                Current-rule diagnosis. Counts can overlap where one listing
+                has more than one missing or ambiguous field.
+            </div>
+            <table>
+                {table_rows(incomplete_reason_items)}
+            </table>
+        </section>
+
+        <section class="panel">
+            <h2>Condition review — actual causes</h2>
+            <div class="status-line">
+                Fault/status reasons attached to active listings currently
+                blocked from valuation. Counts can overlap.
+            </div>
+            <table>
+                {table_rows(condition_reason_items)}
             </table>
         </section>
 
