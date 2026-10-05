@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.30"
+APP_VERSION = "0.10.31"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -11355,11 +11355,30 @@ def _dashboard_html_base():
 
     return f"""
     <!doctype html>
-    <html>
+    <html lang="en-GB">
     <head>
-    <link rel="icon" href="/favicon.ico" type="image/svg+xml">
         <meta charset="utf-8">
-        <title>Laptop Lander</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Find Cheap Laptops UK &amp; Used Laptop Deals | LaptopLander</title>
+        <meta name="description" content="Find cheap laptops and genuine laptop bargains on eBay UK. LaptopLander compares listings with recent sold prices to identify underpriced used laptops. We find the deals; you buy directly from the seller.">
+        <meta name="robots" content="index,follow,max-image-preview:large">
+        <link rel="canonical" href="https://laptoplander.com/">
+        <link rel="icon" href="/favicon.ico" type="image/svg+xml">
+        <meta property="og:type" content="website">
+        <meta property="og:site_name" content="LaptopLander">
+        <meta property="og:title" content="Find Cheap Laptops UK &amp; Used Laptop Deals | LaptopLander">
+        <meta property="og:description" content="LaptopLander finds cheap and underpriced laptops on eBay UK by comparing listings with recent sold prices. We find the deals; you buy from the seller.">
+        <meta property="og:url" content="https://laptoplander.com/">
+        <meta name="twitter:card" content="summary">
+        <meta name="twitter:title" content="Find Cheap Laptops UK &amp; Used Laptop Deals | LaptopLander">
+        <meta name="twitter:description" content="Find genuinely good-value cheap laptops on eBay UK using recent sold-price evidence.">
+        <script type="application/ld+json">{json.dumps({
+            "@context": "https://schema.org",
+            "@type": "WebSite",
+            "name": "LaptopLander",
+            "url": "https://laptoplander.com/",
+            "description": "LaptopLander helps UK buyers find cheap and underpriced used laptops by comparing eBay listings with recent sold prices."
+        }, separators=(",", ":"))}</script>
         <style>{CSS}</style>
     </head>
 
@@ -11382,18 +11401,25 @@ def _dashboard_html_base():
             <div class="hero-brand">
                 <a href="/"
            class="public-logo"
-           aria-label="Laptop Lander home">
+           aria-label="LaptopLander home">
             <img
                 src="data:image/webp;base64,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"
                 alt=""
                 class="public-logo-image">
         </a>
 
-                <h1>Laptop Lander</h1>
+                <h1>LaptopLander</h1>
             </div>
 
             <p class="hero-subtitle">
-                Find underpriced laptops on eBay UK.
+                Find cheap laptops that are actually good deals.
+            </p>
+
+            <p class="hero-intro">
+                LaptopLander doesn't sell laptops. We find underpriced used laptops
+                on eBay UK and compare them with recent sold prices, so you can see
+                which cheap laptops are genuinely good value.
+                <strong>We find the deals. You buy directly from the seller.</strong>
             </p>
 
             <div class="hero-benefits">
@@ -11932,6 +11958,14 @@ def _dashboard_html_base():
 
                 font-size: 18px;
             }}
+
+            .hero-intro {
+                max-width: 720px;
+                margin: 10px 0 18px;
+                color: #475467;
+                font-size: 15px;
+                line-height: 1.55;
+            }
 
             .hero-benefits {{
                 grid-template-columns: 1fr;
@@ -14941,7 +14975,7 @@ def diagnostics_html():
     <meta charset="utf-8">
     <meta http-equiv="refresh" content="60">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Laptop Lander Diagnostics</title>
+    <title>Laptop Lander Diagnostics</title>\n<meta name="robots" content="noindex,nofollow">
 
     <style>
         * {{
@@ -15773,7 +15807,7 @@ def analytics_html():
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Laptop Lander Analytics</title>
+<title>Laptop Lander Analytics</title>\n<meta name="robots" content="noindex,nofollow">
 <style>
 body{{font-family:Inter,system-ui,sans-serif;background:#f4f7fb;color:#172033;margin:0;padding:28px}}
 .wrap{{max-width:1250px;margin:auto}}
@@ -15875,7 +15909,7 @@ def _settings_login_html(message=""):
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Laptop Lander Settings Login</title>
+<title>Laptop Lander Settings Login</title>\n<meta name="robots" content="noindex,nofollow">
 <style>
 body{{font-family:Inter,system-ui,sans-serif;background:#f4f7fb;color:#172033;margin:0}}
 .box{{max-width:430px;margin:10vh auto;background:white;padding:28px;border-radius:16px;box-shadow:0 8px 28px rgba(16,24,40,.10)}}
@@ -16004,7 +16038,7 @@ def settings_html(csrf, message="", regex_result=""):
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Laptop Lander Settings</title>
+<title>Laptop Lander Settings</title>\n<meta name="robots" content="noindex,nofollow">
 <style>
 *{{box-sizing:border-box}} body{{margin:0;background:#f4f7fb;color:#172033;font-family:Inter,system-ui,sans-serif}}
 .page{{max-width:1450px;margin:0 auto;padding:22px}} .top{{display:flex;justify-content:space-between;gap:20px;align-items:flex-start}}
@@ -16753,6 +16787,39 @@ class DashboardHandler(
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
 
+        if path == "/robots.txt":
+            body = (
+                "User-agent: *\n"
+                "Allow: /\n"
+                "Disallow: /settings\n"
+                "Disallow: /analytics\n"
+                "Disallow: /diagnostics\n"
+                "Disallow: /valuation-evidence\n"
+                "Disallow: /live-deals\n"
+                "Sitemap: https://laptoplander.com/sitemap.xml\n"
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == "/sitemap.xml":
+            body = b"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://laptoplander.com/</loc><changefreq>hourly</changefreq><priority>1.0</priority></url>
+  <url><loc>https://laptoplander.com/privacy</loc><changefreq>monthly</changefreq><priority>0.2</priority></url>
+</urlset>"""
+            self.send_response(200)
+            self.send_header("Content-Type", "application/xml; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         if path == "/favicon.ico":
             # Tiny embedded SVG favicon: LaptopLander "L".
             favicon = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="12" fill="#111827"/><path d="M18 14h10v27h20v9H18z" fill="white"/></svg>"""
@@ -16785,7 +16852,10 @@ class DashboardHandler(
         if path == "/privacy":
             self._send_html("""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>LaptopLander privacy notice</title></head>
+<title>Privacy Notice | LaptopLander</title>
+<meta name="robots" content="index,follow">
+<link rel="canonical" href="https://laptoplander.com/privacy">
+</head>
 <body style="font-family:system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 20px;line-height:1.55;color:#172033">
 <h1>Privacy notice</h1>
 <p>LaptopLander uses essential browser storage for site operation. Optional analytics are disabled until you choose “Allow analytics”.</p>
