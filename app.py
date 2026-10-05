@@ -11003,7 +11003,7 @@ def _dashboard_html_base():
                 "</span>"
             )
 
-        group_count = int(row.get("display_group_count") or 1)
+        group_count = int(row_value(row, "display_group_count") or 1)
         group_html = (
             "<div class='duplicate-count'>"
             + html.escape(f"{group_count} similar listings · showing cheapest")
@@ -11012,7 +11012,7 @@ def _dashboard_html_base():
             else ""
         )
 
-        confidence = normalise(row.get("valuation_confidence") or "").upper()
+        confidence = normalise(row_value(row, "valuation_confidence") or "").upper()
         confidence_label = confidence.title() if confidence in {"LOW", "MEDIUM", "HIGH"} else "Unknown"
         confidence_class = confidence.lower() if confidence in {"LOW", "MEDIUM", "HIGH"} else "unknown"
         confidence_html = (
