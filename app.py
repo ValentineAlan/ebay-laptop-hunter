@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.32"
+APP_VERSION = "0.10.33"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -11421,81 +11421,6 @@ def _dashboard_html_base():
                 LaptopLander scans new eBay UK laptop listings, compares them with recent sold prices and surfaces standout deals.
             </p>
 
-            <div class="hero-benefits">
-
-                <div class="hero-benefit">
-                    <svg class="hero-benefit-icon"
-                         viewBox="0 0 64 64"
-                         aria-hidden="true"
-                         focusable="false">
-                        <circle cx="32" cy="32" r="29"
-                                fill="#eef7ff"/>
-                        <circle cx="32" cy="32" r="28.5"
-                                fill="none"
-                                stroke="#dbeafe"
-                                stroke-width="1"/>
-                        <circle cx="27.5" cy="27.5" r="11.5"
-                                fill="none"
-                                stroke="#1769e0"
-                                stroke-width="5"
-                                stroke-linecap="round"/>
-                        <path d="M36 36 L47 47"
-                              fill="none"
-                              stroke="#1769e0"
-                              stroke-width="5"
-                              stroke-linecap="round"/>
-                    </svg>
-
-                    <span>
-                        Scours all new listings
-                    </span>
-                </div>
-
-                <div class="hero-benefit">
-                    <svg class="hero-benefit-icon"
-                         viewBox="0 0 64 64"
-                         aria-hidden="true"
-                         focusable="false">
-                        <circle cx="32" cy="32" r="29"
-                                fill="#eef7ff"/>
-                        <circle cx="32" cy="32" r="28.5"
-                                fill="none"
-                                stroke="#dbeafe"
-                                stroke-width="1"/>
-                        <rect x="16.5" y="36" width="7.5" height="12"
-                              rx="2.75" fill="#1769e0"/>
-                        <rect x="28.25" y="27" width="7.5" height="21"
-                              rx="2.75" fill="#1769e0"/>
-                        <rect x="40" y="17" width="7.5" height="31"
-                              rx="2.75" fill="#1769e0"/>
-                    </svg>
-
-                    <span>
-                        Compares previous sold prices
-                    </span>
-                </div>
-
-                <div class="hero-benefit">
-                    <svg class="hero-benefit-icon"
-                         viewBox="0 0 64 64"
-                         aria-hidden="true"
-                         focusable="false">
-                        <circle cx="32" cy="32" r="29"
-                                fill="#eef7ff"/>
-                        <circle cx="32" cy="32" r="28.5"
-                                fill="none"
-                                stroke="#dbeafe"
-                                stroke-width="1"/>
-                        <path d="M35.5 13.5L19.2 35.1C18.5 36 19.1 37.4 20.3 37.4H29.8L27.5 49.5C27.2 51.1 29.3 51.9 30.3 50.6L46.7 28.9C47.4 28 46.7 26.6 45.6 26.6H36.1L38.4 14.6C38.7 12.9 36.5 12.1 35.5 13.5Z"
-                              fill="#1769e0"/>
-                    </svg>
-
-                    <span>
-                        Finds underpriced laptops
-                    </span>
-                </div>
-
-            </div>
         </div>
 
         <div class="hero-deals"
@@ -11644,26 +11569,20 @@ def _dashboard_html_base():
 
         .hero-copy h1 {{
             margin: 0;
-
+            max-width: 620px;
             color: #16213f;
-
-            font-size:
-                clamp(44px, 4vw, 62px);
-            line-height: .98;
-
+            font-size: clamp(38px, 3.25vw, 52px);
+            line-height: 1.02;
             font-weight: 850;
-            letter-spacing: -.045em;
+            letter-spacing: -.04em;
         }}
 
         .hero-subtitle {{
-            margin: 17px 0 0;
-
+            margin: 20px 0 0;
+            max-width: 620px;
             color: #586d8e;
-
-            font-size:
-                clamp(18px, 1.6vw, 23px);
-            line-height: 1.35;
-
+            font-size: clamp(17px, 1.35vw, 20px);
+            line-height: 1.45;
             font-weight: 500;
         }}
 
@@ -12358,7 +12277,7 @@ def _dashboard_html_base():
         .hero-brand {{
             display: flex;
             align-items: center;
-            gap: 18px;
+            gap: 20px;
         }}
 
         .hero-brand .public-logo {{
@@ -12366,8 +12285,8 @@ def _dashboard_html_base():
             align-items: center;
             justify-content: center;
             flex: 0 0 auto;
-            width: 96px;
-            height: 72px;
+            width: 72px;
+            height: 58px;
             overflow: visible;
             border-radius: 0;
             background: transparent;
@@ -12376,7 +12295,7 @@ def _dashboard_html_base():
 
         .hero-brand .public-logo-image {{
             display: block;
-            width: 92px;
+            width: 68px;
             height: auto;
         }}
 
