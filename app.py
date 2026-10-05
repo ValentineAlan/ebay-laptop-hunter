@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.36"
+APP_VERSION = "0.10.37"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -10547,6 +10547,98 @@ def money(value):
     )
 
 
+def dashboard_group_key(row):
+    """Group obvious duplicate public listings without merging unrelated machines."""
+    identity = "|".join(
+        normalise(row_value(row, key)).lower()
+        for key in ("brand", "model", "cpu", "ram_gb", "storage_gb")
+    )
+    image = normalise(row_value(row, "image_url")).lower()
+    title = re.sub(r"\s+", " ", normalise(row_value(row, "title")).lower()).strip()
+    # Same machine/spec + same image is a strong duplicate signal. If an image
+    # is unavailable, require the full normalised title as the final key.
+    return identity + "|" + (image if image else title)
+
+
+def group_dashboard_rows(rows):
+    groups = {}
+    order = []
+    for source in rows:
+        row = dict(source)
+        key = dashboard_group_key(row)
+        if key not in groups:
+            row["display_group_count"] = 1
+            groups[key] = row
+            order.append(key)
+            continue
+
+        current = groups[key]
+        current["display_group_count"] = int(current.get("display_group_count") or 1) + 1
+
+        # Represent a duplicate group with the cheapest delivered listing.
+        current_total = safe_float(current.get("total"))
+        row_total = safe_float(row.get("total"))
+        if (
+            row_total is not None
+            and (current_total is None or row_total < current_total)
+        ):
+            count = current["display_group_count"]
+            row["display_group_count"] = count
+            groups[key] = row
+
+    return [groups[key] for key in order]
+
+
+def dashboard_fault_flags(row):
+    """Return deduplicated display flags and whether buyer attention is critical."""
+    raw = row_value(row, "fault_reasons") or ""
+    try:
+        reasons = json.loads(raw)
+    except Exception:
+        reasons = [
+            part.strip()
+            for part in re.split(r"[,;|]", str(raw))
+            if part.strip()
+        ]
+
+    if isinstance(reasons, str):
+        reasons = [reasons]
+    if not isinstance(reasons, (list, tuple)):
+        reasons = []
+
+    title = normalise(row_value(row, "title"))
+    title_rules = (
+        (r"\b(?:no|without)\s+(?:psu|charger|ac adapter|power supply)\b", "NO PSU"),
+        (r"\bqwertz\b|german\s+keyboard", "NON-UK KEYBOARD"),
+        (r"\bglass\s+crack(?:ed)?\b|\bcracked\s+(?:glass|screen|display)\b", "SCREEN DAMAGE"),
+        (r"\bno\s+(?:storage|ssd|hdd|drive)\b", "NO STORAGE"),
+        (r"\bdoes\s+not\s+hold\s+charge\b|\bbattery\s+(?:fault|failed|dead)\b", "BATTERY FAULT"),
+        (r"\bspares\s*(?:or|/|&)\s*repairs?\b|\bfor\s+parts\b", "SPARES / REPAIR"),
+        (r"\bbios\s+(?:locked|password)\b", "BIOS LOCKED"),
+        (r"\(read\)|\bplease\s+read\b", "READ DESCRIPTION"),
+    )
+    for pattern, label in title_rules:
+        if re.search(pattern, title, re.I):
+            reasons.append(label)
+
+    clean = []
+    seen = set()
+    for reason in reasons:
+        label = re.sub(r"\s+", " ", normalise(reason)).strip().upper()
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        clean.append(label)
+
+    critical_terms = (
+        "NO STORAGE", "NO PSU", "BATTERY", "SCREEN", "GLASS", "CRACK",
+        "SPARES", "PARTS", "BIOS", "PASSWORD", "FAULT", "BROKEN",
+        "DOES NOT", "NON-UK", "QWERTZ", "READ DESCRIPTION",
+    )
+    critical = any(any(term in flag for term in critical_terms) for flag in clean)
+    return clean, critical
+
+
 def _dashboard_html_base():
     conn = connect_db()
 
@@ -10575,6 +10667,8 @@ def _dashboard_html_base():
         MIN_UNDERVALUE_PCT,
         sold_cutoff,
     )).fetchall()
+
+    buy_now_rows = group_dashboard_rows(buy_now_rows)
 
     auction_rows = conn.execute("""
         SELECT listings.*, valuation_evidence_at AS sold_evidence_at\n        FROM listings
@@ -10620,6 +10714,43 @@ def _dashboard_html_base():
     buy_now_candidates = len(buy_now_rows)
     auction_candidates = len(auction_rows)
     candidates = buy_now_candidates + auction_candidates
+
+    feed_row = conn.execute("""
+        SELECT MAX(last_seen) AS last_update
+        FROM listings
+        WHERE COALESCE(active, 1) = 1
+    """).fetchone()
+    feed_last_update = feed_row["last_update"] if feed_row else None
+    feed_age_seconds = _dashboard_state_age_seconds(feed_last_update)
+    feed_stale = feed_age_seconds is None or feed_age_seconds > 60 * 60
+
+    try:
+        feed_circuit = runtime_state_get(
+            RUNTIME_STATE_PRODUCT_RESEARCH_CIRCUIT,
+            {},
+        ) or {}
+        feed_paused = bool(feed_circuit.get("opened_at"))
+    except Exception:
+        feed_paused = False
+
+    if feed_last_update:
+        try:
+            feed_dt = datetime.fromisoformat(str(feed_last_update).replace("Z", "+00:00"))
+            if feed_dt.tzinfo is None:
+                feed_dt = feed_dt.replace(tzinfo=timezone.utc)
+            feed_stamp = feed_dt.astimezone(timezone.utc).strftime("%-d %b %Y, %H:%M UTC")
+        except Exception:
+            feed_stamp = str(feed_last_update)
+    else:
+        feed_stamp = "unknown"
+
+    feed_is_live = not feed_paused and not feed_stale
+    feed_status_text = (
+        f"Deal feed active · Last listing update {feed_stamp}"
+        if feed_is_live
+        else f"Deal feed paused · Last listing update {feed_stamp}"
+    )
+    hero_feed_label = "Live standout deals" if feed_is_live else "Standout deals"
 
     # Public dashboard pipeline counters.
     #
@@ -10839,44 +10970,13 @@ def _dashboard_html_base():
         win11_mark = compact_mark(row["win11"])
         usbc_mark = compact_mark(row["usbc_pd"])
 
-        raw_fault_reasons = row["fault_reasons"] or ""
-
-        try:
-            fault_reasons = json.loads(raw_fault_reasons)
-        except Exception:
-            fault_reasons = [
-                part.strip()
-                for part in re.split(
-                    r"[,;|]",
-                    str(raw_fault_reasons)
-                )
-                if part.strip()
-            ]
-
-        if isinstance(fault_reasons, str):
-            fault_reasons = [fault_reasons]
-
-        if not isinstance(fault_reasons, (list, tuple)):
-            fault_reasons = []
-
-        clean_notes = []
-
-        for reason in fault_reasons:
-            reason = normalise(reason)
-
-            if (
-                reason
-                and reason.lower()
-                not in {
-                    existing.lower()
-                    for existing in clean_notes
-                }
-            ):
-                clean_notes.append(reason)
+        clean_notes, critical_fault = dashboard_fault_flags(row)
 
         notes_html = "".join(
-            "<span class='condition-note'>"
-            + html.escape(reason.upper())
+            "<span class='condition-note "
+            + ("condition-note-critical" if critical_fault else "")
+            + "'>"
+            + html.escape(reason)
             + "</span>"
             for reason in clean_notes
         )
@@ -10903,12 +11003,32 @@ def _dashboard_html_base():
                 "</span>"
             )
 
+        group_count = int(row.get("display_group_count") or 1)
+        group_html = (
+            "<div class='duplicate-count'>"
+            + html.escape(f"{group_count} similar listings · showing cheapest")
+            + "</div>"
+            if group_count > 1
+            else ""
+        )
+
+        confidence = normalise(row.get("valuation_confidence") or "").upper()
+        confidence_label = confidence.title() if confidence in {"LOW", "MEDIUM", "HIGH"} else "Unknown"
+        confidence_class = confidence.lower() if confidence in {"LOW", "MEDIUM", "HIGH"} else "unknown"
+        confidence_html = (
+            "<div class='valuation-confidence confidence-"
+            + confidence_class
+            + "'>"
+            + html.escape(f"{confidence_label} confidence · {count} sold comparable" + ("" if count == 1 else "s"))
+            + "</div>"
+        )
+
         image_url = row["image_url"] or ""
 
         if image_url:
             thumb_html = (
                 f'<a href="{url}" target="_blank" '
-                f'class="product-thumb-link">'
+                f'class="product-thumb-link" aria-hidden="true" tabindex="-1">'
                 f'<img src="{html.escape(image_url, quote=True)}" '
                 f'class="product-thumb" '
                 f'loading="lazy" '
@@ -10996,7 +11116,11 @@ def _dashboard_html_base():
 
         target_rows.append(
             f"""
-            <tr data-item-id="{html.escape(str(row['item_id'] or ''), quote=True)}">
+            <tr data-item-id="{html.escape(str(row['item_id'] or ''), quote=True)}"
+                data-faulty="{'1' if critical_fault else '0'}"
+                data-price="{row['total'] if row['total'] is not None else ''}"
+                data-score="{row['deal_score'] if row['deal_score'] is not None else ''}"
+                data-age="{html.escape(str(age_source or ''), quote=True)}">
                 <td class="product-thumb-cell">
                     {thumb_html}
                 </td>
@@ -11008,6 +11132,7 @@ def _dashboard_html_base():
                     <div class="small">
                         {html.escape(spec_text)}
                     </div>
+                    {group_html}
 
                     <div class="mobile-notes">
                         {
@@ -11075,6 +11200,7 @@ def _dashboard_html_base():
                                 {html.escape(sales_wording)}
                                 <br>
                                 {html.escape(valuation_age_text(row))}
+                                {confidence_html}
                             </div>
 
                             {hover_evidence_html}
@@ -11125,7 +11251,7 @@ def _dashboard_html_base():
             <th title="PassMark CPU Mark points per £1 of delivered price. Higher is better.">Power/£</th>
             <th>Time left</th>
             <th>Current bid</th>
-            <th title="Estimated saving if the current bid wins.">Potential saving</th>
+            <th title="Estimated saving if the current bid wins.">Saving at current bid</th>
             <th title="Deal score out of 100. Higher means a stronger deal.">Deal score</th>
             <th>Notes</th>
         </tr>
@@ -11192,6 +11318,17 @@ def _dashboard_html_base():
 
         hero_score = safe_float(
             hero_row["deal_score"]
+        )
+
+        hero_confidence = normalise(
+            hero_row.get("valuation_confidence") or ""
+        ).upper()
+        hero_count = int(hero_row.get("comparable_count") or 0)
+        hero_group_count = int(hero_row.get("display_group_count") or 1)
+        hero_confidence_text = (
+            f"{hero_confidence.title()} confidence · {hero_count} sold"
+            if hero_confidence in {"LOW", "MEDIUM", "HIGH"}
+            else f"{hero_count} sold comparables"
         )
 
         hero_pct_text = (
@@ -11300,6 +11437,15 @@ def _dashboard_html_base():
                                 {hero_saving} under market
                             </span>
 
+                            <span class="hero-deal-confidence">
+                                {html.escape(hero_confidence_text)}
+                                {
+                                    " · " + str(hero_group_count) + " similar"
+                                    if hero_group_count > 1
+                                    else ""
+                                }
+                            </span>
+
                             <span class="hero-deal-arrow"
                                   aria-hidden="true">
                                 ↗
@@ -11313,50 +11459,6 @@ def _dashboard_html_base():
             </a>
             """
         )
-
-    # Six genuine deal cards followed by one Telegram card gives a
-    # deliberately low promotional cadence of roughly one in seven rotations.
-    hero_cards.append(
-        """
-        <a class="hero-deal-card hero-telegram-card"
-           href="https://t.me/LaptopLander"
-           target="_blank"
-           rel="noopener noreferrer"
-           aria-label="Join LaptopLander on Telegram for instant new-deal alerts">
-
-            <div class="hero-telegram-card-inner">
-
-                <div class="hero-telegram-icon"
-                     aria-hidden="true">
-                    <svg viewBox="0 0 64 64" focusable="false">
-                        <circle cx="32" cy="32" r="30"></circle>
-                        <path d="M14.5 30.3 48 17.4c1.6-.6 3 .4 2.5 2.6L44.8 47c-.4 1.9-1.5 2.4-3 1.5l-8.7-6.4-4.2 4c-.5.5-.9.9-1.8.9l.6-8.9 16.2-14.6c.7-.6-.2-1-1.1-.4L22.8 35.7l-8.6-2.7c-1.9-.6-1.9-1.9.3-2.7Z"></path>
-                    </svg>
-                </div>
-
-                <div class="hero-telegram-copy">
-                    <div class="hero-telegram-kicker">
-                        Instant deal alerts
-                    </div>
-
-                    <div class="hero-telegram-title">
-                        Never miss a LaptopLander bargain
-                    </div>
-
-                    <div class="hero-telegram-text">
-                        Get notified on Telegram as soon as a qualifying new deal is found.
-                    </div>
-
-                    <span class="hero-telegram-cta">
-                        Join @LaptopLander
-                        <span aria-hidden="true">→</span>
-                    </span>
-                </div>
-
-            </div>
-        </a>
-        """
-    )
 
     hero_cards_html = "".join(
         hero_cards
@@ -13136,6 +13238,121 @@ def _dashboard_html_base():
                 padding: 6px 10px;
             }}
         }}
+        .feed-status {{
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            margin-top: 16px;
+            padding: 7px 10px;
+            border: 1px solid rgba(15,23,42,.08);
+            border-radius: 999px;
+            background: rgba(255,255,255,.72);
+            color: #475467;
+            font-size: 12px;
+            font-weight: 700;
+        }}
+        .feed-status-dot {{
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #12b76a;
+        }}
+        .feed-status-paused .feed-status-dot {{
+            background: #f79009;
+        }}
+        .hero-deal-confidence {{
+            display: block;
+            margin-top: 3px;
+            color: #667085;
+            font-size: 10px;
+            font-weight: 700;
+        }}
+        .duplicate-count {{
+            margin-top: 4px;
+            color: #667085;
+            font-size: 10px;
+            font-weight: 700;
+        }}
+        .valuation-confidence {{
+            margin-top: 6px;
+            font-size: 11px;
+            font-weight: 800;
+        }}
+        .confidence-high {{ color: #15803d; }}
+        .confidence-medium {{ color: #9a6700; }}
+        .confidence-low {{ color: #b42318; }}
+        .condition-note-critical {{
+            background: #fff1f0 !important;
+            border-color: #fecdca !important;
+            color: #b42318 !important;
+            font-weight: 850 !important;
+        }}
+        .deal-toolbar {{
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+            margin: 0 0 10px;
+        }}
+        .deal-filter,
+        #deal-sort {{
+            border: 1px solid #d0d5dd;
+            border-radius: 999px;
+            background: #fff;
+            color: #344054;
+            padding: 7px 11px;
+            font: inherit;
+            font-size: 12px;
+            font-weight: 700;
+        }}
+        .deal-filter {{ cursor: pointer; }}
+        .deal-filter.active {{
+            border-color: #155eef;
+            background: #eff4ff;
+            color: #155eef;
+        }}
+        .deal-sort-label {{
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin-left: auto;
+            color: #667085;
+            font-size: 12px;
+            font-weight: 700;
+        }}
+        #deal-sort {{ border-radius: 9px; }}
+        .telegram-strip {{
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            align-items: center;
+            gap: 12px;
+            margin: 0 0 20px;
+            padding: 12px 15px;
+            border: 1px solid #c7d7fe;
+            border-radius: 13px;
+            background: #f5f8ff;
+            color: #25385f;
+            text-decoration: none;
+        }}
+        .telegram-strip span {{
+            color: #667085;
+            font-size: 12px;
+        }}
+        .telegram-strip .telegram-strip-cta {{
+            color: #155eef;
+            font-weight: 800;
+            white-space: nowrap;
+        }}
+        @media (max-width: 700px) {{
+            .telegram-strip {{
+                grid-template-columns: 1fr;
+                gap: 4px;
+            }}
+            .deal-sort-label {{
+                width: 100%;
+                margin-left: 0;
+            }}
+        }}
 </style>
     </head>
 
@@ -13161,7 +13378,7 @@ def _dashboard_html_base():
                    aria-label="LaptopLander home">
                     <img
                         src="data:image/webp;base64,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"
-                        alt=""
+                        alt="LaptopLander"
                         class="public-logo-image">
                 </a>
                 <div class="hero-brand-name">LaptopLander</div>
@@ -13172,8 +13389,12 @@ def _dashboard_html_base():
             <h1>Underpriced laptops on eBay UK</h1>
 
             <p class="hero-subtitle">
-                Live listings checked against recent sold prices, so the bargains stand out.
+                Listings checked against recent sold prices, so the bargains stand out.
             </p>
+            <div class="feed-status {'feed-status-live' if feed_is_live else 'feed-status-paused'}">
+                <span class="feed-status-dot" aria-hidden="true"></span>
+                {html.escape(feed_status_text)}
+            </div>
         </div>
 
         <div class="hero-deals"
@@ -13187,7 +13408,7 @@ def _dashboard_html_base():
                 <div class="hero-deal-carousel-live">
                     <span class="hero-live-dot"
                           aria-hidden="true"></span>
-                    Live standout deals
+                    {hero_feed_label}
                 </div>
 
                 <div class="hero-deal-carousel-controls">
@@ -13223,7 +13444,14 @@ def _dashboard_html_base():
         </div>
     </section>
 
-    
+    <a class="telegram-strip"
+       href="https://t.me/LaptopLander"
+       target="_blank"
+       rel="noopener noreferrer">
+        <strong>Instant deal alerts on Telegram</strong>
+        <span>Get notified when a qualifying LaptopLander deal appears.</span>
+        <span class="telegram-strip-cta">Join @LaptopLander →</span>
+    </a>
 
     <section class="deal-section">
 
@@ -13236,6 +13464,20 @@ def _dashboard_html_base():
             </span>
         </div>
 
+        <div class="deal-toolbar" role="group" aria-label="Deal filters">
+            <button type="button" class="deal-filter active" data-filter="all">All</button>
+            <button type="button" class="deal-filter" data-filter="new24">New in 24h</button>
+            <button type="button" class="deal-filter" data-filter="clean">Hide faulty</button>
+            <label class="deal-sort-label">
+                Sort
+                <select id="deal-sort">
+                    <option value="score">Best score</option>
+                    <option value="newest">Newest</option>
+                    <option value="price">Lowest price</option>
+                </select>
+            </label>
+        </div>
+
         <table>
 
         <thead>
@@ -13244,7 +13486,7 @@ def _dashboard_html_base():
             <th>Listing</th>
             <th title="PassMark CPU Mark points per £1 of delivered price. Higher is better.">Power/£</th>
             <th>Listing age</th>
-            <th>Price</th>
+            <th>Price inc. delivery</th>
             <th title="Difference between the listing price and estimated market value based on recent sold prices.">
     Under market
 </th>
@@ -13721,6 +13963,59 @@ def _dashboard_html_base():
             checkForUpdates,
             1500
         );
+    }})();
+    </script>
+
+    <script>
+    (() => {{
+        const tbody = document.getElementById("buy-now-deals-body");
+        const sortSelect = document.getElementById("deal-sort");
+        const buttons = Array.from(document.querySelectorAll(".deal-filter"));
+        if (!tbody || !sortSelect || !buttons.length) return;
+
+        let filter = "all";
+
+        function rowAgeMs(row) {{
+            const value = Date.parse(row.dataset.age || "");
+            return Number.isFinite(value) ? Date.now() - value : Infinity;
+        }}
+
+        function apply() {{
+            const rows = Array.from(tbody.querySelectorAll("tr[data-item-id]"));
+
+            rows.forEach(row => {{
+                const isFaulty = row.dataset.faulty === "1";
+                const isNew = rowAgeMs(row) <= 24 * 60 * 60 * 1000;
+                row.hidden = (
+                    (filter === "clean" && isFaulty)
+                    || (filter === "new24" && !isNew)
+                );
+            }});
+
+            const mode = sortSelect.value;
+            rows.sort((a, b) => {{
+                if (mode === "newest") {{
+                    return rowAgeMs(a) - rowAgeMs(b);
+                }}
+                if (mode === "price") {{
+                    return (parseFloat(a.dataset.price) || Infinity)
+                        - (parseFloat(b.dataset.price) || Infinity);
+                }}
+                return (parseFloat(b.dataset.score) || -1)
+                    - (parseFloat(a.dataset.score) || -1);
+            }});
+            rows.forEach(row => tbody.appendChild(row));
+        }}
+
+        buttons.forEach(button => {{
+            button.addEventListener("click", () => {{
+                filter = button.dataset.filter || "all";
+                buttons.forEach(item => item.classList.toggle("active", item === button));
+                apply();
+            }});
+        }});
+        sortSelect.addEventListener("change", apply);
+        apply();
     }})();
     </script>
     </body>
@@ -17201,25 +17496,27 @@ def _dashboard_health_alert():
         except Exception:
             challenge_count = 1
 
+        last_success = session.get("last_success_at")
+        if last_success:
+            try:
+                success_dt = datetime.fromisoformat(str(last_success).replace("Z", "+00:00"))
+                if success_dt.tzinfo is None:
+                    success_dt = success_dt.replace(tzinfo=timezone.utc)
+                success_text = success_dt.astimezone(timezone.utc).strftime("%-d %b %Y, %H:%M UTC")
+            except Exception:
+                success_text = str(last_success)
+        else:
+            success_text = "unknown"
+
         notice_html = (
-            "<div id='product-research-pause' "
-            "class='system-health-notice'>"
-
-            "<div class='health-notice-title'>"
-            "NEW DEALS MAY BE DELAYED"
-            "</div>"
-
+            "<div id='product-research-pause' class='system-health-notice'>"
+            "<div class='health-notice-title'>DEAL FEED PAUSED</div>"
             "<div class='health-notice-copy'>"
-            "eBay Product Research is temporarily unavailable, so "
-            "LaptopLander has paused new sold-price research."
-            "<br><br>"
-            "Existing deals with sufficiently recent sold evidence remain "
-            "visible; new valuations may be delayed."
-            "<br><br>"
-            "LaptopLander will test for recovery after the cooldown and "
-            "resume valuation processing when Product Research succeeds."
+            "New valuations are temporarily paused. "
+            "Last successful sold-price update: "
+            + html.escape(success_text)
+            + ". Existing recent deals remain visible."
             "</div>"
-
             "</div>"
         )
 
