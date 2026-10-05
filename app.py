@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.45"
+APP_VERSION = "0.10.46"
 CLASSIFIER_VERSION = "0.8.5"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -14967,7 +14967,7 @@ def _site_nav(active="deals"):
     )
 
 
-def diagnostics_html():
+def diagnostics_html(hp_model_probe=False):
     conn = connect_db()
     refresh_runtime_settings(conn)
     refresh_classifier_rules(conn)
@@ -14996,6 +14996,130 @@ def diagnostics_html():
             ).fetchall()
         except Exception:
             return []
+
+
+    hp_probe_rows = []
+    hp_probe_message = ""
+
+    if hp_model_probe:
+        # Manual, authenticated, one-shot probe. Normal diagnostics refreshes
+        # never spend Browse API calls on this.
+        sample = safe_rows(
+            """
+            SELECT item_id,title,model
+            FROM listings
+            WHERE COALESCE(active,1)=1
+              AND valuation_basis='INCOMPLETE_IDENTITY_OR_SPEC'
+              AND lower(COALESCE(brand,''))='hp'
+              AND (model IS NULL OR trim(model)='')
+            ORDER BY first_seen DESC
+            LIMIT 12
+            """
+        )
+
+        if ebay_detail_rate_limited():
+            hp_probe_message = (
+                "eBay detail calls are currently rate-limited; probe skipped."
+            )
+        elif not sample:
+            hp_probe_message = (
+                "No active HP missing-model listings are currently available to probe."
+            )
+        else:
+            try:
+                token = get_token()
+            except Exception as exc:
+                token = None
+                hp_probe_message = (
+                    "Could not obtain eBay Browse token: "
+                    + type(exc).__name__
+                )
+
+            if token:
+                for listing in sample:
+                    if not can_detail(conn):
+                        hp_probe_message = (
+                            "Stopped because the configured Browse detail budget was reached."
+                        )
+                        break
+
+                    record_api_call(
+                        conn,
+                        "BROWSE",
+                        "GET_ITEM",
+                    )
+
+                    try:
+                        state, detail = ebay_get_item(
+                            token,
+                            listing["item_id"],
+                        )
+                    except Exception as exc:
+                        hp_probe_rows.append(
+                            (
+                                listing["title"] or "",
+                                "Fetch error",
+                                type(exc).__name__,
+                                "—",
+                            )
+                        )
+                        continue
+
+                    if state != "ACTIVE" or not isinstance(detail, dict):
+                        hp_probe_rows.append(
+                            (
+                                listing["title"] or "",
+                                "Listing state",
+                                state,
+                                "—",
+                            )
+                        )
+                        continue
+
+                    aspects = aspects_dict(detail)
+                    interesting = []
+
+                    for name, values in aspects.items():
+                        if re.search(
+                            r"(?:model|product|part|mpn|series|line|family|"
+                            r"number|type|sku)",
+                            name,
+                            re.I,
+                        ):
+                            for value in values:
+                                interesting.append(
+                                    (
+                                        name,
+                                        normalise(value),
+                                    )
+                                )
+
+                    parsed = identify_model(
+                        listing["title"] or "",
+                        detail,
+                    )
+
+                    if not interesting:
+                        hp_probe_rows.append(
+                            (
+                                listing["title"] or "",
+                                "No model-related aspect",
+                                "—",
+                                parsed or "—",
+                            )
+                        )
+                    else:
+                        first = True
+                        for name, value in interesting:
+                            hp_probe_rows.append(
+                                (
+                                    listing["title"] or "" if first else "↳",
+                                    name,
+                                    value,
+                                    parsed or "—",
+                                )
+                            )
+                            first = False
 
     def stat_card(label, value, note=""):
         return (
@@ -15049,6 +15173,26 @@ def diagnostics_html():
                 "</tr>"
             )
 
+        return "".join(output)
+
+    def hp_probe_table_rows(items):
+        if not items:
+            return (
+                "<tr><td colspan='4' class='muted'>"
+                + html.escape(hp_probe_message or "Probe not run")
+                + "</td></tr>"
+            )
+
+        output = []
+        for title, aspect_name, aspect_value, parsed_model in items:
+            output.append(
+                "<tr>"
+                f"<td>{html.escape(str(title))}</td>"
+                f"<td>{html.escape(str(aspect_name))}</td>"
+                f"<td>{html.escape(str(aspect_value))}</td>"
+                f"<td>{html.escape(str(parsed_model))}</td>"
+                "</tr>"
+            )
         return "".join(output)
 
     def queue_card(
@@ -16421,7 +16565,7 @@ def diagnostics_html():
 <html>
 <head>
     <meta charset="utf-8">
-    <meta http-equiv="refresh" content="60">
+    {"<meta http-equiv='refresh' content='60'>" if not hp_model_probe else ""}
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Laptop Lander Diagnostics</title>
 
@@ -16873,6 +17017,32 @@ def diagnostics_html():
                     {diagnostic_rows(missing_model_items)}
                 </tbody>
             </table>
+        </section>
+
+
+        <section class="panel">
+            <h2>HP missing-model eBay specifics probe</h2>
+            <div class="status-line">
+                Fetches up to 12 currently blocked HP listings once and shows
+                model/product/part-number-related eBay item specifics.
+                Normal diagnostics refreshes do not run this probe.
+                <a href="/diagnostics?hp_model_probe=1">Run HP probe</a>
+            </div>
+            {
+                (
+                    "<table>"
+                    "<thead><tr>"
+                    "<th>Listing</th>"
+                    "<th>eBay aspect</th>"
+                    "<th>Value</th>"
+                    "<th>Parser result</th>"
+                    "</tr></thead><tbody>"
+                    + hp_probe_table_rows(hp_probe_rows)
+                    + "</tbody></table>"
+                )
+                if hp_model_probe
+                else ""
+            }
         </section>
 
         <section class="panel">
@@ -18463,7 +18633,15 @@ class DashboardHandler(
             session = self._require_settings_auth()
             if not session:
                 return
-            page = diagnostics_html()
+            query = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query
+            )
+            hp_model_probe = (
+                query.get("hp_model_probe", ["0"])[0] == "1"
+            )
+            page = diagnostics_html(
+                hp_model_probe=hp_model_probe
+            )
             self._send_html(page)
             return
 
