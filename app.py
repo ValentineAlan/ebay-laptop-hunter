@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.31"
+APP_VERSION = "0.10.32"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -11370,9 +11370,21 @@ def _dashboard_html_base():
     <!doctype html>
     <html>
     <head>
-    <link rel="icon" href="/favicon.ico" type="image/svg+xml">
         <meta charset="utf-8">
-        <title>Laptop Lander</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Cheap Laptops UK | Underpriced eBay Laptop Deals | LaptopLander</title>
+        <meta name="description" content="Find cheap and underpriced laptops on eBay UK. LaptopLander scans new listings, compares sold prices and highlights genuine laptop deals.">
+        <meta name="robots" content="index,follow,max-image-preview:large">
+        <link rel="canonical" href="https://laptoplander.com/">
+        <meta property="og:type" content="website">
+        <meta property="og:site_name" content="LaptopLander">
+        <meta property="og:title" content="Cheap Laptops UK | Underpriced eBay Laptop Deals | LaptopLander">
+        <meta property="og:description" content="Find underpriced laptops on eBay UK using sold-price evidence and live listing analysis.">
+        <meta property="og:url" content="https://laptoplander.com/">
+        <meta name="twitter:card" content="summary">
+        <meta name="twitter:title" content="Cheap Laptops UK | Underpriced eBay Laptop Deals | LaptopLander">
+        <meta name="twitter:description" content="Find underpriced laptops on eBay UK using sold-price evidence and live listing analysis.">
+        <link rel="icon" href="/favicon.ico" type="image/svg+xml">
         <style>{CSS}</style>
     </head>
 
@@ -11402,11 +11414,11 @@ def _dashboard_html_base():
                 class="public-logo-image">
         </a>
 
-                <h1>Laptop Lander</h1>
+                <h1>Find Cheap &amp; Underpriced Laptops on eBay UK</h1>
             </div>
 
             <p class="hero-subtitle">
-                Find underpriced laptops on eBay UK.
+                LaptopLander scans new eBay UK laptop listings, compares them with recent sold prices and surfaces standout deals.
             </p>
 
             <div class="hero-benefits">
