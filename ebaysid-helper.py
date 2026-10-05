@@ -24,8 +24,6 @@ CDP_URL = os.environ.get(
     "http://127.0.0.1:9222",
 )
 
-SID_FILE = DATA / "ebaysid.current"
-
 REFRESH_REQUEST_FILE = (
     DATA / "ebaysid.refresh-request"
 )
@@ -256,62 +254,22 @@ def write_status(
 
 
 def save_sid_if_changed(sid):
+    """Record SID changes by hash only; never persist the live cookie value."""
     if not sid:
         return False
-
-    old = None
-
-    try:
-        old = (
-            SID_FILE
-            .read_text(
-                encoding="utf-8"
-            )
-            .strip()
-            or None
-        )
-    except OSError:
-        pass
-
-    if old == sid:
+    status = read_json(STATUS_FILE)
+    new_hash = sid_hash(sid)
+    if status.get("ebaysid_hash") == new_hash:
         return False
-
-    atomic_write(
-        SID_FILE,
-        sid,
-    )
-
-    status = read_json(
-        STATUS_FILE
-    )
-
     status["last_sid_change_at"] = now_iso()
-    status["ebaysid_hash"] = sid_hash(sid)
+    status["ebaysid_hash"] = new_hash
     status["last_seen_at"] = now_iso()
-
-    status.setdefault(
-        "status",
-        "CONNECTED",
-    )
-
+    status.setdefault("status", "CONNECTED")
     if status.get("status") != "ERROR":
-        status.pop(
-            "last_error",
-            None,
-        )
-
-    atomic_json(
-        STATUS_FILE,
-        status,
-    )
-
-    print(
-        f"ebaysid updated: {sid_hash(sid)}",
-        flush=True,
-    )
-
+        status.pop("last_error", None)
+    atomic_json(STATUS_FILE, status)
+    print(f"ebaysid changed: {new_hash}", flush=True)
     return True
-
 
 def ensure_ebay_context(
     context,
@@ -622,12 +580,13 @@ def valid_research_request(request_id, url):
         return False
     try:
         parsed = urllib.parse.urlsplit(url)
-    except Exception:
+        port = parsed.port
+    except (TypeError, ValueError):
         return False
     return (
         parsed.scheme == "https"
         and parsed.hostname == ALLOWED_RESEARCH_HOST
-        and parsed.port in (None, 443)
+        and port in (None, 443)
         and parsed.path == ALLOWED_RESEARCH_PATH
         and not parsed.username
         and not parsed.password
