@@ -2,6 +2,15 @@
 
 Notable changes to Laptop Lander are recorded here.
 
+## 0.10.33
+
+### Brand and laptop-family search pages
+- Added dynamic SEO pages targeting Lenovo, ThinkPad, Dell, Dell Latitude, HP, HP EliteBook and Microsoft Surface Pro searches.
+- Brand/family pages reuse LaptopLander's live qualifying deal data and fresh SOLD valuation evidence rather than static affiliate-style content.
+- Added unique titles, descriptions, H1 copy and canonical URLs for each search intent.
+- Added the new pages to the XML sitemap and strengthened internal links from the homepage and related-deals navigation.
+- All pages retain the explicit distinction that LaptopLander finds deals rather than selling laptops.
+
 ## 0.10.32
 
 ### Search landing pages
