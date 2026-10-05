@@ -2,6 +2,16 @@
 
 Notable changes to Laptop Lander are recorded here.
 
+## 0.10.31
+
+### SEO and public positioning
+- Repositioned the homepage around finding cheap laptops and used laptop deals while making clear that LaptopLander is a deal finder, not a laptop seller.
+- Added a search-focused title, meta description, canonical URL, Open Graph and social metadata.
+- Added WebSite structured data and consistent public `LaptopLander` branding.
+- Added `/robots.txt` and `/sitemap.xml` routes.
+- Marked diagnostics, analytics and settings pages `noindex,nofollow`.
+- Added canonical metadata to the privacy notice.
+
 ## 0.10.29
 
 ### Evidence freshness, rule seeding and public hardening
