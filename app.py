@@ -41,7 +41,6 @@ import signal
 import urllib.parse
 import urllib.request
 import urllib.error
-import shlex
 import sys
 import hashlib
 import hmac
@@ -57,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.28"
+APP_VERSION = "0.10.29"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -925,69 +924,40 @@ def classifier_rule_values(category, fallback=None):
 
 
 def _seed_classifier_rules(conn):
-    """
-    Seed built-in classifier rules without overwriting user configuration.
-
-    Existing rules, including disabled rules, are retained. Newly-added
-    built-in defaults are appended only when that exact rule does not already
-    exist in the category.
-    """
+    """Seed each built-in rule once; user deletions remain deleted."""
+    row = conn.execute("SELECT value FROM app_meta WHERE key='seeded_rules'").fetchone()
+    try:
+        seeded = json.loads(row["value"]) if row else {}
+    except Exception:
+        seeded = {}
     added = 0
     for category, values in DEFAULT_RULE_GROUPS.items():
-        existing_rows = conn.execute(
-            """
-            SELECT value, position
-            FROM classifier_rules
-            WHERE category=?
-            ORDER BY position,id
-            """,
-            (category,),
-        ).fetchall()
-
-        existing = {
-            row["value"]
-            for row in existing_rows
-        }
-
-        next_position = (
-            max(
-                (row["position"] or 0)
-                for row in existing_rows
-            ) + 1
-            if existing_rows
-            else 0
-        )
-
+        known = set(seeded.get(category, []))
+        existing = {r["value"] for r in conn.execute(
+            "SELECT value FROM classifier_rules WHERE category=?", (category,)
+        ).fetchall()}
+        pos = conn.execute(
+            "SELECT COALESCE(MAX(position),-1)+1 FROM classifier_rules WHERE category=?",
+            (category,)
+        ).fetchone()[0]
         for value in values:
-            if value in existing:
+            if value in known:
                 continue
-
-            conn.execute(
-                """
-                INSERT INTO classifier_rules(
-                    category,
-                    position,
-                    value,
-                    enabled,
-                    updated_at
+            if value not in existing:
+                conn.execute(
+                    "INSERT INTO classifier_rules(category,position,value,enabled,updated_at) VALUES (?,?,?,?,?)",
+                    (category, pos, value, 1, iso_now())
                 )
-                VALUES (?,?,?,?,?)
-                """,
-                (
-                    category,
-                    next_position,
-                    value,
-                    1,
-                    iso_now(),
-                ),
-            )
-
-            existing.add(value)
-            next_position += 1
-            added += 1
-
+                pos += 1
+                added += 1
+            known.add(value)
+        seeded[category] = sorted(known)
+    conn.execute(
+        "INSERT INTO app_meta(key,value) VALUES('seeded_rules',?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (json.dumps(seeded, sort_keys=True),)
+    )
     return added
-
 
 def _bump_rules_revision(conn):
     revision = current_rules_revision(conn) + 1
@@ -1101,6 +1071,7 @@ def init_db():
         "win11_cpu_mark": "INTEGER",
 
         "valuation_research_at": "TEXT",
+        "valuation_evidence_at": "TEXT",
 
         "telegram_notified_at": "TEXT",
         "telegram_notify_error": "TEXT",
@@ -1271,6 +1242,21 @@ def init_db():
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_sold_model
         ON sold_comparables (brand, model)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_sold_model_ci
+        ON sold_comparables (LOWER(brand), LOWER(model), collected_at)
+    """)
+    conn.execute("""
+        UPDATE listings
+        SET valuation_evidence_at = (
+            SELECT MAX(s.collected_at)
+            FROM sold_comparables s
+            WHERE LOWER(s.brand)=LOWER(listings.brand)
+              AND LOWER(s.model)=LOWER(listings.model)
+        )
+        WHERE valuation_basis LIKE 'SOLD_%'
+          AND valuation_evidence_at IS NULL
     """)
 
     conn.execute("""
@@ -7878,7 +7864,8 @@ def persist_listing_valuation(
             undervaluation_gbp=?,
             undervaluation_pct=?,
             deal_score=?,
-            valuation_basis=?
+            valuation_basis=?,
+            valuation_evidence_at=?
         WHERE item_id=?
     """, (
         valuation["estimated_value"],
@@ -7890,6 +7877,7 @@ def persist_listing_valuation(
         valuation["undervaluation_pct"],
         valuation["deal_score"],
         valuation["basis"],
+        valuation.get("evidence_at"),
         row["item_id"],
     ))
 
@@ -7929,8 +7917,13 @@ def collect_needed_sold_data(conn, maximum=None):
                 (model IS NOT NULL AND trim(model) <> '')
               )
         ORDER BY
-            CASE WHEN estimated_value IS NULL THEN 0 ELSE 1 END,
-            COALESCE(valuation_research_at, '1970-01-01') ASC,
+            CASE
+                WHEN valuation_basis LIKE 'SOLD_%' AND deal_score > 0
+                     AND valuation_evidence_at IS NOT NULL THEN 0
+                WHEN estimated_value IS NULL THEN 1
+                ELSE 2
+            END,
+            COALESCE(valuation_evidence_at, valuation_research_at, '1970-01-01') ASC,
             first_seen ASC
     """, (CLASSIFIER_VERSION, current_rules_revision(conn))).fetchall()
 
@@ -9357,7 +9350,14 @@ def calculate_sold_valuation(conn, target):
         if spec_tier in spec_counts:
             spec_counts[spec_tier] += 1
 
+    evidence_times = [
+        row_value(candidate["row"], "collected_at")
+        for candidate in selected
+        if row_value(candidate["row"], "collected_at")
+    ]
+
     return dict(
+        evidence_at=max(evidence_times) if evidence_times else None,
         estimated_value=round(
             estimate,
             2
@@ -9461,7 +9461,8 @@ def calculate_active_valuation(conn, target):
     return dict(estimated_value=round(statistics.median(prices), 2),
         q1=percentile(prices, .25), q3=percentile(prices, .75), count=len(selected),
         confidence="ASKING_PRICES_ONLY", undervaluation_gbp=None,
-        undervaluation_pct=None, deal_score=None, basis="ACTIVE_ASKING_REFERENCE")
+        undervaluation_pct=None, deal_score=None, evidence_at=None,
+        basis="ACTIVE_ASKING_REFERENCE")
 
 
 def deal_confidence_multiplier(confidence):
@@ -9830,7 +9831,7 @@ def refresh_price_economics(conn, item_id):
 
 
 def valuation_age_text(row):
-    stamp = row_value(row, "sold_evidence_at")
+    stamp = row_value(row, "valuation_evidence_at") or row_value(row, "sold_evidence_at")
     if not stamp:
         return "sold evidence age unknown"
     try:
@@ -9859,6 +9860,11 @@ def promotion_eligible(row):
     q3 = safe_float(row_value(row, "valuation_q3"))
 
     if confidence not in {"MEDIUM", "HIGH"} or count < 3 or saving is None:
+        return False
+    if not str(row_value(row, "valuation_basis") or "").startswith("SOLD_"):
+        return False
+    evidence_age = evidence_age_days(row_value(row, "valuation_evidence_at"))
+    if evidence_age is None or evidence_age > SOLD_CACHE_MAX_AGE_DAYS:
         return False
 
     spread_margin = 0.0
@@ -10541,12 +10547,7 @@ def _dashboard_html_base():
     ).isoformat()
 
     buy_now_rows = conn.execute("""
-        SELECT listings.*,
-               (SELECT MAX(s.collected_at)
-                FROM sold_comparables s
-                WHERE s.brand=listings.brand
-                  AND s.model=listings.model) AS sold_evidence_at
-        FROM listings
+        SELECT listings.*, valuation_evidence_at AS sold_evidence_at\n        FROM listings
         WHERE COALESCE(active, 1) = 1
           AND estimated_value IS NOT NULL
           AND deal_score > 0
@@ -10555,12 +10556,7 @@ def _dashboard_html_base():
           AND undervaluation_pct IS NOT NULL
           AND undervaluation_pct >= ?
           AND valuation_basis LIKE 'SOLD_%'
-          AND EXISTS (
-              SELECT 1 FROM sold_comparables s
-              WHERE s.brand=listings.brand
-                AND s.model=listings.model
-                AND s.collected_at >= ?
-          )
+          AND valuation_evidence_at >= ?
         ORDER BY
             deal_score DESC,
             undervaluation_gbp DESC,
@@ -10573,12 +10569,7 @@ def _dashboard_html_base():
     )).fetchall()
 
     auction_rows = conn.execute("""
-        SELECT listings.*,
-               (SELECT MAX(s.collected_at)
-                FROM sold_comparables s
-                WHERE s.brand=listings.brand
-                  AND s.model=listings.model) AS sold_evidence_at
-        FROM listings
+        SELECT listings.*, valuation_evidence_at AS sold_evidence_at\n        FROM listings
         WHERE COALESCE(active, 1) = 1
           AND estimated_value IS NOT NULL
           AND deal_score IS NULL
@@ -10588,12 +10579,7 @@ def _dashboard_html_base():
           AND undervaluation_pct IS NOT NULL
           AND undervaluation_pct >= ?
           AND valuation_basis LIKE 'SOLD_%'
-          AND EXISTS (
-              SELECT 1 FROM sold_comparables s
-              WHERE s.brand=listings.brand
-                AND s.model=listings.model
-                AND s.collected_at >= ?
-          )
+          AND valuation_evidence_at >= ?
         ORDER BY
             CASE
                 WHEN end_date IS NULL THEN 1
@@ -10626,21 +10612,6 @@ def _dashboard_html_base():
     buy_now_candidates = len(buy_now_rows)
     auction_candidates = len(auction_rows)
     candidates = buy_now_candidates + auction_candidates
-
-    # Public page must never perform a live eBay quota request.
-    # The worker/runtime state is the authoritative cached value here.
-    try:
-        api_calls = int(
-            runtime_state_get(
-                conn,
-                "browse_usage_today",
-                0,
-            )
-            or 0
-        )
-    except Exception:
-        api_calls = 0
-
 
     # Public dashboard pipeline counters.
     #
@@ -10698,19 +10669,6 @@ def _dashboard_html_base():
     unknown_cost = int(pipeline_counts["unknown_cost"] or 0)
 
     valuation_backlog = reanalysis_backlog
-
-    session_state = _read_json_file(PRODUCT_RESEARCH_SESSION_STATE)
-    helper_state = _read_json_file(PRODUCT_RESEARCH_HELPER_STATE)
-    session_status = session_state.get("status", "UNKNOWN")
-    session_class = (
-        "session-ok" if session_status == "WORKING"
-        else "session-bad" if session_status == "NOT WORKING"
-        else "session-unknown"
-    )
-    session_last_checked = relative_age(session_state.get("last_checked_at"))
-    session_last_refresh = relative_age(session_state.get("last_refresh_at"))
-    helper_status = helper_state.get("status", "UNKNOWN")
-    helper_seen = relative_age(helper_state.get("last_seen_at"))
 
     buy_now_body_rows = []
     auction_body_rows = []
@@ -16038,7 +15996,6 @@ def settings_html(csrf, message="", regex_result=""):
         )
 
     revision = current_rules_revision(conn)
-    configured = _settings_password_configured(conn)
     conn.close()
 
     notice = ""
@@ -16323,12 +16280,7 @@ def _live_deal_ids():
               AND undervaluation_pct IS NOT NULL
               AND undervaluation_pct >= ?
               AND valuation_basis LIKE 'SOLD_%'
-              AND EXISTS (
-                  SELECT 1 FROM sold_comparables s
-                  WHERE s.brand=listings.brand
-                    AND s.model=listings.model
-                    AND s.collected_at >= ?
-              )
+              AND valuation_evidence_at >= ?
 
             UNION
 
@@ -16343,12 +16295,7 @@ def _live_deal_ids():
               AND undervaluation_pct IS NOT NULL
               AND undervaluation_pct >= ?
               AND valuation_basis LIKE 'SOLD_%'
-              AND EXISTS (
-                  SELECT 1 FROM sold_comparables s
-                  WHERE s.brand=listings.brand
-                    AND s.model=listings.model
-                    AND s.collected_at >= ?
-              )
+              AND valuation_evidence_at >= ?
         """, (
             MIN_UNDERVALUE_GBP,
             MIN_UNDERVALUE_PCT,
@@ -16849,7 +16796,9 @@ class DashboardHandler(
 <p>LaptopLander uses essential browser storage for site operation. Optional analytics are disabled until you choose “Allow analytics”.</p>
 <p>If you consent, LaptopLander records first-party usage events such as page views, deal impressions, deal clicks, evidence views and filter changes, and loads Google Analytics. No advertising cookies are enabled by LaptopLander.</p>
 <p>If you choose “No thanks”, Google Analytics is not loaded and LaptopLander does not send its optional first-party analytics events.</p>
-<p>Your analytics choice is stored in your browser so the site can remember it.</p>
+<p>First-party analytics events are retained for 30 days. Google Analytics is provided by Google and processes analytics data when you consent.</p>
+<p>Your analytics choice is stored in your browser so the site can remember it. You can withdraw consent using “Change analytics choice” in the site footer.</p>
+<p>The site operator and contact details should be added here before treating this as a complete privacy notice.</p>
 <p><a href="/">Back to LaptopLander</a></p>
 </body></html>""")
             return
@@ -16881,20 +16830,22 @@ class DashboardHandler(
                 )[0]
             )
 
-            if not item_id:
+            if not re.fullmatch(r"v1\|\d{9,15}\|\d+", item_id or ""):
                 self._send_html_fragment(
-                    "<div class='small'>"
-                    "Missing listing ID."
-                    "</div>",
+                    "<div class='small'>Invalid listing ID.</div>",
                     status=400,
                 )
                 return
-
-            self._send_html_fragment(
-                _cached_valuation_evidence_html(
-                    item_id
+            try:
+                fragment = _cached_valuation_evidence_html(item_id)
+            except Exception as exc:
+                print("valuation evidence error:", repr(exc), flush=True)
+                self._send_html_fragment(
+                    "<div class='small'>Valuation evidence is temporarily unavailable.</div>",
+                    status=500,
                 )
-            )
+                return
+            self._send_html_fragment(fragment)
             return
 
         if path == "/live-deals":
@@ -17387,25 +17338,14 @@ def _dashboard_health_alert():
         )
 
     alert_html = ""
-
     if problems:
-        items = "".join(
-            "<li>"
-            + html.escape(problem)
-            + "</li>"
-            for problem in problems
-        )
-
         alert_html = (
-            "<div id='system-health-alert' "
-            "class='system-health-alert'>"
-            "<strong>SYSTEM HEALTH ALERT</strong>"
-            "<ul>"
-            + items
-            + "</ul>"
+            "<div id='system-health-alert' class='system-health-alert'>"
+            "<strong>SOME DATA MAY BE DELAYED</strong>"
+            "<div>Some LaptopLander data sources are temporarily unavailable. "
+            "Existing deals remain available while background processing recovers.</div>"
             "</div>"
         )
-
     return notice_html + alert_html
 
 
@@ -18480,6 +18420,13 @@ def dashboard_html():
         else:
             page = health + page
 
+    privacy_footer = (
+        "<footer style='margin:28px 0 8px;text-align:center;font-size:12px;color:#667085'>"
+        "<a href='/privacy'>Privacy notice</a> · "
+        "<a href='#' onclick='window.llChangeAnalyticsChoice();return false'>Change analytics choice</a>"
+        "</footer>"
+    )
+
     analytics_script = r"""
 <!-- Analytics code is inert until the visitor explicitly opts in. -->
 <script>
@@ -18610,6 +18557,16 @@ def dashboard_html():
         catch (e) { return ""; }
     }
 
+    function clearAnalyticsCookies() {
+        document.cookie.split(";").forEach((part) => {
+            const name = part.split("=")[0].trim();
+            if (name === "_ga" || name.indexOf("_ga_") === 0) {
+                document.cookie = name + "=; Max-Age=0; path=/; SameSite=Lax";
+                document.cookie = name + "=; Max-Age=0; path=/; domain=" + location.hostname + "; SameSite=Lax";
+            }
+        });
+    }
+
     function setConsent(value) {
         try { localStorage.setItem(consentKey, value); } catch (e) {}
         const banner = document.getElementById("ll-consent");
@@ -18640,6 +18597,12 @@ def dashboard_html():
         document.getElementById("ll-consent-yes").onclick = () => setConsent("yes");
         document.getElementById("ll-consent-no").onclick = () => setConsent("no");
     }
+
+    window.llChangeAnalyticsChoice = function () {
+        try { localStorage.removeItem(consentKey); } catch (e) {}
+        clearAnalyticsCookies();
+        location.reload();
+    };
 
     const choice = consentValue();
     if (choice === "yes") enableAnalytics();
@@ -18872,6 +18835,8 @@ def dashboard_html():
         page = page.replace(
             "</body>",
             _DASHBOARD_UI_ENHANCEMENT
+            + "\n"
+            + privacy_footer
             + "\n"
             + analytics_script
             + "\n"
