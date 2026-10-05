@@ -14053,101 +14053,101 @@ def _dashboard_html_base():
 
 
         /* v0.10.42: intentionally simple public deal list. */
-        .deal-section table {
+        .deal-section table {{
             table-layout: fixed;
-        }
+        }}
 
         .deal-section th:nth-child(1),
-        .deal-section td:nth-child(1) {
+        .deal-section td:nth-child(1) {{
             width: 58%;
             text-align: left;
-        }
+        }}
 
         .deal-section th:nth-child(2),
-        .deal-section td:nth-child(2) {
+        .deal-section td:nth-child(2) {{
             width: 12%;
             text-align: right;
             white-space: nowrap;
-        }
+        }}
 
         .deal-section th:nth-child(3),
-        .deal-section td:nth-child(3) {
+        .deal-section td:nth-child(3) {{
             width: 14%;
             text-align: right;
             white-space: nowrap;
-        }
+        }}
 
         .deal-section th:nth-child(4),
-        .deal-section td:nth-child(4) {
+        .deal-section td:nth-child(4) {{
             width: 16%;
             text-align: right;
             white-space: nowrap;
-        }
+        }}
 
         .deal-section th:nth-child(n+5),
-        .deal-section td:nth-child(n+5) {
+        .deal-section td:nth-child(n+5) {{
             display: none !important;
-        }
+        }}
 
-        .listing-simple {
+        .listing-simple {{
             display: grid;
             grid-template-columns: 74px minmax(0,1fr);
             align-items: center;
             gap: 12px;
-        }
+        }}
 
         .listing-simple-image .product-thumb-link,
-        .listing-simple-image .product-thumb-placeholder {
+        .listing-simple-image .product-thumb-placeholder {{
             width: 68px;
             height: 68px;
-        }
+        }}
 
-        .listing-simple-copy {
+        .listing-simple-copy {{
             min-width: 0;
-        }
+        }}
 
-        .full-report-link {
+        .full-report-link {{
             display: inline-block;
             margin-top: 5px;
             color: #155eef;
             font-size: 12px;
             font-weight: 800;
             text-decoration: none;
-        }
+        }}
 
-        .normal-price strong {
+        .normal-price strong {{
             color: #172033;
             font-size: 15px;
-        }
+        }}
 
-        .normal-saving {
+        .normal-saving {{
             margin-top: 3px;
             color: #15803d;
             font-weight: 800;
-        }
+        }}
 
-        .auction-current-note {
+        .auction-current-note {{
             margin-top: 3px;
             color: #b45309;
             white-space: normal;
-        }
+        }}
 
-        @media (max-width: 700px) {
+        @media (max-width: 700px) {{
             .deal-section table,
-            .deal-section tbody {
+            .deal-section tbody {{
                 display: block;
-            }
+            }}
 
-            .deal-section thead {
+            .deal-section thead {{
                 display: none;
-            }
+            }}
 
-            .deal-section tbody {
+            .deal-section tbody {{
                 display: grid;
                 gap: 10px;
-            }
+            }}
 
-            .deal-section tbody tr {
+            .deal-section tbody tr {{
                 display: grid;
                 grid-template-columns: minmax(0,1fr) auto;
                 grid-template-areas:
@@ -14159,38 +14159,38 @@ def _dashboard_html_base():
                 border: 1px solid rgba(15,23,42,.08);
                 border-radius: 14px;
                 background: #fff;
-            }
+            }}
 
-            .deal-section tbody td {
+            .deal-section tbody td {{
                 display: block !important;
                 width: auto !important;
                 padding: 0 !important;
                 border: 0 !important;
-            }
+            }}
 
-            .deal-section tbody td:nth-child(1) {
+            .deal-section tbody td:nth-child(1) {{
                 grid-area: listing;
-            }
+            }}
 
-            .deal-section tbody td:nth-child(2) {
+            .deal-section tbody td:nth-child(2) {{
                 grid-area: age;
                 text-align: left !important;
                 color: #667085;
                 font-size: 12px;
-            }
+            }}
 
-            .deal-section tbody td:nth-child(3) {
+            .deal-section tbody td:nth-child(3) {{
                 grid-area: price;
                 text-align: left !important;
                 font-size: 18px;
-            }
+            }}
 
-            .deal-section tbody td:nth-child(4) {
+            .deal-section tbody td:nth-child(4) {{
                 grid-area: normal;
                 text-align: right !important;
-            }
+            }}
 
-            .deal-section tbody td:nth-child(3)::before {
+            .deal-section tbody td:nth-child(3)::before {{
                 content: "Price inc. delivery";
                 display: block;
                 margin-bottom: 2px;
@@ -14199,9 +14199,9 @@ def _dashboard_html_base():
                 font-weight: 800;
                 text-transform: uppercase;
                 letter-spacing: .04em;
-            }
+            }}
 
-            .deal-section tbody td:nth-child(4)::before {
+            .deal-section tbody td:nth-child(4)::before {{
                 content: "Normally sells for";
                 display: block;
                 margin-bottom: 2px;
@@ -14210,18 +14210,18 @@ def _dashboard_html_base():
                 font-weight: 800;
                 text-transform: uppercase;
                 letter-spacing: .04em;
-            }
+            }}
 
-            .listing-simple {
+            .listing-simple {{
                 grid-template-columns: 72px minmax(0,1fr);
-            }
+            }}
 
             .listing-simple-image .product-thumb-link,
-            .listing-simple-image .product-thumb-placeholder {
+            .listing-simple-image .product-thumb-placeholder {{
                 width: 68px !important;
                 height: 68px !important;
-            }
-        }
+            }}
+        }}
 
 </style>
     </head>
