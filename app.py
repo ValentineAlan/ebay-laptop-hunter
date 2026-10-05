@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.33"
+APP_VERSION = "0.10.30"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -11355,30 +11355,11 @@ def _dashboard_html_base():
 
     return f"""
     <!doctype html>
-    <html lang="en-GB">
+    <html>
     <head>
+    <link rel="icon" href="/favicon.ico" type="image/svg+xml">
         <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Find Cheap Laptops UK &amp; Used Laptop Deals | LaptopLander</title>
-        <meta name="description" content="Find cheap laptops and genuine laptop bargains on eBay UK. LaptopLander compares listings with recent sold prices to identify underpriced used laptops. We find the deals; you buy directly from the seller.">
-        <meta name="robots" content="index,follow,max-image-preview:large">
-        <link rel="canonical" href="https://laptoplander.com/">
-        <link rel="icon" href="/favicon.ico" type="image/svg+xml">
-        <meta property="og:type" content="website">
-        <meta property="og:site_name" content="LaptopLander">
-        <meta property="og:title" content="Find Cheap Laptops UK &amp; Used Laptop Deals | LaptopLander">
-        <meta property="og:description" content="LaptopLander finds cheap and underpriced laptops on eBay UK by comparing listings with recent sold prices. We find the deals; you buy from the seller.">
-        <meta property="og:url" content="https://laptoplander.com/">
-        <meta name="twitter:card" content="summary">
-        <meta name="twitter:title" content="Find Cheap Laptops UK &amp; Used Laptop Deals | LaptopLander">
-        <meta name="twitter:description" content="Find genuinely good-value cheap laptops on eBay UK using recent sold-price evidence.">
-        <script type="application/ld+json">{json.dumps({
-            "@context": "https://schema.org",
-            "@type": "WebSite",
-            "name": "LaptopLander",
-            "url": "https://laptoplander.com/",
-            "description": "LaptopLander helps UK buyers find cheap and underpriced used laptops by comparing eBay listings with recent sold prices."
-        }, separators=(",", ":"))}</script>
+        <title>Laptop Lander</title>
         <style>{CSS}</style>
     </head>
 
@@ -11401,25 +11382,18 @@ def _dashboard_html_base():
             <div class="hero-brand">
                 <a href="/"
            class="public-logo"
-           aria-label="LaptopLander home">
+           aria-label="Laptop Lander home">
             <img
                 src="data:image/webp;base64,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"
                 alt=""
                 class="public-logo-image">
         </a>
 
-                <h1>LaptopLander</h1>
+                <h1>Laptop Lander</h1>
             </div>
 
             <p class="hero-subtitle">
-                Find cheap laptops that are actually good deals.
-            </p>
-
-            <p class="hero-intro">
-                LaptopLander doesn't sell laptops. We find underpriced used laptops
-                on eBay UK and compare them with recent sold prices, so you can see
-                which cheap laptops are genuinely good value.
-                <strong>We find the deals. You buy directly from the seller.</strong>
+                Find underpriced laptops on eBay UK.
             </p>
 
             <div class="hero-benefits">
@@ -11958,14 +11932,6 @@ def _dashboard_html_base():
 
                 font-size: 18px;
             }}
-
-            .hero-intro {
-                max-width: 720px;
-                margin: 10px 0 18px;
-                color: #475467;
-                font-size: 15px;
-                line-height: 1.55;
-            }
 
             .hero-benefits {{
                 grid-template-columns: 1fr;
@@ -13798,238 +13764,6 @@ def _dashboard_html_base():
 
 
 
-SEO_LANDING_PAGES = {
-    "/cheap-laptops": {
-        "title": "Find Cheap Laptops UK – Genuine Used Laptop Deals | LaptopLander",
-        "h1": "Find Cheap Laptops That Are Actually Good Deals",
-        "description": "Find cheap laptops on eBay UK that are genuinely good value. LaptopLander compares current used laptop listings with recent sold prices; we find the deals, you buy from the seller.",
-        "intro": (
-            "Looking for a cheap laptop should not mean guessing whether the price is good. "
-            "LaptopLander searches current eBay UK listings and compares them with recent sold-price evidence "
-            "to highlight underpriced used laptops. LaptopLander does not sell laptops: we find the deals, "
-            "and you buy directly from the seller."
-        ),
-        "max_price": None,
-    },
-    "/used-laptops": {
-        "title": "Used Laptops UK – Find Underpriced Laptop Deals | LaptopLander",
-        "h1": "Find Good-Value Used Laptops in the UK",
-        "description": "Find underpriced used laptops on eBay UK. LaptopLander compares live listings with recent sold prices to help you identify genuine second-hand laptop deals.",
-        "intro": (
-            "LaptopLander helps UK buyers find good-value used laptops by comparing live eBay listings with "
-            "recent prices for similar laptops that actually sold. We are a deal-finding service, not a laptop "
-            "retailer, so purchases are made directly from the listing seller."
-        ),
-        "max_price": None,
-    },
-    "/laptops-under-200": {
-        "title": "Best Laptop Deals Under £200 UK | LaptopLander",
-        "h1": "Find Laptop Deals Under £200",
-        "description": "Find used laptops under £200 on eBay UK that LaptopLander identifies as underpriced using recent sold-price evidence. We find the deals; you buy from the seller.",
-        "intro": (
-            "These are current used-laptop deals with a delivered price of £200 or less that also pass "
-            "LaptopLander's valuation checks. A low price alone is not enough: the listing must look underpriced "
-            "against recent sold evidence. LaptopLander does not sell these laptops; you buy directly from the seller."
-        ),
-        "max_price": 200.0,
-    },
-    "/laptops-under-300": {
-        "title": "Best Laptop Deals Under £300 UK | LaptopLander",
-        "h1": "Find Laptop Deals Under £300",
-        "description": "Find used laptops under £300 on eBay UK that are genuinely good value. LaptopLander compares listings with recent sold prices to identify underpriced deals.",
-        "intro": (
-            "Browse current used-laptop deals with a delivered price of £300 or less. LaptopLander checks them "
-            "against recent sold-price evidence so this page focuses on value, not simply the cheapest listings. "
-            "We find the deals; you buy directly from the eBay seller."
-        ),
-        "max_price": 300.0,
-    },
-}
-
-
-SEO_BRAND_PAGES = {
-    "/cheap-lenovo-laptops": {
-        "brand": "Lenovo",
-        "title": "Find Cheap Lenovo Laptops & ThinkPad Deals UK | LaptopLander",
-        "h1": "Find Cheap Lenovo Laptop Deals",
-        "description": "Find cheap Lenovo laptops and used ThinkPad deals on eBay UK. LaptopLander compares current listings with recent sold prices to identify genuine bargains.",
-        "intro": "Find underpriced used Lenovo laptops, including ThinkPad and IdeaPad models. LaptopLander compares current eBay UK listings with recent sold-price evidence. We find the deals; you buy directly from the seller.",
-    },
-    "/cheap-thinkpads": {
-        "brand": "Lenovo",
-        "model_prefix": "ThinkPad",
-        "title": "Find Cheap ThinkPads & Used Lenovo ThinkPad Deals UK | LaptopLander",
-        "h1": "Find Cheap ThinkPad Deals",
-        "description": "Find cheap ThinkPads and used Lenovo ThinkPad deals on eBay UK. LaptopLander uses recent sold prices to identify underpriced ThinkPad listings.",
-        "intro": "Looking for a cheap ThinkPad? LaptopLander checks current Lenovo ThinkPad listings against recent sold-price evidence to identify laptops that are genuinely underpriced, rather than merely low priced. We do not sell the laptops; you buy from the eBay seller.",
-    },
-    "/cheap-dell-laptops": {
-        "brand": "Dell",
-        "title": "Find Cheap Dell Laptops & Used Dell Deals UK | LaptopLander",
-        "h1": "Find Cheap Dell Laptop Deals",
-        "description": "Find cheap Dell laptops on eBay UK, including Latitude, XPS and Precision deals. LaptopLander compares listings with recent sold prices to find genuine value.",
-        "intro": "LaptopLander finds underpriced used Dell laptops by comparing current eBay UK listings with recent sold prices. Browse Latitude, XPS, Precision and other Dell deals without mistaking a low asking price for good value.",
-    },
-    "/dell-latitude-deals": {
-        "brand": "Dell",
-        "model_prefix": "Latitude",
-        "title": "Used Dell Latitude Deals UK – Find Cheap Latitudes | LaptopLander",
-        "h1": "Find Used Dell Latitude Deals",
-        "description": "Find used Dell Latitude deals and cheap Latitude laptops on eBay UK. LaptopLander compares live listings with recent sold prices to identify underpriced machines.",
-        "intro": "Browse current Dell Latitude listings that LaptopLander identifies as underpriced against recent sold-price evidence. LaptopLander is a deal finder, not a laptop retailer; purchases are made directly from the seller.",
-    },
-    "/cheap-hp-laptops": {
-        "brand": "HP",
-        "title": "Find Cheap HP Laptops & Used HP Deals UK | LaptopLander",
-        "h1": "Find Cheap HP Laptop Deals",
-        "description": "Find cheap HP laptops on eBay UK, including EliteBook and ProBook deals. LaptopLander compares current listings with recent sold prices to identify genuine value.",
-        "intro": "LaptopLander finds underpriced used HP laptops by comparing current eBay UK listings with recent sold-price evidence. We find the deals; you buy directly from the seller.",
-    },
-    "/hp-elitebook-deals": {
-        "brand": "HP",
-        "model_prefix": "EliteBook",
-        "title": "Used HP EliteBook Deals UK – Find Cheap EliteBooks | LaptopLander",
-        "h1": "Find Used HP EliteBook Deals",
-        "description": "Find used HP EliteBook deals and cheap EliteBook laptops on eBay UK. LaptopLander uses recent sold prices to identify underpriced listings.",
-        "intro": "Browse HP EliteBook listings that LaptopLander identifies as good value using recent sold-price evidence. LaptopLander does not sell the laptops; you buy directly from the listing seller.",
-    },
-    "/surface-pro-deals": {
-        "brand": "Microsoft",
-        "model_prefix": "Surface Pro",
-        "title": "Used Microsoft Surface Pro Deals UK | LaptopLander",
-        "h1": "Find Used Surface Pro Deals",
-        "description": "Find used Microsoft Surface Pro deals on eBay UK. LaptopLander compares current Surface Pro listings with recent sold prices to identify underpriced devices.",
-        "intro": "Find good-value used Microsoft Surface Pro listings using LaptopLander's recent sold-price evidence. We identify the deals; purchases are made directly from the eBay seller.",
-    },
-}
-
-SEO_LANDING_PAGES.update(SEO_BRAND_PAGES)
-
-
-def seo_landing_html(path):
-    config = SEO_LANDING_PAGES.get(path)
-    if not config:
-        return None
-
-    cutoff = (utcnow() - timedelta(days=SOLD_CACHE_MAX_AGE_DAYS)).isoformat()
-    conn = connect_db()
-    sql = """
-        SELECT *
-        FROM listings
-        WHERE COALESCE(active, 1)=1
-          AND estimated_value IS NOT NULL
-          AND undervaluation_gbp >= ?
-          AND undervaluation_pct >= ?
-          AND valuation_basis LIKE 'SOLD_%'
-          AND valuation_evidence_at >= ?
-    """
-    params = [MIN_UNDERVALUE_GBP, MIN_UNDERVALUE_PCT, cutoff]
-    if config.get("max_price") is not None:
-        sql += " AND total IS NOT NULL AND total <= ?"
-        params.append(config["max_price"])
-    if config.get("brand"):
-        sql += " AND LOWER(brand)=LOWER(?)"
-        params.append(config["brand"])
-    if config.get("model_prefix"):
-        sql += " AND LOWER(model) LIKE LOWER(?)"
-        params.append(config["model_prefix"] + "%")
-    sql += " ORDER BY deal_score DESC, undervaluation_gbp DESC LIMIT 100"
-    rows = conn.execute(sql, tuple(params)).fetchall()
-    conn.close()
-
-    cards = []
-    for row in rows:
-        title = html.escape(row["title"] or "Used laptop")
-        url = html.escape(row["url"] or "#", quote=True)
-        identity = " ".join(x for x in (row["brand"], row["model"]) if x)
-        specs = [identity] if identity else []
-        if row["cpu"]:
-            specs.append(str(row["cpu"]))
-        if row["ram_gb"]:
-            specs.append(f'{row["ram_gb"]}GB RAM')
-        if row["storage_gb"]:
-            specs.append(f'{row["storage_gb"]}GB storage')
-        spec = html.escape(" · ".join(specs))
-        total = money(row["total"])
-        value = money(row["estimated_value"])
-        saving = money(row["undervaluation_gbp"])
-        pct = row["undervaluation_pct"]
-        pct_text = f"{float(pct):.0f}%" if pct is not None else ""
-        cards.append(
-            "<article class='seo-deal'>"
-            f"<h2><a href='{url}' rel='nofollow sponsored'>{title}</a></h2>"
-            f"<p class='seo-spec'>{spec}</p>"
-            f"<p><strong>{total}</strong> delivered · estimated value {value} · "
-            f"<strong>{saving} ({pct_text}) under value</strong></p>"
-            "<p class='seo-source'>Purchase is from the eBay seller, not LaptopLander.</p>"
-            "</article>"
-        )
-
-    deals_html = "".join(cards) if cards else (
-        "<p>No qualifying deals are currently available in this category. "
-        "LaptopLander continually checks new listings, so this page changes as deals appear and end.</p>"
-    )
-    canonical = "https://laptoplander.com" + path
-    structured = json.dumps({
-        "@context": "https://schema.org",
-        "@type": "CollectionPage",
-        "name": config["h1"],
-        "url": canonical,
-        "description": config["description"],
-        "isPartOf": {"@type": "WebSite", "name": "LaptopLander", "url": "https://laptoplander.com/"}
-    }, separators=(",", ":"))
-
-    return f"""<!doctype html>
-<html lang="en-GB">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{html.escape(config["title"])}</title>
-<meta name="description" content="{html.escape(config["description"], quote=True)}">
-<meta name="robots" content="index,follow,max-image-preview:large">
-<link rel="canonical" href="{canonical}">
-<link rel="icon" href="/favicon.ico" type="image/svg+xml">
-<meta property="og:type" content="website">
-<meta property="og:site_name" content="LaptopLander">
-<meta property="og:title" content="{html.escape(config["title"], quote=True)}">
-<meta property="og:description" content="{html.escape(config["description"], quote=True)}">
-<meta property="og:url" content="{canonical}">
-<script type="application/ld+json">{structured}</script>
-<style>
-body{{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f7f9fc;color:#172033}}
-main{{max-width:1040px;margin:auto;padding:32px 20px 60px}}
-nav{{margin-bottom:30px}} nav a{{color:#1769e0;text-decoration:none;font-weight:700}}
-h1{{font-size:clamp(30px,5vw,48px);line-height:1.05;margin:0 0 14px}}
-.lead{{max-width:820px;font-size:17px;line-height:1.65;color:#475467}}
-.deal-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-top:28px}}
-.seo-deal{{background:white;border:1px solid #e4e7ec;border-radius:14px;padding:18px;box-shadow:0 2px 8px rgba(16,24,40,.04)}}
-.seo-deal h2{{font-size:17px;line-height:1.35;margin:0 0 9px}}
-.seo-deal h2 a{{color:#172033;text-decoration:none}} .seo-deal h2 a:hover{{text-decoration:underline}}
-.seo-deal p{{line-height:1.5;margin:7px 0}} .seo-spec,.seo-source{{font-size:13px;color:#667085}}
-.related{{margin-top:34px;padding-top:22px;border-top:1px solid #e4e7ec}} .related a{{margin-right:16px;color:#1769e0}}
-footer{{margin-top:40px;font-size:12px;color:#667085}}
-</style>
-</head>
-<body><main>
-<nav><a href="/">← LaptopLander live deals</a></nav>
-<h1>{html.escape(config["h1"])}</h1>
-<p class="lead">{html.escape(config["intro"])}</p>
-<div class="deal-grid">{deals_html}</div>
-<section class="related">
-<h2>Find more laptop deals</h2>
-<p><a href="/cheap-laptops">Cheap laptops</a>
-<a href="/used-laptops">Used laptops</a>
-<a href="/laptops-under-200">Laptops under £200</a>
-<a href="/laptops-under-300">Laptops under £300</a>
-<a href="/cheap-thinkpads">ThinkPad deals</a>
-<a href="/dell-latitude-deals">Dell Latitude deals</a>
-<a href="/hp-elitebook-deals">HP EliteBook deals</a>
-<a href="/surface-pro-deals">Surface Pro deals</a></p>
-</section>
-<footer><a href="/privacy">Privacy notice</a> · LaptopLander is a deal finder, not a laptop seller.</footer>
-</main></body></html>"""
-
-
 def _site_nav(active="deals"):
     links = (
         ("deals", "/", "Deals"),
@@ -15207,7 +14941,7 @@ def diagnostics_html():
     <meta charset="utf-8">
     <meta http-equiv="refresh" content="60">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Laptop Lander Diagnostics</title>\n<meta name="robots" content="noindex,nofollow">
+    <title>Laptop Lander Diagnostics</title>
 
     <style>
         * {{
@@ -16039,7 +15773,7 @@ def analytics_html():
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Laptop Lander Analytics</title>\n<meta name="robots" content="noindex,nofollow">
+<title>Laptop Lander Analytics</title>
 <style>
 body{{font-family:Inter,system-ui,sans-serif;background:#f4f7fb;color:#172033;margin:0;padding:28px}}
 .wrap{{max-width:1250px;margin:auto}}
@@ -16141,7 +15875,7 @@ def _settings_login_html(message=""):
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Laptop Lander Settings Login</title>\n<meta name="robots" content="noindex,nofollow">
+<title>Laptop Lander Settings Login</title>
 <style>
 body{{font-family:Inter,system-ui,sans-serif;background:#f4f7fb;color:#172033;margin:0}}
 .box{{max-width:430px;margin:10vh auto;background:white;padding:28px;border-radius:16px;box-shadow:0 8px 28px rgba(16,24,40,.10)}}
@@ -16270,7 +16004,7 @@ def settings_html(csrf, message="", regex_result=""):
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Laptop Lander Settings</title>\n<meta name="robots" content="noindex,nofollow">
+<title>Laptop Lander Settings</title>
 <style>
 *{{box-sizing:border-box}} body{{margin:0;background:#f4f7fb;color:#172033;font-family:Inter,system-ui,sans-serif}}
 .page{{max-width:1450px;margin:0 auto;padding:22px}} .top{{display:flex;justify-content:space-between;gap:20px;align-items:flex-start}}
@@ -17019,50 +16753,6 @@ class DashboardHandler(
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
 
-        if path == "/robots.txt":
-            body = (
-                "User-agent: *\n"
-                "Allow: /\n"
-                "Disallow: /settings\n"
-                "Disallow: /analytics\n"
-                "Disallow: /diagnostics\n"
-                "Disallow: /valuation-evidence\n"
-                "Disallow: /live-deals\n"
-                "Sitemap: https://laptoplander.com/sitemap.xml\n"
-            ).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "public, max-age=3600")
-            self.end_headers()
-            self.wfile.write(body)
-            return
-
-        if path == "/sitemap.xml":
-            body = b"""<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url><loc>https://laptoplander.com/</loc><changefreq>hourly</changefreq><priority>1.0</priority></url>
-  <url><loc>https://laptoplander.com/cheap-laptops</loc><changefreq>hourly</changefreq><priority>0.9</priority></url>
-  <url><loc>https://laptoplander.com/used-laptops</loc><changefreq>hourly</changefreq><priority>0.9</priority></url>
-  <url><loc>https://laptoplander.com/laptops-under-200</loc><changefreq>hourly</changefreq><priority>0.8</priority></url>
-  <url><loc>https://laptoplander.com/laptops-under-300</loc><changefreq>hourly</changefreq><priority>0.8</priority></url>
-  <url><loc>https://laptoplander.com/cheap-lenovo-laptops</loc><changefreq>hourly</changefreq><priority>0.8</priority></url>
-  <url><loc>https://laptoplander.com/cheap-thinkpads</loc><changefreq>hourly</changefreq><priority>0.9</priority></url>
-  <url><loc>https://laptoplander.com/cheap-dell-laptops</loc><changefreq>hourly</changefreq><priority>0.8</priority></url>
-  <url><loc>https://laptoplander.com/dell-latitude-deals</loc><changefreq>hourly</changefreq><priority>0.9</priority></url>
-  <url><loc>https://laptoplander.com/cheap-hp-laptops</loc><changefreq>hourly</changefreq><priority>0.8</priority></url>
-  <url><loc>https://laptoplander.com/hp-elitebook-deals</loc><changefreq>hourly</changefreq><priority>0.9</priority></url>
-  <url><loc>https://laptoplander.com/surface-pro-deals</loc><changefreq>hourly</changefreq><priority>0.8</priority></url>
-  <url><loc>https://laptoplander.com/privacy</loc><changefreq>monthly</changefreq><priority>0.2</priority></url>
-</urlset>"""
-            self.send_response(200)
-            self.send_header("Content-Type", "application/xml; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "public, max-age=3600")
-            self.end_headers()
-            self.wfile.write(body)
-            return
-
         if path == "/favicon.ico":
             # Tiny embedded SVG favicon: LaptopLander "L".
             favicon = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="12" fill="#111827"/><path d="M18 14h10v27h20v9H18z" fill="white"/></svg>"""
@@ -17095,10 +16785,7 @@ class DashboardHandler(
         if path == "/privacy":
             self._send_html("""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Privacy Notice | LaptopLander</title>
-<meta name="robots" content="index,follow">
-<link rel="canonical" href="https://laptoplander.com/privacy">
-</head>
+<title>LaptopLander privacy notice</title></head>
 <body style="font-family:system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 20px;line-height:1.55;color:#172033">
 <h1>Privacy notice</h1>
 <p>LaptopLander uses essential browser storage for site operation. Optional analytics are disabled until you choose “Allow analytics”.</p>
@@ -17173,10 +16860,6 @@ class DashboardHandler(
             self._send_json({
                 "deal_ids": _cached_live_deal_ids(),
             })
-            return
-
-        if path in SEO_LANDING_PAGES:
-            self._send_html(seo_landing_html(path))
             return
 
         if path in ("/", "/index.html"):
@@ -18734,15 +18417,6 @@ def dashboard_html():
 
     privacy_footer = (
         "<footer style='margin:28px 0 8px;text-align:center;font-size:12px;color:#667085'>"
-        "<div style='margin-bottom:8px'>"
-        "<a href='/cheap-laptops'>Cheap laptops</a> · "
-        "<a href='/used-laptops'>Used laptops</a> · "
-        "<a href='/laptops-under-200'>Laptops under £200</a> · "
-        "<a href='/laptops-under-300'>Laptops under £300</a> · "
-        "<a href='/cheap-thinkpads'>ThinkPad deals</a> · "
-        "<a href='/dell-latitude-deals'>Dell Latitude deals</a> · "
-        "<a href='/hp-elitebook-deals'>HP EliteBook deals</a>"
-        "</div>"
         "<a href='/privacy'>Privacy notice</a> · "
         "<a href='#' onclick='window.llChangeAnalyticsChoice();return false'>Change analytics choice</a>"
         "</footer>"
