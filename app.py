@@ -9716,6 +9716,9 @@ def revalue_all(conn, batch_size=50):
                 valuation[
                     "basis"
                 ],
+                valuation.get(
+                    "evidence_at"
+                ),
                 row["item_id"]
             ))
 
@@ -9734,7 +9737,8 @@ def revalue_all(conn, batch_size=50):
                 undervaluation_gbp=?,
                 undervaluation_pct=?,
                 deal_score=?,
-                valuation_basis=?
+                valuation_basis=?,
+                valuation_evidence_at=?
             WHERE item_id=?
         """, updates)
 
