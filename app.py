@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.32"
+APP_VERSION = "0.10.33"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -13847,6 +13847,65 @@ SEO_LANDING_PAGES = {
 }
 
 
+SEO_BRAND_PAGES = {
+    "/cheap-lenovo-laptops": {
+        "brand": "Lenovo",
+        "title": "Find Cheap Lenovo Laptops & ThinkPad Deals UK | LaptopLander",
+        "h1": "Find Cheap Lenovo Laptop Deals",
+        "description": "Find cheap Lenovo laptops and used ThinkPad deals on eBay UK. LaptopLander compares current listings with recent sold prices to identify genuine bargains.",
+        "intro": "Find underpriced used Lenovo laptops, including ThinkPad and IdeaPad models. LaptopLander compares current eBay UK listings with recent sold-price evidence. We find the deals; you buy directly from the seller.",
+    },
+    "/cheap-thinkpads": {
+        "brand": "Lenovo",
+        "model_prefix": "ThinkPad",
+        "title": "Find Cheap ThinkPads & Used Lenovo ThinkPad Deals UK | LaptopLander",
+        "h1": "Find Cheap ThinkPad Deals",
+        "description": "Find cheap ThinkPads and used Lenovo ThinkPad deals on eBay UK. LaptopLander uses recent sold prices to identify underpriced ThinkPad listings.",
+        "intro": "Looking for a cheap ThinkPad? LaptopLander checks current Lenovo ThinkPad listings against recent sold-price evidence to identify laptops that are genuinely underpriced, rather than merely low priced. We do not sell the laptops; you buy from the eBay seller.",
+    },
+    "/cheap-dell-laptops": {
+        "brand": "Dell",
+        "title": "Find Cheap Dell Laptops & Used Dell Deals UK | LaptopLander",
+        "h1": "Find Cheap Dell Laptop Deals",
+        "description": "Find cheap Dell laptops on eBay UK, including Latitude, XPS and Precision deals. LaptopLander compares listings with recent sold prices to find genuine value.",
+        "intro": "LaptopLander finds underpriced used Dell laptops by comparing current eBay UK listings with recent sold prices. Browse Latitude, XPS, Precision and other Dell deals without mistaking a low asking price for good value.",
+    },
+    "/dell-latitude-deals": {
+        "brand": "Dell",
+        "model_prefix": "Latitude",
+        "title": "Used Dell Latitude Deals UK – Find Cheap Latitudes | LaptopLander",
+        "h1": "Find Used Dell Latitude Deals",
+        "description": "Find used Dell Latitude deals and cheap Latitude laptops on eBay UK. LaptopLander compares live listings with recent sold prices to identify underpriced machines.",
+        "intro": "Browse current Dell Latitude listings that LaptopLander identifies as underpriced against recent sold-price evidence. LaptopLander is a deal finder, not a laptop retailer; purchases are made directly from the seller.",
+    },
+    "/cheap-hp-laptops": {
+        "brand": "HP",
+        "title": "Find Cheap HP Laptops & Used HP Deals UK | LaptopLander",
+        "h1": "Find Cheap HP Laptop Deals",
+        "description": "Find cheap HP laptops on eBay UK, including EliteBook and ProBook deals. LaptopLander compares current listings with recent sold prices to identify genuine value.",
+        "intro": "LaptopLander finds underpriced used HP laptops by comparing current eBay UK listings with recent sold-price evidence. We find the deals; you buy directly from the seller.",
+    },
+    "/hp-elitebook-deals": {
+        "brand": "HP",
+        "model_prefix": "EliteBook",
+        "title": "Used HP EliteBook Deals UK – Find Cheap EliteBooks | LaptopLander",
+        "h1": "Find Used HP EliteBook Deals",
+        "description": "Find used HP EliteBook deals and cheap EliteBook laptops on eBay UK. LaptopLander uses recent sold prices to identify underpriced listings.",
+        "intro": "Browse HP EliteBook listings that LaptopLander identifies as good value using recent sold-price evidence. LaptopLander does not sell the laptops; you buy directly from the listing seller.",
+    },
+    "/surface-pro-deals": {
+        "brand": "Microsoft",
+        "model_prefix": "Surface Pro",
+        "title": "Used Microsoft Surface Pro Deals UK | LaptopLander",
+        "h1": "Find Used Surface Pro Deals",
+        "description": "Find used Microsoft Surface Pro deals on eBay UK. LaptopLander compares current Surface Pro listings with recent sold prices to identify underpriced devices.",
+        "intro": "Find good-value used Microsoft Surface Pro listings using LaptopLander's recent sold-price evidence. We identify the deals; purchases are made directly from the eBay seller.",
+    },
+}
+
+SEO_LANDING_PAGES.update(SEO_BRAND_PAGES)
+
+
 def seo_landing_html(path):
     config = SEO_LANDING_PAGES.get(path)
     if not config:
@@ -13865,9 +13924,15 @@ def seo_landing_html(path):
           AND valuation_evidence_at >= ?
     """
     params = [MIN_UNDERVALUE_GBP, MIN_UNDERVALUE_PCT, cutoff]
-    if config["max_price"] is not None:
+    if config.get("max_price") is not None:
         sql += " AND total IS NOT NULL AND total <= ?"
         params.append(config["max_price"])
+    if config.get("brand"):
+        sql += " AND LOWER(brand)=LOWER(?)"
+        params.append(config["brand"])
+    if config.get("model_prefix"):
+        sql += " AND LOWER(model) LIKE LOWER(?)"
+        params.append(config["model_prefix"] + "%")
     sql += " ORDER BY deal_score DESC, undervaluation_gbp DESC LIMIT 100"
     rows = conn.execute(sql, tuple(params)).fetchall()
     conn.close()
@@ -13955,7 +14020,11 @@ footer{{margin-top:40px;font-size:12px;color:#667085}}
 <p><a href="/cheap-laptops">Cheap laptops</a>
 <a href="/used-laptops">Used laptops</a>
 <a href="/laptops-under-200">Laptops under £200</a>
-<a href="/laptops-under-300">Laptops under £300</a></p>
+<a href="/laptops-under-300">Laptops under £300</a>
+<a href="/cheap-thinkpads">ThinkPad deals</a>
+<a href="/dell-latitude-deals">Dell Latitude deals</a>
+<a href="/hp-elitebook-deals">HP EliteBook deals</a>
+<a href="/surface-pro-deals">Surface Pro deals</a></p>
 </section>
 <footer><a href="/privacy">Privacy notice</a> · LaptopLander is a deal finder, not a laptop seller.</footer>
 </main></body></html>"""
@@ -16977,6 +17046,13 @@ class DashboardHandler(
   <url><loc>https://laptoplander.com/used-laptops</loc><changefreq>hourly</changefreq><priority>0.9</priority></url>
   <url><loc>https://laptoplander.com/laptops-under-200</loc><changefreq>hourly</changefreq><priority>0.8</priority></url>
   <url><loc>https://laptoplander.com/laptops-under-300</loc><changefreq>hourly</changefreq><priority>0.8</priority></url>
+  <url><loc>https://laptoplander.com/cheap-lenovo-laptops</loc><changefreq>hourly</changefreq><priority>0.8</priority></url>
+  <url><loc>https://laptoplander.com/cheap-thinkpads</loc><changefreq>hourly</changefreq><priority>0.9</priority></url>
+  <url><loc>https://laptoplander.com/cheap-dell-laptops</loc><changefreq>hourly</changefreq><priority>0.8</priority></url>
+  <url><loc>https://laptoplander.com/dell-latitude-deals</loc><changefreq>hourly</changefreq><priority>0.9</priority></url>
+  <url><loc>https://laptoplander.com/cheap-hp-laptops</loc><changefreq>hourly</changefreq><priority>0.8</priority></url>
+  <url><loc>https://laptoplander.com/hp-elitebook-deals</loc><changefreq>hourly</changefreq><priority>0.9</priority></url>
+  <url><loc>https://laptoplander.com/surface-pro-deals</loc><changefreq>hourly</changefreq><priority>0.8</priority></url>
   <url><loc>https://laptoplander.com/privacy</loc><changefreq>monthly</changefreq><priority>0.2</priority></url>
 </urlset>"""
             self.send_response(200)
@@ -18662,7 +18738,10 @@ def dashboard_html():
         "<a href='/cheap-laptops'>Cheap laptops</a> · "
         "<a href='/used-laptops'>Used laptops</a> · "
         "<a href='/laptops-under-200'>Laptops under £200</a> · "
-        "<a href='/laptops-under-300'>Laptops under £300</a>"
+        "<a href='/laptops-under-300'>Laptops under £300</a> · "
+        "<a href='/cheap-thinkpads'>ThinkPad deals</a> · "
+        "<a href='/dell-latitude-deals'>Dell Latitude deals</a> · "
+        "<a href='/hp-elitebook-deals'>HP EliteBook deals</a>"
         "</div>"
         "<a href='/privacy'>Privacy notice</a> · "
         "<a href='#' onclick='window.llChangeAnalyticsChoice();return false'>Change analytics choice</a>"
