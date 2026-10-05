@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.29"
+APP_VERSION = "0.10.30"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -8085,7 +8085,7 @@ def ordinary_laptop(title, condition="", allow_repairable=False):
     return not re.search(
         r"\b(?:lot(?:\s+of)?\s*\d+|bundle|job\s*lot|\d+\s*[x×]\s*(?:laptops?|Dell|HP|Lenovo)|"
         r"[x×]\s*\d+|\d+\s+laptops?|choose|choice|various|"
-        r"brand new|sealed|warranty|charger only|screen only|keyboard only|"
+        r"brand new|sealed|charger only|screen only|keyboard only|"
         r"replacement|for Dell|for HP|for Lenovo|no ram|no memory)\b|"
         r"\b\d+\s*(?:GB|TB)?\s*(?:/|or)\s*\d+\s*(?:GB|TB)\b", text, re.I
     ) and not is_genuinely_new(condition)
@@ -20717,6 +20717,60 @@ def run_cycle(
 # PERSISTENT LOGGING
 # ============================================================
 
+class RotatingLogWriter:
+    """Line-buffered writer that rotates while the process is running."""
+
+    def __init__(self, path, max_bytes, backups):
+        self.path = path
+        self.max_bytes = max_bytes
+        self.backups = backups
+        self.lock = threading.RLock()
+        self.handle = None
+        self._open()
+
+    def _open(self):
+        self.handle = open(self.path, "a", buffering=1, encoding="utf-8")
+
+    def _rotate_if_needed(self, incoming_bytes=0):
+        try:
+            current = os.path.getsize(self.path) if os.path.exists(self.path) else 0
+        except OSError:
+            current = 0
+        if current + max(0, incoming_bytes) < self.max_bytes:
+            return
+        try:
+            if self.handle is not None:
+                self.handle.flush()
+                self.handle.close()
+            oldest = f"{self.path}.{self.backups}"
+            if os.path.exists(oldest):
+                os.unlink(oldest)
+            for index in range(self.backups - 1, 0, -1):
+                source = f"{self.path}.{index}"
+                target = f"{self.path}.{index + 1}"
+                if os.path.exists(source):
+                    os.replace(source, target)
+            if os.path.exists(self.path):
+                os.replace(self.path, f"{self.path}.1")
+        finally:
+            self._open()
+
+    def write(self, data):
+        if not data:
+            return 0
+        encoded_size = len(data.encode("utf-8", errors="replace"))
+        with self.lock:
+            self._rotate_if_needed(encoded_size)
+            self.handle.write(data)
+            self.handle.flush()
+        return len(data)
+
+    def flush(self):
+        with self.lock:
+            if self.handle is not None:
+                self.handle.flush()
+
+
 class Tee:
     def __init__(self, *streams):
         self.streams = streams
@@ -20747,22 +20801,7 @@ def start_persistent_logging():
         return
     try:
         os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-
-        try:
-            if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) >= LOG_MAX_BYTES:
-                oldest = f"{LOG_FILE}.{LOG_BACKUPS}"
-                if os.path.exists(oldest):
-                    os.unlink(oldest)
-                for index in range(LOG_BACKUPS - 1, 0, -1):
-                    source = f"{LOG_FILE}.{index}"
-                    target = f"{LOG_FILE}.{index + 1}"
-                    if os.path.exists(source):
-                        os.replace(source, target)
-                os.replace(LOG_FILE, f"{LOG_FILE}.1")
-        except OSError as exc:
-            print("Could not rotate persistent log:", repr(exc))
-
-        _log_handle = open(LOG_FILE, "a", buffering=1, encoding="utf-8")
+        _log_handle = RotatingLogWriter(LOG_FILE, LOG_MAX_BYTES, LOG_BACKUPS)
         sys.stdout = Tee(sys.__stdout__, _log_handle)
         sys.stderr = Tee(sys.__stderr__, _log_handle)
     except Exception as exc:
