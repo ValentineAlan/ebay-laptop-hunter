@@ -10773,8 +10773,8 @@ def listing_report_html(item_id):
             row_value(row, "cpu"),
         )
         cpu_mark = (
-            int(benchmark["cpu_mark"])
-            if benchmark and benchmark.get("cpu_mark")
+            int(row_value(benchmark, "cpu_mark"))
+            if benchmark and row_value(benchmark, "cpu_mark")
             else None
         )
         power_per_pound = (
