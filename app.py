@@ -104,7 +104,6 @@ def mark_ebay_rate_limited(seconds=EBAY_429_COOLDOWN_SECONDS):
 
 DB = "/data/hunter.db"
 LOG_FILE = "/data/hunter.log"
-PRODUCT_RESEARCH_LIVE_SID = "/data/ebaysid.current"
 PRODUCT_RESEARCH_REFRESH_REQUEST = "/data/ebaysid.refresh-request"
 PRODUCT_RESEARCH_SESSION_STATE = "/data/product-research-session.json"
 PRODUCT_RESEARCH_HELPER_STATE = "/data/ebaysid-helper-status.json"
@@ -5953,14 +5952,6 @@ def _session_state_update(**changes):
     return state
 
 
-def _read_live_ebaysid():
-    try:
-        value = open(PRODUCT_RESEARCH_LIVE_SID, encoding="utf-8").read().strip()
-        return value or None
-    except OSError:
-        return None
-
-
 def _product_research_invalid_session(raw, modules):
     # Normal Product Research invalid-session response.
     for obj in modules:
@@ -7007,13 +6998,13 @@ def product_research_search(
         # A real Product Research response proves recovery.
         _product_research_close_circuit()
 
-        sid = _read_live_ebaysid()
+        helper_status = _read_json_file(PRODUCT_RESEARCH_HELPER_STATE)
 
         _session_state_update(
             status="WORKING",
             last_checked_at=iso_now(),
             last_success_at=iso_now(),
-            ebaysid_hash=_sid_hash(sid),
+            ebaysid_hash=helper_status.get("ebaysid_hash"),
             last_refresh_source=(
                 "TrueNAS Chromium"
             ),
