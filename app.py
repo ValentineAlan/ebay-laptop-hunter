@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.35"
+APP_VERSION = "0.10.36"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -11009,8 +11009,7 @@ def _dashboard_html_base():
                         {html.escape(spec_text)}
                     </div>
 
-                    <div class="mobile-notes"
-                         aria-label="Listing notes">
+                    <div class="mobile-notes">
                         {
                             notes_html
                             or "<span class='notes-clear'>No notes</span>"
@@ -11045,15 +11044,16 @@ def _dashboard_html_base():
 
                 <td class="money good"
                     data-sort="{row['undervaluation_gbp'] if row['undervaluation_gbp'] is not None else -999999}">
-                    <span class="valuation-hover" tabindex="0">
+                    <div class="valuation-hover" tabindex="0">
                         {under}
                         <span
                             class="valuation-info"
+                            role="img"
                             aria-label="View valuation evidence"
                             title="View valuation evidence"
                         >i</span>
 
-                        <span class="valuation-tooltip">
+                        <div class="valuation-tooltip">
                             <div class="valuation-summary">
                                 <strong>Estimated value:</strong>
                                 {money(row["estimated_value"])}
@@ -11078,8 +11078,8 @@ def _dashboard_html_base():
                             </div>
 
                             {hover_evidence_html}
-                        </span>
-                    </span>
+                        </div>
+                    </div>
                 </td>
 
                 <td data-sort="{row['deal_score'] if row['deal_score'] is not None else -1}">
@@ -17309,8 +17309,7 @@ def _dashboard_health_alert():
     return notice_html + alert_html
 
 
-_DASHBOARD_UI_ENHANCEMENT = r"""
-<style>
+_DASHBOARD_UI_CSS = r"""
 .site-nav {
     display: flex;
     justify-content: flex-end;
@@ -18099,7 +18098,8 @@ tbody td {
     background: #eef2f6;
 }
 
-</style>
+"""
+_DASHBOARD_UI_ENHANCEMENT = r"""
 
 <script>
 document.addEventListener("DOMContentLoaded", () => {
@@ -18790,6 +18790,13 @@ def dashboard_html():
 })();
 </script>
 """
+
+    if "</head>" in page:
+        page = page.replace(
+            "</head>",
+            "<style>\n" + _DASHBOARD_UI_CSS + "\n</style>\n</head>",
+            1,
+        )
 
     if "</body>" in page:
         page = page.replace(
