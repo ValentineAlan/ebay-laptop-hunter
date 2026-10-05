@@ -56,8 +56,8 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.46"
-CLASSIFIER_VERSION = "0.8.5"
+APP_VERSION = "0.10.47"
+CLASSIFIER_VERSION = "0.8.6"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
 IMAGE_BACKFILL_PER_CYCLE = 100
@@ -3232,9 +3232,16 @@ MODEL_PATTERNS = [
     r"[A-Z]{2}\d{2,3}[A-Z]*(?:-[A-Z0-9]+)?\b",
 
     # HP consumer product codes.
-    # Examples: 15s-fq2037na, 15-fc0049na, 14-ce3600na.
+    # Examples: 15s-fq2037na, 15-fc0049na, 14-ce3600na,
+    # 14a-nf0002na, 14-ca050sa.
     r"\b(?:HP\s+)?"
-    r"\d{2}s?-[a-z]{2}\d{4}[a-z]{0,2}\b",
+    r"\d{2}[a-z]?-[a-z]{2}\d{3,4}[a-z]{0,2}\b",
+
+    # HP wildcard platform families frequently used by recyclers/refurbishers.
+    # Keep these as discovery identities only; precision rules below do not
+    # treat xxx families as exact models.
+    r"\b(?:HP\s+)?"
+    r"\d{2}[a-z]?-[a-z]{2}\d?x{2,3}\b",
 
     # Geo machines where a numbered model is explicitly stated.
     r"\bGeoBook\s+[A-Za-z0-9-]+\b",
@@ -3423,6 +3430,15 @@ def precise_model_for_valuation(brand, model):
     if re.match(r"IdeaPad\s+(?:Slim\s+)?[13579](?:\s|$)", value, re.I):
         return False
 
+    # HP wildcard platform identities such as 14-ce3xxx are useful for
+    # discovery but are not exact enough for full-confidence valuation.
+    if re.fullmatch(
+        r"\d{2}[a-z]?-[a-z]{2}\d?x{2,3}",
+        value,
+        re.I,
+    ):
+        return False
+
     # ASUS machine/platform codes are specific when the brand itself is ASUS.
     if (
         normalise(brand).upper() == "ASUS"
@@ -3478,8 +3494,9 @@ def precise_model_for_valuation(brand, model):
         r"^(?:Raider|Stealth|Katana|Pulse|Prestige|Modern)\s+"
         r"[A-Z]{2}\d{2,3}[A-Z]*(?:-[A-Z0-9]+)?$",
 
-        # HP consumer product numbers.
-        r"^\d{2}s?-[a-z]{2}\d{4}[a-z]{0,2}$",
+        # HP consumer product numbers. Wildcard xxx platform families remain
+        # non-exact and are intentionally excluded here.
+        r"^\d{2}[a-z]?-[a-z]{2}\d{3,4}[a-z]{0,2}$",
 
         r"^GeoBook\s+[A-Za-z0-9-]+$",
         r"^GeoFlex\s+\d+[A-Za-z0-9-]*$",
@@ -3500,6 +3517,15 @@ def identify_model(
         [
             "Model",
             "Product Line"
+        ]
+    )
+
+    aspect_mpn = aspect_first(
+        detail,
+        [
+            "MPN",
+            "Manufacturer Part Number",
+            "Part Number",
         ]
     )
 
@@ -3525,6 +3551,26 @@ def identify_model(
         )
         if match:
             return "Galaxy Book " + match.group(0).upper()
+
+    # HP consumer model identifiers are often clearer in the title than in
+    # eBay's Model field. Recover exact SKU-like forms and wildcard platform
+    # families before consulting generic aspects.
+    if brand == "HP":
+        match = re.search(
+            r"\b(\d{2}[a-z]?-[a-z]{2}\d{3,4}[a-z]{0,2})\b",
+            title,
+            re.I,
+        )
+        if match:
+            return match.group(1).lower()
+
+        match = re.search(
+            r"\b(\d{2}[a-z]?-[a-z]{2}\d?x{2,3})\b",
+            title,
+            re.I,
+        )
+        if match:
+            return match.group(1).lower()
 
     # Prefer a recognizable model in title because seller
     # "Model" aspects can sometimes contain generic garbage.
@@ -3573,10 +3619,23 @@ def identify_model(
             aspect_model
         )
 
+        # Manufacturer names and broad HP notebook labels are frequently
+        # misused in eBay's Model field and must never become model identity.
+        if brand == "HP" and value and value.lower() in {
+            "hp",
+            "hewlett packard",
+            "hewlett-packard",
+            "hp notebook",
+            "hp laptop",
+            "notebook",
+            "laptop",
+        }:
+            value = None
+
         # "HP 470", "250", etc. is a family, not a sufficiently precise
         # valuation identity. Require the G-generation where possible.
         if (
-            identify_brand(title, detail) == "HP"
+            brand == "HP"
             and re.fullmatch(
                 r"(?:HP\s+)?(?:240|245|250|255|340|348|430|440|450|455|470)",
                 value or "",
@@ -3598,6 +3657,18 @@ def identify_model(
             }
         ):
             return value
+
+    # HP MPN can be useful when it is itself a real consumer model identifier.
+    # Ignore reseller/asset codes such as TR80002632765.
+    if brand == "HP" and aspect_mpn:
+        mpn = normalise(aspect_mpn)
+        match = re.fullmatch(
+            r"(\d{2}[A-Za-z]?-[A-Za-z]{2}\d{3,4}[A-Za-z]{0,2})",
+            mpn,
+            re.I,
+        )
+        if match:
+            return match.group(1).lower()
 
     return None
 
