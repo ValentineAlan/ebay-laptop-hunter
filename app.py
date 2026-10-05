@@ -11592,7 +11592,7 @@ def _dashboard_html_base():
                 </td>
             </tr>
             """
-        ))
+        )
 
     conn.close()
 
