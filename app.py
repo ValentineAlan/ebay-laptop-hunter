@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.37"
+APP_VERSION = "0.10.38"
 CLASSIFIER_VERSION = "0.8.4"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -8490,6 +8490,39 @@ def exact_spec_identity(row):
         and storage
     )
 
+
+def auction_generation_identity(row):
+    """Conservative auction-only CPU generation fallback."""
+    if not auction_listing(row):
+        return False
+
+    cpu = parse_cpu(
+        row_value(row, "cpu"),
+        "VALUATION"
+    )
+
+    confidence = normalise(
+        row_value(row, "cpu_confidence")
+    ).upper()
+
+    ram, storage = effective_ram_storage(
+        row
+    )
+
+    return bool(
+        precise_model_for_valuation(
+            row_value(row, "brand"),
+            row_value(row, "model")
+        )
+        and cpu
+        and cpu.get("confidence") == "GENERATION"
+        and confidence == "GENERATION"
+        and cpu.get("generation")
+        and cpu.get("family")
+        and ram
+        and storage
+    )
+
 VALUATION_COSMETIC_REASONS = {
     "scratch",
     "scratches",
@@ -8569,7 +8602,10 @@ def target_valuation_problem(target, conn=None):
     if valuation_condition_requires_review(target):
         return "CONDITION_REQUIRES_REVIEW"
 
-    if not exact_spec_identity(target):
+    if (
+        not exact_spec_identity(target)
+        and not auction_generation_identity(target)
+    ):
         return "INCOMPLETE_IDENTITY_OR_SPEC"
 
     if not row_value(target, "total") or row_value(target, "postage") is None:
@@ -8598,7 +8634,10 @@ def product_research_problem(target, conn=None):
     if int(row_value(target, "rules_revision") or 0) != current_rules_revision(conn):
         return "REANALYSIS_REQUIRED"
 
-    if not exact_spec_identity(target):
+    if (
+        not exact_spec_identity(target)
+        and not auction_generation_identity(target)
+    ):
         return "INCOMPLETE_IDENTITY_OR_SPEC"
 
     if not row_value(target, "total") or row_value(target, "postage") is None:
@@ -8693,41 +8732,57 @@ def sold_spec_evidence_tier(target, comp):
     """
     Match sold evidence conservatively.
 
-    Brand/model are already constrained by sold_candidates().
-    CPU remains an exact hard requirement.
-
-    RAM/storage:
-      - exact RAM + exact storage: full evidence
-      - exactly one differing: usable with reduced weight
-      - both differing: reject
-      - missing RAM/storage: reject
-
-    Large configuration jumps are also rejected.
+    Exact-CPU listings retain the hard exact-SKU requirement. Auctions with
+    only CPU tier + generation may use same-tier/same-generation sold evidence
+    at reduced weight.
     """
-    target_cpu = normalise(
-        row_value(target, "cpu")
-    ).lower()
+    target_cpu = parse_cpu(
+        row_value(target, "cpu"),
+        "VALUATION"
+    )
 
-    comp_cpu = normalise(
-        row_value(comp, "cpu")
-    ).lower()
-
-    if not target_cpu or not comp_cpu:
-        return "INCOMPATIBLE", 0.0
-
-    if target_cpu != comp_cpu:
-        return "INCOMPATIBLE", 0.0
-
-    parsed_comp_cpu = parse_cpu(
+    comp_cpu = parse_cpu(
         row_value(comp, "cpu"),
         "VALUATION"
     )
 
-    if (
-        not parsed_comp_cpu
-        or parsed_comp_cpu.get("confidence") != "EXACT"
-    ):
+    if not target_cpu or not comp_cpu:
         return "INCOMPATIBLE", 0.0
+
+    generation_fallback = auction_generation_identity(target)
+
+    if generation_fallback:
+        if (
+            normalise(target_cpu.get("vendor")).lower()
+            != normalise(comp_cpu.get("vendor")).lower()
+            or normalise(target_cpu.get("family")).lower()
+            != normalise(comp_cpu.get("family")).lower()
+            or target_cpu.get("generation") is None
+            or comp_cpu.get("generation") is None
+            or int(target_cpu["generation"]) != int(comp_cpu["generation"])
+        ):
+            return "INCOMPATIBLE", 0.0
+
+        cpu_tier = "CPU_GENERATION"
+        cpu_weight = 0.55
+
+    else:
+        target_cpu_name = normalise(
+            row_value(target, "cpu")
+        ).lower()
+
+        comp_cpu_name = normalise(
+            row_value(comp, "cpu")
+        ).lower()
+
+        if not target_cpu_name or target_cpu_name != comp_cpu_name:
+            return "INCOMPATIBLE", 0.0
+
+        if comp_cpu.get("confidence") != "EXACT":
+            return "INCOMPATIBLE", 0.0
+
+        cpu_tier = "EXACT"
+        cpu_weight = 1.0
 
     target_ram, target_storage = effective_ram_storage(
         target
@@ -8749,44 +8804,37 @@ def sold_spec_evidence_tier(target, comp):
     storage_exact = target_storage == comp_storage
 
     if ram_exact and storage_exact:
-        return "EXACT", 1.0
+        return cpu_tier, cpu_weight
 
-    # Do not combine evidence where both major configurable
-    # specifications differ from the target.
     if not ram_exact and not storage_exact:
         return "INCOMPATIBLE", 0.0
 
     if not ram_exact:
-        # Do not value a lower-RAM target from a better-equipped
-        # sold machine. Lower-spec sold evidence is conservative.
         if comp_ram > target_ram:
             return "INCOMPATIBLE", 0.0
 
-        ram_ratio = (
-            target_ram
-            / comp_ram
-        )
-
-        if ram_ratio > 2:
+        if target_ram / comp_ram > 2:
             return "INCOMPATIBLE", 0.0
 
-        return "RAM_NEAR", 0.65
+        return (
+            "CPU_GENERATION_RAM_NEAR"
+            if generation_fallback
+            else "RAM_NEAR",
+            cpu_weight * 0.65
+        )
 
-    # Same principle for storage: a sold machine with more storage
-    # must not establish the value of a lower-storage target.
     if comp_storage > target_storage:
         return "INCOMPATIBLE", 0.0
 
-    storage_ratio = (
-        target_storage
-        / comp_storage
-    )
-
-    if storage_ratio > 4:
+    if target_storage / comp_storage > 4:
         return "INCOMPATIBLE", 0.0
 
-    return "STORAGE_NEAR", 0.75
-
+    return (
+        "CPU_GENERATION_STORAGE_NEAR"
+        if generation_fallback
+        else "STORAGE_NEAR",
+        cpu_weight * 0.75
+    )
 
 def variant_evidence_tier(target, comp):
     """
@@ -8965,15 +9013,20 @@ def select_sold_evidence(conn, target):
     if len(selected) < MIN_COMPARABLES:
         return []
 
-    # If relaxed RAM/storage evidence is used, anchor the valuation
-    # with at least one exact RAM+storage sold comparable.
+    relaxed_tiers = {
+        "RAM_NEAR",
+        "STORAGE_NEAR",
+        "CPU_GENERATION_RAM_NEAR",
+        "CPU_GENERATION_STORAGE_NEAR",
+    }
+
     uses_relaxed_spec = any(
-        candidate.get("spec_tier") != "EXACT"
+        candidate.get("spec_tier") in relaxed_tiers
         for candidate in selected
     )
 
     if uses_relaxed_spec and not any(
-        candidate.get("spec_tier") == "EXACT"
+        candidate.get("spec_tier") in {"EXACT", "CPU_GENERATION"}
         for candidate in selected
     ):
         return []
@@ -9186,6 +9239,10 @@ def sold_candidates(conn, target):
                 )
                 else 85
                 if spec_tier == "EXACT"
+                else 72
+                if spec_tier == "CPU_GENERATION"
+                else 65
+                if spec_tier.startswith("CPU_GENERATION_")
                 else 70
             ),
             tier=tier,
@@ -9285,6 +9342,16 @@ def calculate_sold_valuation(conn, target):
     else:
         confidence = "LOW"
 
+    generation_evidence = any(
+        str(candidate.get("spec_tier") or "").startswith(
+            "CPU_GENERATION"
+        )
+        for candidate in selected
+    )
+
+    if generation_evidence:
+        confidence = "LOW"
+
     under = (
         estimate
         - target["total"]
@@ -9343,6 +9410,9 @@ def calculate_sold_valuation(conn, target):
         "EXACT": 0,
         "RAM_NEAR": 0,
         "STORAGE_NEAR": 0,
+        "CPU_GENERATION": 0,
+        "CPU_GENERATION_RAM_NEAR": 0,
+        "CPU_GENERATION_STORAGE_NEAR": 0,
     }
 
     for candidate in selected:
@@ -9386,6 +9456,9 @@ def calculate_sold_valuation(conn, target):
             f"SPEC_EXACT={spec_counts['EXACT']}/"
             f"SPEC_RAM_NEAR={spec_counts['RAM_NEAR']}/"
             f"SPEC_STORAGE_NEAR={spec_counts['STORAGE_NEAR']}/"
+            f"CPU_GEN={spec_counts['CPU_GENERATION']}/"
+            f"CPU_GEN_RAM_NEAR={spec_counts['CPU_GENERATION_RAM_NEAR']}/"
+            f"CPU_GEN_STORAGE_NEAR={spec_counts['CPU_GENERATION_STORAGE_NEAR']}/"
             f"VAR_EXACT={variant_exact_count}/"
             f"VAR_COMPAT={variant_compatible_count}/"
             f"NEFF={effective_n:.1f}"
@@ -10934,6 +11007,8 @@ def _dashboard_html_base():
 
         if basis.startswith("ACTIVE_FALLBACK"):
             sales_wording = f"{count} active comparables"
+        elif "CPU_GEN=" in basis and not "CPU_GEN=0/" in basis:
+            sales_wording = f"{count} sold comparables · generation-level CPU match"
         else:
             sales_wording = f"{count} sold comparables"
 
