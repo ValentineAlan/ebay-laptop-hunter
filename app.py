@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.49"
+APP_VERSION = "0.10.50"
 CLASSIFIER_VERSION = "0.8.6"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -6734,50 +6734,219 @@ def _product_research_cooldown_label(seconds):
 
 
 
+def _product_research_experiment_snapshot():
+    _product_research_telemetry_load()
+
+    with _product_research_telemetry_lock:
+        experiment = (
+            _product_research_telemetry_state.get(
+                "experiment"
+            ) or {}
+        )
+        return dict(experiment)
+
+
+def _product_research_duration_text(seconds):
+    try:
+        seconds = max(0, int(seconds or 0))
+    except Exception:
+        seconds = 0
+
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+
+    if minutes:
+        return f"{minutes}m {seconds:02d}s"
+
+    return f"{seconds}s"
+
+
+def _product_research_experiment_lines(experiment):
+    if not experiment or not experiment.get("recovered_at"):
+        return []
+
+    lines = [
+        "",
+        "Telemetry",
+        "---------",
+        "Recovered: "
+        + str(experiment.get("recovered_at")),
+    ]
+
+    if experiment.get("challenge_at"):
+        lines.append(
+            "Blocked: "
+            + str(experiment.get("challenge_at"))
+        )
+
+        lines.append(
+            "Time running before block: "
+            + _product_research_duration_text(
+                experiment.get(
+                    "elapsed_to_challenge_seconds"
+                )
+            )
+        )
+
+    lines.append(
+        "Requests since recovery: "
+        + str(
+            int(
+                experiment.get(
+                    "requests_since_recovery"
+                ) or 0
+            )
+        )
+    )
+
+    lines.append(
+        "Successful requests: "
+        + str(
+            int(
+                experiment.get(
+                    "successful_requests_since_recovery"
+                ) or 0
+            )
+        )
+    )
+
+    lines.append(
+        "Hunter restarts: "
+        + str(
+            int(
+                experiment.get(
+                    "process_restarts_since_recovery"
+                ) or 0
+            )
+        )
+    )
+
+    interval = experiment.get(
+        "interval_at_challenge"
+    )
+    if interval is not None:
+        try:
+            lines.append(
+                "Interval at block: "
+                f"{float(interval):.1f}s minimum"
+            )
+        except Exception:
+            pass
+
+    rolling = experiment.get(
+        "rolling_at_challenge"
+    )
+    if isinstance(rolling, dict) and rolling:
+        def count(key):
+            return int(
+                rolling.get(key)
+                or rolling.get(str(key))
+                or 0
+            )
+
+        lines.append(
+            "Requests before block: "
+            f"1h {count(60)} · "
+            f"6h {count(360)} · "
+            f"12h {count(720)}"
+        )
+
+    failed_probes = int(
+        experiment.get(
+            "failed_recovery_probes"
+        ) or 0
+    )
+    if failed_probes:
+        lines.append(
+            "Failed recovery probes: "
+            + str(failed_probes)
+        )
+
+    return lines
+
+
 def _product_research_challenge_telegram_message(
     cooldown_seconds=None,
     challenge_count=None,
 ):
+    experiment = (
+        _product_research_experiment_snapshot()
+    )
+
+    if challenge_count and challenge_count > 1:
+        title = "eBay Product Research is still blocked"
+    else:
+        title = "eBay Product Research paused"
+
     lines = [
-        "eBay Product Research is blocked",
+        title,
         "",
-        "LaptopLander has paused Product Research.",
-        "The valuation backlog is preserved.",
-        "",
-        "Open Chromium:",
-        PRODUCT_RESEARCH_BROWSER_GUI_URL,
-        "",
-        "Leave eBay alone for a while, then test it manually.",
-        "If Product Research loads normally, LaptopLander will "
-        "detect recovery and resume automatically.",
-        "",
-        "Do not repeatedly refresh the blocked Product Research page.",
+        "No action required.",
+        "LaptopLander has paused Product Research automatically; "
+        "the valuation backlog is preserved.",
     ]
 
     if cooldown_seconds:
         lines.extend([
             "",
-            "Automatic fallback probe: "
+            "Next automatic recovery probe: "
             + _product_research_cooldown_label(
                 cooldown_seconds
             ),
         ])
 
-    if challenge_count:
+    if challenge_count and challenge_count > 1:
         lines.append(
-            f"Consecutive blocks: {challenge_count}"
+            "Recovery probe attempts blocked: "
+            + str(challenge_count - 1)
         )
+
+    lines.extend(
+        _product_research_experiment_lines(
+            experiment
+        )
+    )
 
     return "\n".join(lines)
 
 
-def _product_research_recovered_telegram_message():
-    return (
-        "eBay Product Research restored\n\n"
-        "A real Product Research search succeeded.\n"
-        "The block escalation has been reset.\n"
-        "LaptopLander has resumed valuation processing automatically."
-    )
+def _product_research_recovered_telegram_message(
+    previous_experiment=None,
+):
+    lines = [
+        "eBay Product Research restored",
+        "",
+        "No action required.",
+        "A real Product Research search succeeded and LaptopLander "
+        "has resumed valuation processing automatically.",
+        "The block escalation has been reset.",
+    ]
+
+    if previous_experiment:
+        lines.extend([
+            "",
+            "Previous block episode",
+            "----------------------",
+        ])
+
+        # Avoid duplicating the Telemetry heading when embedding the snapshot.
+        telemetry_lines = _product_research_experiment_lines(
+            previous_experiment
+        )
+        if telemetry_lines[:3] == ["", "Telemetry", "---------"]:
+            telemetry_lines = telemetry_lines[3:]
+
+        lines.extend(telemetry_lines)
+
+    lines.extend([
+        "",
+        "A new recovery-to-block telemetry run has started.",
+    ])
+
+    return "\n".join(lines)
 
 
 def _product_research_open_circuit(reason):
@@ -6927,6 +7096,10 @@ def _product_research_close_circuit():
             pass
 
     if was_open:
+        previous_experiment = (
+            _product_research_experiment_snapshot()
+        )
+
         _product_research_telemetry_mark_recovery()
 
         print(
@@ -6938,7 +7111,9 @@ def _product_research_close_circuit():
 
         try:
             ok, error = send_telegram_admin_message(
-                _product_research_recovered_telegram_message()
+                _product_research_recovered_telegram_message(
+                    previous_experiment
+                )
             )
 
             if ok:
