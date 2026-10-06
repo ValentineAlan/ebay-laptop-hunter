@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.48"
+APP_VERSION = "0.10.49"
 CLASSIFIER_VERSION = "0.8.6"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -545,6 +545,7 @@ def connect_db():
 
 RUNTIME_STATE_PRODUCT_RESEARCH_RATE = "product_research_rate"
 RUNTIME_STATE_PRODUCT_RESEARCH_CIRCUIT = "product_research_circuit"
+RUNTIME_STATE_PRODUCT_RESEARCH_TELEMETRY = "product_research_telemetry"
 
 
 def runtime_state_get(key, default=None):
@@ -6128,47 +6129,181 @@ _product_research_rate = {
 
 _product_research_browser_lock = threading.Lock()
 
-# Per-process Product Research request telemetry.  This deliberately records
-# timing/count information only; request URLs, cookies and session identifiers
-# are not retained here.  Counts include recovery probes because eBay sees them
-# as Product Research requests too.
+# Durable Product Research request telemetry.
+#
+# This records timing/count information only; request URLs, cookies and session
+# identifiers are not retained.  Unlike the original per-process counters,
+# this state is persisted in SQLite so redeploys do not reset an experiment.
+# Request timestamps are retained for 12 hours so rolling-volume evidence also
+# survives container restarts.
 _product_research_telemetry_lock = threading.Lock()
-_product_research_telemetry_started_at = time.monotonic()
-_product_research_telemetry_request_count = 0
-_product_research_telemetry_request_times = []
+_product_research_telemetry_loaded = False
+_product_research_telemetry_state = {
+    "started_at": None,
+    "started_epoch": 0.0,
+    "request_count": 0,
+    "request_times": [],
+    "process_restart_count": 0,
+    "experiment": {},
+}
+
+
+def _product_research_telemetry_save_locked():
+    runtime_state_set(
+        RUNTIME_STATE_PRODUCT_RESEARCH_TELEMETRY,
+        _product_research_telemetry_state,
+    )
+
+
+def _product_research_telemetry_load():
+    global _product_research_telemetry_loaded
+
+    with _product_research_telemetry_lock:
+        if _product_research_telemetry_loaded:
+            return dict(_product_research_telemetry_state)
+
+        saved = runtime_state_get(
+            RUNTIME_STATE_PRODUCT_RESEARCH_TELEMETRY,
+            {},
+        ) or {}
+
+        now = time.time()
+
+        try:
+            request_count = max(
+                0,
+                int(saved.get("request_count") or 0),
+            )
+        except Exception:
+            request_count = 0
+
+        request_times = []
+        for value in saved.get("request_times", []) or []:
+            try:
+                timestamp = float(value)
+            except Exception:
+                continue
+            if timestamp >= now - (12 * 60 * 60):
+                request_times.append(timestamp)
+
+        try:
+            started_epoch = float(
+                saved.get("started_epoch") or 0.0
+            )
+        except Exception:
+            started_epoch = 0.0
+
+        if started_epoch <= 0:
+            started_epoch = now
+
+        try:
+            restart_count = max(
+                0,
+                int(saved.get("process_restart_count") or 0),
+            )
+        except Exception:
+            restart_count = 0
+
+        experiment = saved.get("experiment")
+        if not isinstance(experiment, dict):
+            experiment = {}
+
+        if (
+            experiment.get("recovered_at")
+            and not experiment.get("challenge_at")
+        ):
+            experiment["process_restarts_since_recovery"] = (
+                int(
+                    experiment.get(
+                        "process_restarts_since_recovery"
+                    ) or 0
+                ) + 1
+            )
+
+        _product_research_telemetry_state.update({
+            "started_at": (
+                saved.get("started_at")
+                or iso_now()
+            ),
+            "started_epoch": started_epoch,
+            "request_count": request_count,
+            "request_times": request_times,
+            "process_restart_count": restart_count + 1,
+            "experiment": experiment,
+        })
+
+        _product_research_telemetry_loaded = True
+        _product_research_telemetry_save_locked()
+
+        return dict(_product_research_telemetry_state)
 
 
 def _product_research_telemetry_begin():
-    global _product_research_telemetry_request_count
+    _product_research_telemetry_load()
 
     now_wall = time.time()
-    now_mono = time.monotonic()
 
     with _product_research_telemetry_lock:
-        _product_research_telemetry_request_count += 1
-        request_number = _product_research_telemetry_request_count
-        _product_research_telemetry_request_times.append(now_wall)
+        state = _product_research_telemetry_state
 
-        cutoff = now_wall - 3600.0
-        while (
-            _product_research_telemetry_request_times
-            and _product_research_telemetry_request_times[0] < cutoff
-        ):
-            _product_research_telemetry_request_times.pop(0)
-
-        elapsed = max(
-            0.0,
-            now_mono - _product_research_telemetry_started_at,
+        state["request_count"] = (
+            int(state.get("request_count") or 0) + 1
         )
+        request_number = state["request_count"]
+
+        request_times = list(
+            state.get("request_times") or []
+        )
+        request_times.append(now_wall)
+
+        cutoff = now_wall - (12 * 60 * 60)
+        request_times = [
+            timestamp
+            for timestamp in request_times
+            if timestamp >= cutoff
+        ]
+        state["request_times"] = request_times
 
         counts = {}
-        for minutes in (1, 5, 15, 30, 60):
+        for minutes in (1, 5, 15, 30, 60, 360, 720):
             window_start = now_wall - (minutes * 60.0)
             counts[minutes] = sum(
                 1
-                for timestamp in _product_research_telemetry_request_times
+                for timestamp in request_times
                 if timestamp >= window_start
             )
+
+        try:
+            started_epoch = float(
+                state.get("started_epoch") or now_wall
+            )
+        except Exception:
+            started_epoch = now_wall
+
+        elapsed = max(
+            0.0,
+            now_wall - started_epoch,
+        )
+
+        experiment = state.get("experiment") or {}
+        if (
+            experiment.get("recovered_at")
+            and not experiment.get("challenge_at")
+        ):
+            experiment["requests_since_recovery"] = (
+                int(
+                    experiment.get(
+                        "requests_since_recovery"
+                    ) or 0
+                ) + 1
+            )
+            state["experiment"] = experiment
+
+        process_run = int(
+            state.get("process_restart_count") or 1
+        )
+
+        _product_research_telemetry_save_locked()
 
     with _product_research_rate_lock:
         interval = float(
@@ -6183,15 +6318,109 @@ def _product_research_telemetry_begin():
         "elapsed": elapsed,
         "counts": counts,
         "interval": interval,
+        "process_run": process_run,
+        "requested_at_epoch": now_wall,
     }
 
 
+def _product_research_telemetry_mark_recovery():
+    """Start a durable recovery-to-challenge experiment."""
+    _product_research_telemetry_load()
+
+    now = time.time()
+
+    with _product_research_telemetry_lock:
+        state = _product_research_telemetry_state
+
+        state["experiment"] = {
+            "recovered_at": iso_now(),
+            "recovered_epoch": now,
+            # The successful recovery probe itself is useful evidence and is
+            # counted as request/success number one of the new experiment.
+            "requests_since_recovery": 1,
+            "successful_requests_since_recovery": 1,
+            "process_restarts_since_recovery": 0,
+            "request_count_at_recovery": int(
+                state.get("request_count") or 0
+            ),
+            "challenge_at": None,
+        }
+
+        _product_research_telemetry_save_locked()
+
+
 def _product_research_telemetry_log(telemetry, outcome, detail=""):
+    _product_research_telemetry_load()
+
     elapsed = int(telemetry["elapsed"])
     hours, remainder = divmod(elapsed, 3600)
     minutes, seconds = divmod(remainder, 60)
     elapsed_text = f"{hours:d}:{minutes:02d}:{seconds:02d}"
     counts = telemetry["counts"]
+
+    experiment_suffix = ""
+
+    with _product_research_telemetry_lock:
+        state = _product_research_telemetry_state
+        experiment = state.get("experiment") or {}
+
+        if (
+            outcome == "OK"
+            and experiment.get("recovered_at")
+            and not experiment.get("challenge_at")
+        ):
+            experiment["successful_requests_since_recovery"] = (
+                int(
+                    experiment.get(
+                        "successful_requests_since_recovery"
+                    ) or 0
+                ) + 1
+            )
+
+        if (
+            outcome == "CHALLENGE"
+            and experiment.get("recovered_at")
+        ):
+            if not experiment.get("challenge_at"):
+                recovered_epoch = float(
+                    experiment.get("recovered_epoch")
+                    or telemetry["requested_at_epoch"]
+                )
+                experiment.update({
+                    "challenge_at": iso_now(),
+                    "challenge_epoch": telemetry[
+                        "requested_at_epoch"
+                    ],
+                    "elapsed_to_challenge_seconds": max(
+                        0,
+                        int(
+                            telemetry["requested_at_epoch"]
+                            - recovered_epoch
+                        ),
+                    ),
+                    "challenge_request_number": telemetry["number"],
+                    "interval_at_challenge": telemetry["interval"],
+                    "rolling_at_challenge": dict(counts),
+                })
+            else:
+                experiment["failed_recovery_probes"] = (
+                    int(
+                        experiment.get(
+                            "failed_recovery_probes"
+                        ) or 0
+                    ) + 1
+                )
+
+        state["experiment"] = experiment
+        _product_research_telemetry_save_locked()
+
+        if experiment.get("recovered_at"):
+            experiment_suffix = (
+                f" experiment_requests:"
+                f"{int(experiment.get('requests_since_recovery') or 0)}"
+                f" experiment_ok:"
+                f"{int(experiment.get('successful_requests_since_recovery') or 0)}"
+            )
 
     message = (
         "Product Research telemetry: "
@@ -6200,8 +6429,10 @@ def _product_research_telemetry_log(telemetry, outcome, detail=""):
         f"interval={telemetry['interval']:.1f}s "
         f"outcome={outcome} "
         f"rolling=1m:{counts[1]},5m:{counts[5]},"
-        f"15m:{counts[15]},30m:{counts[30]},60m:{counts[60]} "
-        f"session:{telemetry['number']}"
+        f"15m:{counts[15]},30m:{counts[30]},60m:{counts[60]},"
+        f"6h:{counts[360]},12h:{counts[720]} "
+        f"session:{telemetry['process_run']}"
+        f"{experiment_suffix}"
     )
 
     if detail:
@@ -6696,6 +6927,8 @@ def _product_research_close_circuit():
             pass
 
     if was_open:
+        _product_research_telemetry_mark_recovery()
+
         print(
             "Product Research circuit CLOSED: "
             "real Product Research response succeeded; "
