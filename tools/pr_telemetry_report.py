@@ -9,7 +9,8 @@ LINE_RE = re.compile(
     r"interval=(?P<interval>[\d.]+)s "
     r"outcome=(?P<outcome>\S+) "
     r"rolling=1m:(?P<m1>\d+),5m:(?P<m5>\d+),"
-    r"15m:(?P<m15>\d+),30m:(?P<m30>\d+),60m:(?P<m60>\d+) "
+    r"15m:(?P<m15>\d+),30m:(?P<m30>\d+),60m:(?P<m60>\d+)"
+    r"(?:,6h:(?P<h6>\d+),12h:(?P<h12>\d+))? "
     r"session:(?P<session>\d+)"
 )
 
@@ -25,6 +26,8 @@ for raw in sys.stdin:
     d["timestamp"] = t.group("ts") if t else ""
     for key in ("num","m1","m5","m15","m30","m60","session"):
         d[key] = int(d[key])
+    d["h6"] = int(d["h6"]) if d.get("h6") is not None else None
+    d["h12"] = int(d["h12"]) if d.get("h12") is not None else None
     d["interval"] = float(d["interval"])
     events.append(d)
 
@@ -76,6 +79,11 @@ for p_idx, proc in enumerate(processes, 1):
             "  rolling volume:   "
             f"1m={ch['m1']} 5m={ch['m5']} 15m={ch['m15']} "
             f"30m={ch['m30']} 60m={ch['m60']}"
+            + (
+                f" 6h={ch['h6']} 12h={ch['h12']}"
+                if ch.get("h6") is not None
+                else ""
+            )
         )
         if previous:
             print(
