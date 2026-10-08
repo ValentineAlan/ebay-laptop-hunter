@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.51"
+APP_VERSION = "0.10.52"
 CLASSIFIER_VERSION = "0.8.6"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -142,6 +142,12 @@ PRODUCT_RESEARCH_STABLE_SUCCESSES = 100
 PRODUCT_RESEARCH_429_FALLBACK_SECONDS = 300
 PRODUCT_RESEARCH_WORKER_IDLE_SECONDS = 30
 PRODUCT_RESEARCH_REVALUE_SECONDS = 60
+
+# Long-window protection. The latest observed challenge occurred after ~1,980
+# uninterrupted Product Research requests. Stay materially below that level
+# and let old requests age out of a rolling 24-hour window before continuing.
+PRODUCT_RESEARCH_ROLLING_24H_LIMIT = 1700
+PRODUCT_RESEARCH_ROLLING_WINDOW_SECONDS = 24 * 60 * 60
 
 # Product Research sold evidence should represent the second-hand market.
 # Filter server-side so New/New-other/New-with-defects and parts-only sales
@@ -6256,7 +6262,7 @@ def _product_research_telemetry_begin():
         )
         request_times.append(now_wall)
 
-        cutoff = now_wall - (12 * 60 * 60)
+        cutoff = now_wall - PRODUCT_RESEARCH_ROLLING_WINDOW_SECONDS
         request_times = [
             timestamp
             for timestamp in request_times
@@ -6265,7 +6271,7 @@ def _product_research_telemetry_begin():
         state["request_times"] = request_times
 
         counts = {}
-        for minutes in (1, 5, 15, 30, 60, 360, 720):
+        for minutes in (1, 5, 15, 30, 60, 360, 720, 1440):
             window_start = now_wall - (minutes * 60.0)
             counts[minutes] = sum(
                 1
@@ -6560,12 +6566,49 @@ def _product_research_retry_after_seconds(exc):
     return float(PRODUCT_RESEARCH_429_FALLBACK_SECONDS)
 
 
-def _product_research_wait_for_slot():
+def _product_research_volume_wait_seconds():
+    """
+    Return the time until another normal Product Research request is allowed
+    by the rolling 24-hour safety ceiling.
+    """
+    _product_research_telemetry_load()
+    now = time.time()
+
+    with _product_research_telemetry_lock:
+        request_times = [
+            float(ts)
+            for ts in (
+                _product_research_telemetry_state.get("request_times")
+                or []
+            )
+            if now - float(ts) < PRODUCT_RESEARCH_ROLLING_WINDOW_SECONDS
+        ]
+
+    if len(request_times) < PRODUCT_RESEARCH_ROLLING_24H_LIMIT:
+        return 0.0
+
+    request_times.sort()
+    index = len(request_times) - PRODUCT_RESEARCH_ROLLING_24H_LIMIT
+    release_at = (
+        request_times[index]
+        + PRODUCT_RESEARCH_ROLLING_WINDOW_SECONDS
+    )
+    return max(0.0, release_at - now)
+
+
+def _product_research_wait_for_slot(bypass_volume_limit=False):
     global _product_research_next_request_at
 
     _product_research_load_rate_state()
+    last_volume_log = 0.0
 
     while True:
+        volume_wait = (
+            0.0
+            if bypass_volume_limit
+            else _product_research_volume_wait_seconds()
+        )
+
         with _product_research_rate_lock:
             now_wall = time.time()
             now_mono = time.monotonic()
@@ -6578,7 +6621,11 @@ def _product_research_wait_for_slot():
                 0.0,
                 _product_research_next_request_at - now_mono,
             )
-            wait_for = max(backoff_wait, cadence_wait)
+            wait_for = max(
+                backoff_wait,
+                cadence_wait,
+                volume_wait,
+            )
 
             if wait_for <= 0:
                 interval = float(
@@ -6590,7 +6637,16 @@ def _product_research_wait_for_slot():
                 _product_research_next_request_at = now_mono + interval
                 return
 
-        time.sleep(min(wait_for, 1.0))
+        if volume_wait > 0 and time.monotonic() - last_volume_log >= 300:
+            print(
+                "Product Research volume guard: "
+                f"{PRODUCT_RESEARCH_ROLLING_24H_LIMIT} requests in rolling 24h; "
+                f"next slot in {int(volume_wait)}s; backlog preserved",
+                flush=True,
+            )
+            last_volume_log = time.monotonic()
+
+        time.sleep(min(wait_for, 30.0))
 
 
 def _product_research_record_success():
@@ -7135,7 +7191,11 @@ def _product_research_close_circuit():
                 flush=True,
             )
 
-def _product_research_fetch(url, cookie=None):
+def _product_research_fetch(
+    url,
+    cookie=None,
+    bypass_volume_limit=False,
+):
     """
     Execute Product Research inside the persistent Chromium session.
 
@@ -7145,7 +7205,9 @@ def _product_research_fetch(url, cookie=None):
 
     cookie is retained only for compatibility with old callers.
     """
-    _product_research_wait_for_slot()
+    _product_research_wait_for_slot(
+        bypass_volume_limit=bypass_volume_limit
+    )
     telemetry = _product_research_telemetry_begin()
 
     request_id = secrets.token_hex(16)
@@ -7523,7 +7585,13 @@ def product_research_search(
         )
     )
 
-    raw = _product_research_fetch(url)
+    raw = _product_research_fetch(
+        url,
+        bypass_volume_limit=(
+            allow_probe
+            and _product_research_circuit_is_open()
+        ),
+    )
 
     modules = _decode_json_modules(raw)
 
@@ -8467,6 +8535,28 @@ def collect_needed_sold_data(conn, maximum=None):
     attempted_listings = 0
 
     for row in rows:
+        # A confirmed non-deal does not need to consume Product Research again
+        # every time the 24-hour query cache expires. Keep its sold valuation
+        # until the existing sold-evidence lifetime expires. Actual deals and
+        # unvalued listings remain eligible immediately.
+        basis = normalise(
+            row_value(row, "valuation_basis")
+        )
+        score = safe_float(
+            row_value(row, "deal_score")
+        )
+        evidence_age = evidence_age_days(
+            row_value(row, "valuation_evidence_at")
+        )
+
+        if (
+            basis.startswith("SOLD_")
+            and (score is None or score <= 0)
+            and evidence_age is not None
+            and evidence_age < SOLD_CACHE_MAX_AGE_DAYS
+        ):
+            continue
+
         queries = sold_search_queries(row)
         if not queries or all(sold_search_is_fresh(conn, research_query_key(q)) for q in queries):
             continue
