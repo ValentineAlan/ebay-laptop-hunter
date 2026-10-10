@@ -43,7 +43,7 @@ def promotion_blockers(row):
     return reasons
 
 
-def report(conn, hours, limit):
+def report(conn, hours, limit, all_active=False):
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     revision = app.current_rules_revision(conn)
     # Query builders normally open a connection to read rules_revision. Freeze it
@@ -52,14 +52,19 @@ def report(conn, hours, limit):
     app.current_rules_revision = lambda conn=None: revision
     try:
         rows = conn.execute('SELECT * FROM listings WHERE COALESCE(active,1)=1').fetchall()
-        recent = [r for r in rows if str(r['first_seen']) >= cutoff]
+        recent = rows if all_active else [r for r in rows if str(r['first_seen']) >= cutoff]
         counts = Counter()
         blockers = Counter()
         searches = {r['query_key']: r for r in conn.execute('SELECT * FROM sold_searches')}
         samples = []
         evidence = Counter()
+        backlog = Counter()
+        ready = []
+        pending_queries = set()
         for row in recent:
             problem = app.product_research_problem(row, conn)
+            if row['estimated_value'] is None and problem:
+                backlog['research blocked: ' + problem] += 1
             if problem:
                 counts['research blocked: ' + problem] += 1
             else:
@@ -92,12 +97,35 @@ def report(conn, hours, limit):
                     else:
                         reason = 'usable cached valuation not persisted'
                     evidence[reason] += 1
+                    backlog[reason] += 1
+                    if valuation is not None:
+                        hypothetical = dict(row)
+                        hypothetical.update(valuation_confidence=valuation['confidence'],
+                                            comparable_count=valuation['count'],
+                                            valuation_basis=valuation['basis'],
+                                            valuation_evidence_at=valuation['evidence_at'],
+                                            undervaluation_gbp=valuation['undervaluation_gbp'],
+                                            undervaluation_pct=valuation['undervaluation_pct'],
+                                            valuation_q1=valuation['q1'], valuation_q3=valuation['q3'])
+                        ready.append({'id': row['item_id'], 'title': row['title'],
+                                      'first_seen': row['first_seen'],
+                                      'valuation': valuation,
+                                      'promotion_blockers': promotion_blockers(hypothetical),
+                                      'positive_score': (valuation['deal_score'] or 0) > 0,
+                                      'notified_at': row['telegram_notified_at']})
+                    elif problem is None:
+                        for query in queries:
+                            key = app.research_query_key(query)
+                            if not app.sold_search_is_fresh(conn, key):
+                                pending_queries.add(key)
                     if len(samples) < limit:
                         stored = conn.execute(
                             'SELECT COUNT(*) FROM sold_comparables '
                             'WHERE LOWER(brand)=LOWER(?) AND LOWER(model)=LOWER(?)',
                             (row['brand'], row['model'])).fetchone()[0]
                         samples.append({'id': row['item_id'], 'title': row['title'],
+                                        'condition': row['condition'], 'status': row['status'],
+                                        'fault_reasons': row['fault_reasons'],
                                         'valuation_basis': row['valuation_basis'],
                                         'valuation_problem': problem, 'evidence_result': reason,
                                         'stored_same_brand_model': stored,
@@ -127,11 +155,20 @@ def report(conn, hours, limit):
                                'promotion_eligible': app.promotion_eligible(row),
                                'notified_at': row['telegram_notified_at'],
                                'telegram_error': row['telegram_notify_error']})
-        return {'active': len(rows), 'recent_hours': hours, 'recent_active': len(recent),
+        unvalued = sum(r['estimated_value'] is None for r in recent)
+        assert sum(backlog.values()) == unvalued, 'Backlog partition does not reconcile'
+        return {'scope': 'all active listings' if all_active else 'recent active listings',
+                'active': len(rows), 'recent_hours': None if all_active else hours, 'recent_active': len(recent),
+                'scope_unvalued': unvalued,
+                'unvalued_partition': dict(backlog),
+                'unique_queries_due_for_research_unblocked_unvalued': len(pending_queries),
+                'all_usable_unpersisted_valuations': ready,
                 'recent_counts': dict(counts), 'recent_scored_blockers_nonexclusive': dict(blockers),
                 'recent_eligible_unvalued_evidence': dict(evidence),
                 'all_active_positive_scores': scored, 'unvalued_query_samples': samples,
                 'notes': ['Query history may be shared across listings and may be stale.',
+                          'With --all, recent_* fields cover all active listings.',
+                          'unvalued_partition is mutually exclusive and reconciles to scope_unvalued.',
                           'A notification timestamp can represent baselining, not actual delivery.',
                           'Counts overlap except the research-block and query-history categories.']}
     finally:
@@ -143,7 +180,9 @@ if __name__ == '__main__':
     parser.add_argument('--db', default=app.DB)
     parser.add_argument('--hours', type=float, default=18)
     parser.add_argument('--samples', type=int, default=10)
+    parser.add_argument('--all', action='store_true', dest='all_active',
+                        help='Audit every active listing, including the full unvalued backlog')
     args = parser.parse_args()
     with open_readonly(args.db) as conn:
         conn.execute('BEGIN')
-        print(json.dumps(report(conn, args.hours, args.samples), indent=2))
+        print(json.dumps(report(conn, args.hours, args.samples, args.all_active), indent=2))
