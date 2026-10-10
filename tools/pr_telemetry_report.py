@@ -10,7 +10,8 @@ LINE_RE = re.compile(
     r"outcome=(?P<outcome>\S+) "
     r"rolling=1m:(?P<m1>\d+),5m:(?P<m5>\d+),"
     r"15m:(?P<m15>\d+),30m:(?P<m30>\d+),60m:(?P<m60>\d+)"
-    r"(?:,6h:(?P<h6>\d+),12h:(?P<h12>\d+))? "
+    r"(?:,6h:(?P<h6>\d+),12h:(?P<h12>\d+))?"
+    r"(?:,24h:(?P<h24>\d+))? "
     r"session:(?P<session>\d+)"
 )
 
@@ -28,6 +29,7 @@ for raw in sys.stdin:
         d[key] = int(d[key])
     d["h6"] = int(d["h6"]) if d.get("h6") is not None else None
     d["h12"] = int(d["h12"]) if d.get("h12") is not None else None
+    d["h24"] = int(d["h24"]) if d.get("h24") is not None else None
     d["interval"] = float(d["interval"])
     events.append(d)
 
@@ -85,6 +87,8 @@ for p_idx, proc in enumerate(processes, 1):
                 else ""
             )
         )
+        if ch.get("h24") is not None:
+            print(f"  rolling 24h:      {ch['h24']}")
         if previous:
             print(
                 f"  previous outcome: {previous['outcome']} "
@@ -102,14 +106,14 @@ for p_idx, proc in enumerate(processes, 1):
         )
         print()
 
-# Summary specifically for the 20-second experiment.
-ch20 = [e for e in events if e["outcome"] == "CHALLENGE" and abs(e["interval"] - 20.0) < 0.01]
-print("20-second challenge summary")
+# Summary for the current 30-second experiment.
+ch30 = [e for e in events if e["outcome"] == "CHALLENGE" and abs(e["interval"] - 30.0) < 0.01]
+print("30-second challenge summary")
 print("---------------------------")
-if not ch20:
-    print("No CHALLENGE telemetry at 20.0s found.")
+if not ch30:
+    print("No CHALLENGE telemetry at 30.0s found.")
 else:
-    for i, ch in enumerate(ch20, 1):
+    for i, ch in enumerate(ch30, 1):
         print(
             f"{i}. PR #{ch['num']} at +{ch['elapsed']} | "
             f"rolling 15m={ch['m15']}, 30m={ch['m30']}, 60m={ch['m60']}"
