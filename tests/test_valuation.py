@@ -90,6 +90,21 @@ class ValuationTests(unittest.TestCase):
         self.assertIsNotNone(value)
         self.assertEqual(value['count'], 3)
 
+    def test_x_series_models_are_not_multipack_quantities(self):
+        for title in (
+            'LENOVO THINKPAD X13 Gen 2 Core i5-1135G7 16GBRAM 256GBSSD ULTRABOOK',
+            'Lenovo ThinkPad X380 Yoga 2-in-1 i5-8350U 8GB 128GB SSD Touch',
+        ):
+            with self.subTest(title=title):
+                self.assertTrue(app.ordinary_laptop(title, 'Used'))
+        for title in (
+            'Joblot 10x Dell Latitude 3190 Laptop 64GB 4GB',
+            'Dell Latitude laptops x10', 'Dell Latitude laptops x 10',
+            'Dell Latitude laptops ×10', 'Dell Latitude laptops x 2',
+        ):
+            with self.subTest(title=title):
+                self.assertFalse(app.ordinary_laptop(title, 'Used'))
+
     def test_aggregate_cannot_dominate(self):
         for i, price in enumerate([200, 210, 220]):
             self.sold(i, price)
