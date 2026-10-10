@@ -72,6 +72,24 @@ class ValuationTests(unittest.TestCase):
         self.sold('one', units_sold=100)
         self.assertIsNone(app.calculate_sold_valuation(self.conn, self.target))
 
+    def test_model_number_before_laptop_is_not_a_bulk_listing(self):
+        for title in (
+            'Dell Latitude 3190 Laptop, 11.6", 4Gb, 64Gb, Windows 11 Pro 26H2',
+            'Dell Latitude 5420 Laptop i5-1135G7 8GB RAM 256GB SSD',
+        ):
+            with self.subTest(title=title):
+                self.assertTrue(app.ordinary_laptop(title, 'Used'))
+        self.assertFalse(app.ordinary_laptop('2 laptops Dell Latitude 5420', 'Used'))
+        self.assertFalse(app.ordinary_laptop('Lot of 2 Dell Latitude laptops', 'Used'))
+        self.assertFalse(app.ordinary_laptop('2 x Dell Latitude 5420', 'Used'))
+
+    def test_model_number_before_laptop_can_supply_sold_evidence(self):
+        self.target['title'] = 'Dell Latitude 5420 Laptop i5-1135G7 8GB RAM 256GB SSD'
+        self.pool()
+        value = app.calculate_sold_valuation(self.conn, self.target)
+        self.assertIsNotNone(value)
+        self.assertEqual(value['count'], 3)
+
     def test_aggregate_cannot_dominate(self):
         for i, price in enumerate([200, 210, 220]):
             self.sold(i, price)
