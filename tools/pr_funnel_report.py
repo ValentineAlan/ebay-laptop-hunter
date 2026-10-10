@@ -69,7 +69,7 @@ def report(conn, hours, limit, all_active=False):
                 counts['research blocked: ' + problem] += 1
             else:
                 counts['research eligible'] += 1
-                queries = app.sold_search_queries(row)
+                queries = app.sold_search_queries(row, conn)
                 records = [searches.get(app.research_query_key(q)) for q in queries]
                 ok = [r for r in records if r is not None and r['status'] == 'OK']
                 if any((r['result_count'] or 0) > 0 for r in ok):
@@ -88,14 +88,18 @@ def report(conn, hours, limit, all_active=False):
                     valuation = app.calculate_sold_valuation(conn, row)
                     if problem:
                         reason = problem
+                    elif valuation is None and app.conservative_spec_targets(conn, row)[1]:
+                        reason = 'conflicting specifications lack supported alternatives'
                     elif not candidates:
                         reason = 'no accepted sold candidates'
                     elif len(trimmed) < app.MIN_COMPARABLES:
                         reason = 'too few candidates after outlier filtering'
                     elif not selected:
                         reason = 'only relaxed specification evidence'
-                    else:
+                    elif valuation is not None:
                         reason = 'usable cached valuation not persisted'
+                    else:
+                        reason = 'no usable valuation'
                     evidence[reason] += 1
                     backlog[reason] += 1
                     if valuation is not None:

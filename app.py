@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.57"
+APP_VERSION = "0.10.58"
 CLASSIFIER_VERSION = "0.8.6"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -1091,6 +1091,8 @@ def init_db():
         "model": "TEXT",
         "ram_gb": "INTEGER",
         "storage_gb": "INTEGER",
+        "valuation_original_ram_gb": "INTEGER",
+        "valuation_original_storage_gb": "INTEGER",
         "image_url": "TEXT",
 
         "fault_reasons": "TEXT",
@@ -5788,6 +5790,8 @@ def save_listing(
     conn,
     item
 ):
+    original_ram = item.get("ram_gb")
+    original_storage = item.get("storage_gb")
     reconcile_item_specs_from_title(item)
 
     now = iso_now()
@@ -5918,6 +5922,9 @@ def save_listing(
 
         "storage_gb":
             item["storage_gb"],
+
+        "valuation_original_ram_gb": original_ram,
+        "valuation_original_storage_gb": original_storage,
 
         "fault_reasons":
             json.dumps(
@@ -8051,7 +8058,36 @@ def repair_v0947_sold_condition_cache(conn):
     )
 
 
-def sold_search_queries(row):
+def sold_search_queries(row, conn=None):
+    if product_research_problem(row, conn):
+        return []
+    own = conn is None
+    if own:
+        conn = connect_db()
+    try:
+        targets, conflict = conservative_spec_targets(conn, row)
+        if not conflict:
+            return _sold_search_queries(row)
+        queries = []
+        for target in targets:
+            queries.extend(_sold_search_queries(target))
+        # A generic contradictory title CPU still needs research; retain its
+        # advertised family/generation wording without inventing an exact SKU.
+        if not targets:
+            queries.extend(_sold_search_queries(row))
+            cpu = parse_cpu(row_value(row, 'title'), 'TITLE')
+            if cpu:
+                queries.extend(_sold_search_queries(dict(row, cpu=cpu['name'],
+                               cpu_confidence=cpu['confidence'])))
+                if not queries or cpu['name'] not in ' '.join(queries):
+                    queries.insert(0, f"{row['brand']} {valuation_model(row['brand'], row['model'])} {cpu['name']}")
+        return list(dict.fromkeys(queries))
+    finally:
+        if own:
+            conn.close()
+
+
+def _sold_search_queries(row):
     """
     Search Product Research from most specific to broadest.
 
@@ -8471,16 +8507,21 @@ def apply_cached_sold_valuations(conn):
     """Drain usable local evidence independently of the network query budget."""
     rows = conn.execute(
         "SELECT * FROM listings WHERE COALESCE(active,1)=1 "
-        "AND estimated_value IS NULL AND classifier_version=? "
+        "AND classifier_version=? "
         "AND COALESCE(rules_revision,0)=? ORDER BY first_seen ASC",
         (CLASSIFIER_VERSION, current_rules_revision(conn)),
     ).fetchall()
     updated = 0
-    print(f"Cached valuation sweep: checking {len(rows)} unvalued listings", flush=True)
+    print(f"Cached valuation sweep: checking {len(rows)} active listings for missing or conflicting valuations", flush=True)
     for row in rows:
+        conflict = conservative_spec_targets(conn, row)[1]
+        if row_value(row, 'estimated_value') is not None and not conflict:
+            continue
         if target_valuation_problem(row, conn):
             continue
         valuation = calculate_sold_valuation(conn, row)
+        if valuation is None and conflict and row_value(row, 'estimated_value') is not None:
+            valuation = insufficient_valuation('SPEC_CONFLICT_INSUFFICIENT_EVIDENCE')
         if valuation is not None:
             persist_listing_valuation(conn, row, valuation)
             updated += 1
@@ -8559,7 +8600,7 @@ def collect_needed_sold_data(conn, maximum=None):
         ):
             continue
 
-        queries = sold_search_queries(row)
+        queries = sold_search_queries(row, conn)
         if not queries:
             continue
 
@@ -9050,6 +9091,9 @@ def effective_ram_storage(row):
     Prefer unambiguous title-advertised specifications over stored parser
     values, then normalise storage capacity for comparable matching.
     """
+    if row_value(row, "_valuation_spec_override"):
+        return row_value(row, "ram_gb"), normalise_storage_gb(row_value(row, "storage_gb"))
+
     inferred = title_spec_overrides(
         row_value(row, "title")
     )
@@ -9917,7 +9961,82 @@ def weighted_percentile(candidates, p):
     return pairs[-1][0]
 
 
+def conservative_spec_targets(conn, target):
+    """Enumerate explicit conflicting specs without guessing a cheaper SKU."""
+    base = dict(target)
+    ram, storage = effective_ram_storage(target)
+    capacities = [[ram], [storage]]
+    for i, (field, original) in enumerate((
+        ("ram_gb", "valuation_original_ram_gb"),
+        ("storage_gb", "valuation_original_storage_gb"),
+    )):
+        for value in (row_value(target, field), row_value(target, original)):
+            value = normalise_storage_gb(value) if i else value
+            if value and value not in capacities[i]:
+                capacities[i].append(value)
+    stored_cpu = parse_cpu(row_value(target, "cpu"), "VALUATION")
+    title_cpu = parse_cpu(row_value(target, "title"), "TITLE")
+    cpus = [row_value(target, "cpu")]
+    unresolved = False
+    if stored_cpu and title_cpu:
+        if title_cpu.get("confidence") == "EXACT":
+            if title_cpu['name'].lower() != str(cpus[0]).lower():
+                cpus.append(title_cpu['name'])
+        elif title_cpu.get('family') and (
+            title_cpu.get('family') != stored_cpu.get('family')
+            or title_cpu.get('vendor') != stored_cpu.get('vendor')
+            or (title_cpu.get('generation') and title_cpu['generation'] != stored_cpu.get('generation'))
+        ):
+            alternatives = []
+            for row in conn.execute(
+                'SELECT DISTINCT cpu FROM sold_comparables WHERE LOWER(brand)=LOWER(?) '
+                'AND LOWER(model)=LOWER(?) AND evidence_version=?',
+                (target['brand'], target['model'], SOLD_EVIDENCE_VERSION),
+            ):
+                cpu = parse_cpu(row['cpu'], 'VALUATION')
+                if cpu and cpu.get('confidence') == 'EXACT' and all(
+                    not title_cpu.get(key) or cpu.get(key) == title_cpu.get(key)
+                    for key in ('vendor', 'family', 'generation')
+                ):
+                    alternatives.append(cpu['name'])
+            cpus.extend(sorted(set(alternatives)))
+            unresolved = not alternatives
+    conflict = unresolved or len(cpus) > 1 or any(len(values) > 1 for values in capacities)
+    if not conflict:
+        return [base], False
+    if unresolved:
+        return [], True
+    targets = []
+    for cpu in cpus:
+        for ram in capacities[0]:
+            for storage in capacities[1]:
+                candidate = dict(base, cpu=cpu, ram_gb=ram, storage_gb=storage,
+                                 cpu_confidence='EXACT', _valuation_spec_override=True)
+                targets.append(candidate)
+    return targets, True
+
+
 def calculate_sold_valuation(conn, target):
+    targets, conflict = conservative_spec_targets(conn, target)
+    if not conflict:
+        return _calculate_sold_valuation(conn, target)
+    # A priced higher configuration cannot stand in for an unsupported lower
+    # alternative. All plausible configurations need usable evidence.
+    values = [_calculate_sold_valuation(conn, candidate) for candidate in targets]
+    if not values or any(value is None for value in values):
+        return None
+    index = min(range(len(values)), key=lambda i: values[i]['estimated_value'])
+    chosen = dict(values[index])
+    chosen['confidence'] = 'LOW'
+    chosen['deal_score'] = deal_score(conn, target, chosen['estimated_value'],
+                                    chosen['undervaluation_gbp'], chosen['undervaluation_pct'], 'LOW')
+    specs = [{'cpu': row['cpu'], 'ram_gb': row['ram_gb'], 'storage_gb': row['storage_gb']} for row in targets]
+    decision = {'assessed': specs, 'selected': specs[index]}
+    chosen['basis'] = 'SOLD_CONSERVATIVE_SPEC_CONFLICT:' + json.dumps(decision, separators=(',', ':')) + ':' + chosen['basis']
+    return chosen
+
+
+def _calculate_sold_valuation(conn, target):
     selected = select_sold_evidence(
         conn,
         target
@@ -10241,10 +10360,22 @@ def deal_score(
     )
 
 
+def valuation_target_for_basis(target, basis):
+    prefix = 'SOLD_CONSERVATIVE_SPEC_CONFLICT:'
+    if not str(basis or '').startswith(prefix):
+        return target
+    try:
+        decision, _ = json.JSONDecoder().raw_decode(basis[len(prefix):])
+        return dict(target, **decision['selected'], _valuation_spec_override=True,
+                    cpu_confidence='EXACT')
+    except (ValueError, TypeError, KeyError):
+        return target
+
+
 def sold_evidence_for_basis(conn, target, basis):
     if not basis or not basis.startswith("SOLD_"):
         return []
-    return sorted(select_sold_evidence(conn, target), key=lambda c: c["total"])
+    return sorted(select_sold_evidence(conn, valuation_target_for_basis(target, basis)), key=lambda c: c["total"])
 
 
 def sold_price_logic_for_basis(conn, target, basis):
@@ -10257,6 +10388,7 @@ def sold_price_logic_for_basis(conn, target, basis):
     if not basis or not basis.startswith("SOLD_"):
         return []
 
+    target = valuation_target_for_basis(target, basis)
     candidates = sold_candidates(conn, target)
     selected = remove_price_outliers(candidates)
 
@@ -10363,6 +10495,10 @@ def sold_price_logic_for_basis(conn, target, basis):
 
 
 def valuation_label(basis):
+    if basis.startswith("SOLD_CONSERVATIVE_SPEC_CONFLICT:"):
+        return "Conflicting specifications: lowest supported sold valuation (LOW confidence)"
+    if basis == "SPEC_CONFLICT_INSUFFICIENT_EVIDENCE":
+        return "Conflicting specifications: an alternative lacks sold evidence"
     if basis.startswith("SOLD_"):
         return "Sold prices: matching model, CPU, RAM and storage"
     if basis.startswith("ACTIVE_FALLBACK"):
@@ -10382,6 +10518,9 @@ def calculate_valuation(conn, target):
     sold = calculate_sold_valuation(conn, target)
     if sold is not None:
         return sold
+
+    if conservative_spec_targets(conn, target)[1]:
+        return insufficient_valuation("SPEC_CONFLICT_INSUFFICIENT_EVIDENCE")
 
     active = calculate_active_valuation(conn, target)
     if active is not None:

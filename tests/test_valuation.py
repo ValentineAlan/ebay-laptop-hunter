@@ -156,13 +156,72 @@ class ValuationTests(unittest.TestCase):
         current = app.calculate_valuation(self.conn, dict(self.target, rules_revision=revision))
         self.assertEqual(current['estimated_value'], 400)
 
-    def test_unambiguous_title_specs_override_missing_or_incorrect_stored_values(self):
+    def test_unambiguous_title_specs_fill_missing_stored_values(self):
         self.pool()
-        for changes in [dict(ram_gb=None, storage_gb=None), dict(ram_gb=16, storage_gb=512)]:
+        for changes in [dict(ram_gb=None, storage_gb=None)]:
             with self.subTest(changes=changes):
                 value = app.calculate_sold_valuation(self.conn, dict(self.target, **changes))
                 self.assertEqual(value['estimated_value'], 400)
                 self.assertIn('SPEC_EXACT=3', value['basis'])
+
+    def test_capacity_conflict_uses_lower_supported_price_and_low_confidence(self):
+        self.pool(8)
+        for i in range(8):
+            self.sold('big' + str(i), 600, ram_gb=16, storage_gb=512)
+            self.sold('ram' + str(i), 500, ram_gb=16, storage_gb=256)
+            self.sold('storage' + str(i), 450, ram_gb=8, storage_gb=512)
+        target = dict(self.target, ram_gb=16, storage_gb=512)
+        value = app.calculate_sold_valuation(self.conn, target)
+        self.assertIsNotNone(value)
+        self.assertLess(value['estimated_value'], 600)
+        self.assertEqual(value['confidence'], 'LOW')
+        self.assertTrue(value['basis'].startswith('SOLD_CONSERVATIVE_SPEC_CONFLICT:'))
+        self.assertEqual(app.valuation_target_for_basis(target, value['basis'])['ram_gb'], 8)
+
+    def test_unpriced_conflict_does_not_use_active_fallback(self):
+        self.pool()
+        target = dict(self.target, ram_gb=16, storage_gb=512)
+        self.assertIsNone(app.calculate_sold_valuation(self.conn, target))
+        with patch.object(app, 'calculate_active_valuation') as fallback:
+            value = app.calculate_valuation(self.conn, target)
+            fallback.assert_not_called()
+        self.assertEqual(value['basis'], 'SPEC_CONFLICT_INSUFFICIENT_EVIDENCE')
+
+    def test_cpu_conflict_uses_evidence_prices_not_cpu_ranking(self):
+        self.pool(8)
+        for i in range(8):
+            self.sold('i7' + str(i), 250, cpu='i7-1165G7')
+        target = dict(self.target, cpu='i7-1165G7')
+        value = app.calculate_sold_valuation(self.conn, target)
+        self.assertEqual(value['estimated_value'], 250)
+        self.assertEqual(value['confidence'], 'LOW')
+        self.assertEqual(app.valuation_target_for_basis(target, value['basis'])['cpu'], 'i7-1165G7')
+
+    def test_generic_title_cpu_conflict_requires_lower_family_evidence(self):
+        target = dict(self.target, cpu='i7-1165G7', title='Dell Latitude 5420 11th Gen i5 8GB RAM 256GB SSD')
+        for i in range(8):
+            self.sold('i7' + str(i), 600, cpu='i7-1165G7')
+        self.assertIsNone(app.calculate_sold_valuation(self.conn, target))
+        self.pool(8)
+        value = app.calculate_sold_valuation(self.conn, target)
+        self.assertIsNotNone(value)
+        self.assertLess(value['estimated_value'], 600)
+        self.assertEqual(value['confidence'], 'LOW')
+
+    def test_conflicting_capacity_queries_cover_both_advertised_values(self):
+        target = dict(self.target, ram_gb=16, storage_gb=512)
+        queries = app.sold_search_queries(target, self.conn)
+        self.assertTrue(any('8GB 256GB' in q for q in queries), queries)
+        self.assertTrue(any('16GB 512GB' in q for q in queries), queries)
+
+    def test_cached_sweep_removes_unsupported_conflicting_existing_value(self):
+        self.pool()
+        self.active('conflict', ram_gb=16, storage_gb=512, estimated_value=600,
+                    deal_score=90, valuation_confidence='HIGH', valuation_basis='SOLD_OLD')
+        app.apply_cached_sold_valuations(self.conn)
+        row = self.conn.execute("SELECT * FROM listings WHERE item_id='conflict'").fetchone()
+        self.assertIsNone(row['estimated_value'])
+        self.assertEqual(row['valuation_basis'], 'SPEC_CONFLICT_INSUFFICIENT_EVIDENCE')
 
     def test_bad_comparable_titles_are_excluded(self):
         for suffix in [' LOT OF 2', ' job lot', ' faulty', ' choose 8/16GB', ' no ram', ' spares']:
