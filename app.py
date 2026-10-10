@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.53"
+APP_VERSION = "0.10.54"
 CLASSIFIER_VERSION = "0.8.6"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -8535,7 +8535,21 @@ def collect_needed_sold_data(conn, maximum=None):
             continue
 
         queries = sold_search_queries(row)
-        if not queries or all(sold_search_is_fresh(conn, research_query_key(q)) for q in queries):
+        if not queries:
+            continue
+
+        if all(sold_search_is_fresh(conn, research_query_key(q)) for q in queries):
+            # Fresh searches suppress network refresh, not valuation. Another
+            # listing can have collected usable evidence since this row was
+            # last analysed. Apply that evidence to a still-unvalued row.
+            if row_value(row, "estimated_value") is None:
+                valuation = calculate_sold_valuation(conn, row)
+                if valuation is not None:
+                    persist_listing_valuation(conn, row, valuation)
+                    print(
+                        "Product Research: cached evidence valued "
+                        f"{row['item_id']} at {valuation['estimated_value']}"
+                    )
             continue
 
         attempted_listings += 1

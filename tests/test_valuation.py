@@ -292,6 +292,19 @@ class ValuationTests(unittest.TestCase):
             app.collect_needed_sold_data(self.conn)
             fetch.assert_not_called()
 
+    def test_fresh_queries_still_value_unvalued_listing_from_cache(self):
+        self.pool()
+        self.active('target', estimated_value=None)
+        for query in app.sold_search_queries(self.target):
+            self.insert('sold_searches', dict(query_key=app.research_query_key(query), keywords=query,
+                        searched_at=app.iso_now(), status='OK', result_count=3))
+        with patch.object(app, 'collect_sold_search') as fetch:
+            app.collect_needed_sold_data(self.conn, maximum=1)
+            fetch.assert_not_called()
+        row = self.conn.execute("SELECT * FROM listings WHERE item_id='target'").fetchone()
+        self.assertEqual(row['estimated_value'], 400)
+        self.assertTrue(row['valuation_basis'].startswith('SOLD_'))
+
     def test_migration_is_idempotent_and_preserves_history(self):
         self.active('target', estimated_value=500, classifier_version='0.7.9')
         self.sold('old', evidence_version=None)
