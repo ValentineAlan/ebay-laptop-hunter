@@ -4,4 +4,5 @@
 !Dockerfile
 !Dockerfile.ebaysid-helper
 !app.py
+!pr_operations.py
 !ebaysid-helper.py

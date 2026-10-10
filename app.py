@@ -45,6 +45,7 @@ import sys
 import hashlib
 import hmac
 import secrets
+from pr_operations import Operations
 from http.cookies import SimpleCookie
 
 from datetime import datetime, timezone, timedelta
@@ -56,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.52"
+APP_VERSION = "0.10.53"
 CLASSIFIER_VERSION = "0.8.6"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -552,6 +553,7 @@ def connect_db():
 RUNTIME_STATE_PRODUCT_RESEARCH_RATE = "product_research_rate"
 RUNTIME_STATE_PRODUCT_RESEARCH_CIRCUIT = "product_research_circuit"
 RUNTIME_STATE_PRODUCT_RESEARCH_TELEMETRY = "product_research_telemetry"
+RUNTIME_STATE_PRODUCT_RESEARCH_OPERATIONS = "product_research_operations"
 
 
 def runtime_state_get(key, default=None):
@@ -636,6 +638,51 @@ def runtime_state_delete(key):
 
     finally:
         conn.close()
+
+
+
+def _product_research_operations_write(state, updates):
+    # Commit a circuit transition and its notification in one transaction.
+    conn = connect_db()
+    try:
+        with conn:
+            for key, value in dict(updates, **{
+                RUNTIME_STATE_PRODUCT_RESEARCH_OPERATIONS: state,
+            }).items():
+                if value is None:
+                    conn.execute("DELETE FROM runtime_state WHERE key=?", (key,))
+                else:
+                    conn.execute(
+                        "INSERT INTO runtime_state(key,value_json,updated_at) VALUES (?,?,?) "
+                        "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, "
+                        "updated_at=excluded.updated_at",
+                        (key, json.dumps(value, sort_keys=True), iso_now()),
+                    )
+    finally:
+        conn.close()
+
+
+_product_research_operations = Operations(
+    lambda: runtime_state_get(RUNTIME_STATE_PRODUCT_RESEARCH_OPERATIONS, {}),
+    _product_research_operations_write,
+    lambda text: send_telegram_admin_message(text),
+    clock=lambda: time.time(),
+)
+
+
+def _product_research_alert_worker():
+    while True:
+        try:
+            _product_research_update_volume_state()
+            _product_research_operations.deliver_one()
+        except Exception as exc:
+            print("Product Research operational alert worker:", type(exc).__name__, flush=True)
+        time.sleep(5)
+
+
+def start_product_research_alert_worker():
+    threading.Thread(target=_product_research_alert_worker,
+                     name="product-research-alerts", daemon=True).start()
 
 
 def _migrate_legacy_runtime_state_files(conn):
@@ -6140,7 +6187,7 @@ _product_research_browser_lock = threading.Lock()
 # This records timing/count information only; request URLs, cookies and session
 # identifiers are not retained.  Unlike the original per-process counters,
 # this state is persisted in SQLite so redeploys do not reset an experiment.
-# Request timestamps are retained for 12 hours so rolling-volume evidence also
+# Request timestamps are retained for 24 hours so rolling-volume evidence also
 # survives container restarts.
 _product_research_telemetry_lock = threading.Lock()
 _product_research_telemetry_loaded = False
@@ -6189,7 +6236,7 @@ def _product_research_telemetry_load():
                 timestamp = float(value)
             except Exception:
                 continue
-            if timestamp >= now - (12 * 60 * 60):
+            if now - PRODUCT_RESEARCH_ROLLING_WINDOW_SECONDS < timestamp <= now:
                 request_times.append(timestamp)
 
         try:
@@ -6266,7 +6313,7 @@ def _product_research_telemetry_begin():
         request_times = [
             timestamp
             for timestamp in request_times
-            if timestamp >= cutoff
+            if cutoff < timestamp <= now_wall
         ]
         state["request_times"] = request_times
 
@@ -6329,29 +6376,25 @@ def _product_research_telemetry_begin():
     }
 
 
+def _product_research_new_experiment(state):
+    return {
+        "recovered_at": iso_now(),
+        "recovered_epoch": time.time(),
+        # Count the successful recovery probe as request/success number one.
+        "requests_since_recovery": 1,
+        "successful_requests_since_recovery": 1,
+        "process_restarts_since_recovery": 0,
+        "request_count_at_recovery": int(state.get("request_count") or 0),
+        "challenge_at": None,
+    }
+
+
 def _product_research_telemetry_mark_recovery():
-    """Start a durable recovery-to-challenge experiment."""
+    """Start a durable experiment after the first validated healthy search."""
     _product_research_telemetry_load()
-
-    now = time.time()
-
     with _product_research_telemetry_lock:
-        state = _product_research_telemetry_state
-
-        state["experiment"] = {
-            "recovered_at": iso_now(),
-            "recovered_epoch": now,
-            # The successful recovery probe itself is useful evidence and is
-            # counted as request/success number one of the new experiment.
-            "requests_since_recovery": 1,
-            "successful_requests_since_recovery": 1,
-            "process_restarts_since_recovery": 0,
-            "request_count_at_recovery": int(
-                state.get("request_count") or 0
-            ),
-            "challenge_at": None,
-        }
-
+        _product_research_telemetry_state["experiment"] = _product_research_new_experiment(
+            _product_research_telemetry_state)
         _product_research_telemetry_save_locked()
 
 
@@ -6384,7 +6427,7 @@ def _product_research_telemetry_log(telemetry, outcome, detail=""):
             )
 
         if (
-            outcome == "CHALLENGE"
+            outcome in ("CHALLENGE", "AUTH_REQUIRED")
             and experiment.get("recovered_at")
         ):
             if not experiment.get("challenge_at"):
@@ -6394,6 +6437,7 @@ def _product_research_telemetry_log(telemetry, outcome, detail=""):
                 )
                 experiment.update({
                     "challenge_at": iso_now(),
+                    "challenge_outcome": outcome,
                     "challenge_epoch": telemetry[
                         "requested_at_epoch"
                     ],
@@ -6436,7 +6480,7 @@ def _product_research_telemetry_log(telemetry, outcome, detail=""):
         f"outcome={outcome} "
         f"rolling=1m:{counts[1]},5m:{counts[5]},"
         f"15m:{counts[15]},30m:{counts[30]},60m:{counts[60]},"
-        f"6h:{counts[360]},12h:{counts[720]} "
+        f"6h:{counts[360]},12h:{counts[720]},24h:{counts[1440]} "
         f"session:{telemetry['process_run']}"
         f"{experiment_suffix}"
     )
@@ -6566,86 +6610,92 @@ def _product_research_retry_after_seconds(exc):
     return float(PRODUCT_RESEARCH_429_FALLBACK_SECONDS)
 
 
-def _product_research_volume_wait_seconds():
-    """
-    Return the time until another normal Product Research request is allowed
-    by the rolling 24-hour safety ceiling.
-    """
+def _product_research_volume_snapshot():
+    """Count attempted requests, including recovery probes, in rolling 24h."""
     _product_research_telemetry_load()
     now = time.time()
-
     with _product_research_telemetry_lock:
-        request_times = [
-            float(ts)
-            for ts in (
-                _product_research_telemetry_state.get("request_times")
-                or []
-            )
-            if now - float(ts) < PRODUCT_RESEARCH_ROLLING_WINDOW_SECONDS
-        ]
+        request_times = sorted(
+            float(ts) for ts in (_product_research_telemetry_state.get("request_times") or [])
+            if now - PRODUCT_RESEARCH_ROLLING_WINDOW_SECONDS < float(ts) <= now
+        )
+    release_at = 0.0
+    if len(request_times) >= PRODUCT_RESEARCH_ROLLING_24H_LIMIT:
+        index = len(request_times) - PRODUCT_RESEARCH_ROLLING_24H_LIMIT
+        release_at = request_times[index] + PRODUCT_RESEARCH_ROLLING_WINDOW_SECONDS
+    return len(request_times), release_at
 
-    if len(request_times) < PRODUCT_RESEARCH_ROLLING_24H_LIMIT:
-        return 0.0
 
-    request_times.sort()
-    index = len(request_times) - PRODUCT_RESEARCH_ROLLING_24H_LIMIT
-    release_at = (
-        request_times[index]
-        + PRODUCT_RESEARCH_ROLLING_WINDOW_SECONDS
-    )
-    return max(0.0, release_at - now)
+def _product_research_volume_wait_seconds():
+    _, release_at = _product_research_volume_snapshot()
+    return max(0.0, release_at - time.time())
+
+
+def _product_research_update_volume_state():
+    # Serialize snapshot and transition so concurrent callers cannot publish
+    # an older snapshot after a newer one.
+    with _product_research_operations.lock:
+        count, release_at = _product_research_volume_snapshot()
+        with _product_research_rate_lock:
+            cadence = float(_product_research_rate.get("interval_seconds", PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS))
+        # Do not announce a pause on every request once old timestamps age out
+        # at the normal cadence. Report volume waits that exceed that cadence.
+        report_release = release_at
+        operations = _product_research_operations.state()
+        if not operations.get("volume_waiting") and release_at - time.time() <= cadence:
+            report_release = 0.0
+        _product_research_operations.volume(
+            count, PRODUCT_RESEARCH_ROLLING_24H_LIMIT, report_release,
+            circuit_open=_product_research_circuit_is_open(),
+        )
+    return max(0.0, release_at - time.time())
+
+
+_product_research_admission_lock = threading.Lock()
+_product_research_search_lock = threading.Lock()
+_product_research_response_context = threading.local()
 
 
 def _product_research_wait_for_slot(bypass_volume_limit=False):
     global _product_research_next_request_at
-
     _product_research_load_rate_state()
     last_volume_log = 0.0
-
     while True:
-        volume_wait = (
-            0.0
-            if bypass_volume_limit
-            else _product_research_volume_wait_seconds()
-        )
-
-        with _product_research_rate_lock:
-            now_wall = time.time()
-            now_mono = time.monotonic()
-
-            backoff_wait = max(
-                0.0,
-                float(_product_research_rate.get("backoff_until", 0.0)) - now_wall,
-            )
-            cadence_wait = max(
-                0.0,
-                _product_research_next_request_at - now_mono,
-            )
-            wait_for = max(
-                backoff_wait,
-                cadence_wait,
-                volume_wait,
-            )
-
-            if wait_for <= 0:
-                interval = float(
-                    _product_research_rate.get(
-                        "interval_seconds",
-                        PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS,
-                    )
+        with _product_research_admission_lock:
+            circuit_open = _product_research_circuit_is_open()
+            if circuit_open and not bypass_volume_limit:
+                raise RuntimeError("PRODUCT_RESEARCH_CIRCUIT_OPEN")
+            # Re-evaluate bypass after waiting: a probe queued behind cadence
+            # must obey the guard if another probe has already closed circuit.
+            volume_wait = _product_research_update_volume_state()
+            if bypass_volume_limit and circuit_open:
+                volume_wait = 0.0
+            with _product_research_rate_lock:
+                now_wall = time.time()
+                now_mono = time.monotonic()
+                wait_for = max(
+                    0.0,
+                    float(_product_research_rate.get("backoff_until", 0.0)) - now_wall,
+                    _product_research_next_request_at - now_mono,
+                    volume_wait,
                 )
-                _product_research_next_request_at = now_mono + interval
-                return
-
+                if wait_for <= 0 and not _product_research_search_lock.acquire(blocking=False):
+                    wait_for = 0.1
+                if wait_for <= 0:
+                    _product_research_response_context.search_lock_held = True
+                    interval = float(_product_research_rate.get(
+                        "interval_seconds", PRODUCT_RESEARCH_INITIAL_INTERVAL_SECONDS))
+                    _product_research_next_request_at = now_mono + interval
+            if wait_for <= 0:
+                telemetry = _product_research_telemetry_begin()
+                _product_research_update_volume_state()
+                return telemetry
         if volume_wait > 0 and time.monotonic() - last_volume_log >= 300:
-            print(
-                "Product Research volume guard: "
-                f"{PRODUCT_RESEARCH_ROLLING_24H_LIMIT} requests in rolling 24h; "
-                f"next slot in {int(volume_wait)}s; backlog preserved",
-                flush=True,
-            )
+            count, release_at = _product_research_volume_snapshot()
+            print("Product Research volume guard: "
+                  f"{count} requests in rolling 24h; limit={PRODUCT_RESEARCH_ROLLING_24H_LIMIT}; "
+                  f"next slot={Operations.utc(release_at)}; backlog preserved", flush=True)
             last_volume_log = time.monotonic()
-
         time.sleep(min(wait_for, 30.0))
 
 
@@ -6714,10 +6764,10 @@ def _product_research_record_429(exc):
         f"request interval {old_interval:.1f}s -> {new_interval:.1f}s"
     )
 
+    _product_research_operations.throttled(
+        time.time() + retry_after, new_interval,
+    )
     return retry_after
-
-
-
 
 
 _product_research_circuit_lock = threading.Lock()
@@ -6907,7 +6957,7 @@ def _product_research_experiment_lines(experiment):
             "Requests before block: "
             f"1h {count(60)} · "
             f"6h {count(360)} · "
-            f"12h {count(720)}"
+            f"12h {count(720)} · 24h {count(1440)}"
         )
 
     failed_probes = int(
@@ -6927,12 +6977,16 @@ def _product_research_experiment_lines(experiment):
 def _product_research_challenge_telegram_message(
     cooldown_seconds=None,
     challenge_count=None,
+    reason=None,
 ):
     experiment = (
         _product_research_experiment_snapshot()
     )
 
-    if challenge_count and challenge_count > 1:
+    auth_required = reason and "signed out" in reason
+    if auth_required:
+        title = "eBay Product Research authentication required"
+    elif challenge_count and challenge_count > 1:
         title = "eBay Product Research is still blocked"
     else:
         title = "eBay Product Research paused"
@@ -6940,11 +6994,14 @@ def _product_research_challenge_telegram_message(
     lines = [
         title,
         "",
-        "No action required.",
+        ("Sign in to eBay in the existing Chromium session."
+         if auth_required else "No action required."),
         "LaptopLander has paused Product Research automatically; "
         "the valuation backlog is preserved.",
     ]
 
+    if auth_required:
+        lines.extend(["", "Chromium: " + PRODUCT_RESEARCH_BROWSER_GUI_URL])
     if cooldown_seconds:
         lines.extend([
             "",
@@ -6956,7 +7013,7 @@ def _product_research_challenge_telegram_message(
 
     if challenge_count and challenge_count > 1:
         lines.append(
-            "Recovery probe attempts blocked: "
+            "Recovery responses still blocked or signed out: "
             + str(challenge_count - 1)
         )
 
@@ -6976,8 +7033,11 @@ def _product_research_recovered_telegram_message(
         "eBay Product Research restored",
         "",
         "No action required.",
-        "A real Product Research search succeeded and LaptopLander "
-        "has resumed valuation processing automatically.",
+        "A real Product Research search succeeded; the browser session is restored.",
+        ("Normal processing still waits for rolling-volume allowance; next eligible request: "
+         + Operations.utc(_product_research_volume_snapshot()[1])
+         if _product_research_volume_wait_seconds() > 0 else
+         "Normal requests are eligible, subject to rate backoff and cadence."),
         "The block escalation has been reset.",
     ]
 
@@ -7006,11 +7066,12 @@ def _product_research_recovered_telegram_message(
 
 
 def _product_research_open_circuit(reason):
-    previous = _product_research_circuit_state()
+    with _product_research_operations.lock:
+        return _product_research_open_circuit_locked(reason)
 
-    already_open = bool(
-        previous.get("opened_at")
-    )
+
+def _product_research_open_circuit_locked(reason):
+    previous = _product_research_circuit_state()
 
     try:
         previous_count = int(
@@ -7051,54 +7112,19 @@ def _product_research_open_circuit(reason):
         "reason": str(reason),
         "challenge_count": challenge_count,
         "cooldown_seconds": cooldown_seconds,
-        "telegram_alert_sent": bool(
-            previous.get("telegram_alert_sent")
-        ),
     }
 
-    # One Telegram alert for each newly observed block event. A fallback
-    # probe that gets blocked again is a new event and therefore deserves
-    # one updated alert showing the longer cooldown.
-    should_alert = (
-        not already_open
-        or challenge_count > previous_count
+    operations = _product_research_operations.state()
+    # HTTP 429/failure warnings are superseded by this more specific pause.
+    operations.update(rate_limited=False, failure_count=0, failure_alerted=False)
+    _product_research_operations.commit(
+        operations,
+        _product_research_challenge_telegram_message(
+            cooldown_seconds=cooldown_seconds, challenge_count=challenge_count,
+            reason=reason,
+        ),
+        {RUNTIME_STATE_PRODUCT_RESEARCH_CIRCUIT: state},
     )
-
-    if should_alert:
-        try:
-            ok, error = send_telegram_admin_message(
-                _product_research_challenge_telegram_message(
-                    cooldown_seconds=cooldown_seconds,
-                    challenge_count=challenge_count,
-                )
-            )
-
-            if ok:
-                state["telegram_alert_sent"] = True
-
-                print(
-                    "Product Research block alert sent privately to Telegram admin",
-                    flush=True,
-                )
-            else:
-                print(
-                    "Product Research block Telegram alert failed: "
-                    f"{error}",
-                    flush=True,
-                )
-
-        except Exception as exc:
-            print(
-                "Product Research block Telegram alert error:",
-                repr(exc),
-                flush=True,
-            )
-
-    with _product_research_circuit_lock:
-        runtime_state_set(
-            RUNTIME_STATE_PRODUCT_RESEARCH_CIRCUIT,
-            state,
-        )
 
     cooldown_label = (
         _product_research_cooldown_label(
@@ -7107,7 +7133,7 @@ def _product_research_open_circuit(reason):
     )
 
     _session_state_update(
-        status="CHALLENGED",
+        status="AUTH REQUIRED" if "signed out" in reason else "CHALLENGED",
         last_checked_at=iso_now(),
         last_failure_at=iso_now(),
         message=(
@@ -7127,16 +7153,16 @@ def _product_research_open_circuit(reason):
 
 
 def _product_research_close_circuit():
+    with _product_research_operations.lock:
+        return _product_research_close_circuit_locked()
+
+
+def _product_research_close_circuit_locked():
     previous = _product_research_circuit_state()
 
     was_open = bool(
         previous.get("opened_at")
     )
-
-    with _product_research_circuit_lock:
-        runtime_state_delete(
-            RUNTIME_STATE_PRODUCT_RESEARCH_CIRCUIT
-        )
 
     for file_path in (
         PRODUCT_RESEARCH_RECOVERY_SIGNAL,
@@ -7156,8 +7182,6 @@ def _product_research_close_circuit():
             _product_research_experiment_snapshot()
         )
 
-        _product_research_telemetry_mark_recovery()
-
         print(
             "Product Research circuit CLOSED: "
             "real Product Research response succeeded; "
@@ -7165,31 +7189,20 @@ def _product_research_close_circuit():
             flush=True,
         )
 
-        try:
-            ok, error = send_telegram_admin_message(
-                _product_research_recovered_telegram_message(
-                    previous_experiment
-                )
+        operations = _product_research_operations.state()
+        operations.update(rate_limited=False, failure_count=0, failure_alerted=False)
+        message = _product_research_recovered_telegram_message(previous_experiment)
+        with _product_research_telemetry_lock:
+            telemetry_state = dict(_product_research_telemetry_state)
+            telemetry_state["experiment"] = _product_research_new_experiment(telemetry_state)
+            _product_research_operations.commit(
+                operations, message,
+                {RUNTIME_STATE_PRODUCT_RESEARCH_CIRCUIT: None,
+                 RUNTIME_STATE_PRODUCT_RESEARCH_TELEMETRY: telemetry_state},
             )
+            _product_research_telemetry_state.update(telemetry_state)
+    return was_open
 
-            if ok:
-                print(
-                    "Product Research recovery alert sent privately to Telegram admin",
-                    flush=True,
-                )
-            else:
-                print(
-                    "Product Research recovery Telegram alert failed: "
-                    f"{error}",
-                    flush=True,
-                )
-
-        except Exception as exc:
-            print(
-                "Product Research recovery Telegram alert error:",
-                repr(exc),
-                flush=True,
-            )
 
 def _product_research_fetch(
     url,
@@ -7205,10 +7218,10 @@ def _product_research_fetch(
 
     cookie is retained only for compatibility with old callers.
     """
-    _product_research_wait_for_slot(
+    telemetry = _product_research_wait_for_slot(
         bypass_volume_limit=bypass_volume_limit
     )
-    telemetry = _product_research_telemetry_begin()
+    _product_research_response_context.telemetry = telemetry
 
     request_id = secrets.token_hex(16)
 
@@ -7313,10 +7326,6 @@ def _product_research_fetch(
     except Exception:
         status = 0
 
-    content_type = str(
-        response_payload.get("content_type") or ""
-    )
-
     raw = response_payload.get("body")
 
     if raw is None:
@@ -7353,81 +7362,16 @@ def _product_research_fetch(
             "HTTP 429 Too Many Requests"
         )
 
-    if status < 200 or status >= 300:
-        print(
-            "Product Research browser HTTP error: "
-            f"HTTP={status} "
-            f"content_type={content_type!r}",
-            flush=True,
-        )
-
-        _product_research_telemetry_log(
-            telemetry,
-            f"HTTP_{status}",
-            f"content_type={content_type!r}",
-        )
-
-        raise RuntimeError(
-            f"PRODUCT_RESEARCH_HTTP_{status}"
-        )
-
-    if not raw.strip():
-        print(
-            "Product Research browser response: "
-            f"HTTP={status} "
-            f"content_type={content_type!r} "
-            "EMPTY BODY",
-            flush=True,
-        )
-
-        _product_research_telemetry_log(
-            telemetry,
-            "EMPTY",
-            f"HTTP={status}",
-        )
-        return raw
-
-    if raw.lstrip().startswith("<"):
-        preview = re.sub(
-            r"\s+",
-            " ",
-            raw.lstrip()[:500],
-        )
-
-        print(
-            "Product Research browser returned HTML: "
-            f"HTTP={status} "
-            f"content_type={content_type!r} "
-            f"preview={preview!r}",
-            flush=True,
-        )
-
-        lowered = raw.lower()
-        html_outcome = (
-            "CHALLENGE"
-            if any(
-                marker in lowered
-                for marker in (
-                    "pardon our interruption",
-                    "splashui/challenge",
-                    "security measure",
-                    "captcha",
-                    "challenge",
-                )
-            )
-            else "HTML"
-        )
-        _product_research_telemetry_log(
-            telemetry,
-            html_outcome,
-            f"HTTP={status} bytes={len(raw)}",
-        )
-    else:
-        _product_research_telemetry_log(
-            telemetry,
-            "OK",
-            f"HTTP={status} bytes={len(raw)}",
-        )
+    # eBay can send a challenge or sign-in body with HTTP 403. Let the
+    # response validator classify it before treating it as a transport error.
+    lowered = raw.lower()
+    session_failure = any(marker in lowered for marker in (
+        "pardon our interruption", "splashui/challenge", "security measure",
+        "captcha", "challenge", "signin.ebay", "sign in", "auth_required", "invalid_session",
+    ))
+    if (status < 200 or status >= 300) and not session_failure:
+        _product_research_telemetry_log(telemetry, f"HTTP_{status}")
+        raise RuntimeError(f"PRODUCT_RESEARCH_HTTP_{status}")
 
     return raw
 
@@ -7529,7 +7473,33 @@ def _research_text(value):
 
 
 
-def product_research_search(
+def product_research_search(keywords, offset=0, allow_probe=False):
+    _product_research_response_context.telemetry = None
+    _product_research_response_context.search_lock_held = False
+    try:
+        return _product_research_search(keywords, offset, allow_probe)
+    except ProductResearchRateLimited:
+        raise
+    except Exception as exc:
+        reason = str(exc)
+        if not reason.startswith(("PRODUCT_RESEARCH_CIRCUIT_OPEN",
+                                  "PRODUCT_RESEARCH_BROWSER_SESSION_CHALLENGED",
+                                  "PRODUCT_RESEARCH_BROWSER_SESSION_INVALID")):
+            _product_research_operations.failure(reason.split(":", 1)[0])
+        raise
+    finally:
+        if getattr(_product_research_response_context, "search_lock_held", False):
+            _product_research_response_context.search_lock_held = False
+            _product_research_search_lock.release()
+
+
+def _product_research_response_outcome(outcome):
+    telemetry = getattr(_product_research_response_context, "telemetry", None)
+    if telemetry is not None:
+        _product_research_telemetry_log(telemetry, outcome)
+
+
+def _product_research_search(
     keywords,
     offset=0,
     allow_probe=False,
@@ -7606,10 +7576,14 @@ def product_research_search(
     )
 
     if search is not None:
+        _product_research_response_outcome("OK")
         _product_research_record_success()
 
         # A real Product Research response proves recovery.
-        _product_research_close_circuit()
+        recovered = _product_research_close_circuit()
+        _product_research_operations.healthy(circuit_recovered=recovered)
+        if not _product_research_experiment_snapshot().get("recovered_at"):
+            _product_research_telemetry_mark_recovery()
 
         helper_status = _read_json_file(PRODUCT_RESEARCH_HELPER_STATE)
 
@@ -7664,6 +7638,7 @@ def product_research_search(
         pass
 
     if browser_challenge:
+        _product_research_response_outcome("CHALLENGE")
         _product_research_open_circuit(
             "eBay Chromium session challenged"
         )
@@ -7673,6 +7648,7 @@ def product_research_search(
         )
 
     if auth_failure:
+        _product_research_response_outcome("AUTH_REQUIRED")
         _product_research_open_circuit(
             "eBay Chromium session signed out"
         )
@@ -7681,6 +7657,7 @@ def product_research_search(
             "PRODUCT_RESEARCH_BROWSER_SESSION_INVALID"
         )
 
+    _product_research_response_outcome("UNEXPECTED" if raw.strip() else "EMPTY")
     types = ",".join(
         obj.get("_type", "?")
         for obj in modules
@@ -17000,7 +16977,14 @@ def diagnostics_html(hp_model_probe=False):
         circuit.get("cooldown_seconds")
     )
 
+    operations = _product_research_operations.state()
+    rolling_count, volume_release = _product_research_volume_snapshot()
     circuit_items = [
+        ("Rolling 24h requests / normal limit", f"{rolling_count} / {PRODUCT_RESEARCH_ROLLING_24H_LIMIT}"),
+        ("Volume guard", "WAITING" if volume_release > time.time() else "AVAILABLE"),
+        ("Next volume slot (UTC)", Operations.utc(volume_release) if volume_release else "Now"),
+        ("Pending private alerts", len(operations.get("pending") or [])),
+        ("Consecutive helper/response failures", operations.get("failure_count", 0)),
         (
             "Circuit",
             "OPEN"
@@ -17055,7 +17039,10 @@ def diagnostics_html(hp_model_probe=False):
             (
                 "Preserved — Product Research worker paused"
                 if circuit_open
-                else "Processing normally"
+                else ("Preserved — waiting for volume allowance"
+                      if volume_release > time.time() else
+                      "Preserved — rate backoff" if operations.get("rate_limited") else
+                      "Normal requests eligible")
             )
         ),
         (
@@ -23365,6 +23352,7 @@ def main():
         )
 
     start_dashboard()
+    start_product_research_alert_worker()
     start_product_research_session_monitor()
     start_product_research_worker()
     start_cpu_benchmark_refresh_worker()
