@@ -57,6 +57,7 @@ def report(conn, hours, limit):
         blockers = Counter()
         searches = {r['query_key']: r for r in conn.execute('SELECT * FROM sold_searches')}
         samples = []
+        evidence = Counter()
         for row in recent:
             problem = app.product_research_problem(row, conn)
             if problem:
@@ -74,9 +75,37 @@ def report(conn, hours, limit):
                     counts['query history: records exist, none OK'] += 1
                 else:
                     counts['query history: no recorded searches'] += 1
-                if len(samples) < limit and row['estimated_value'] is None:
-                    samples.append({'id': row['item_id'], 'title': row['title'],
-                                    'queries': queries, 'searches': [dict(r) if r else None for r in records]})
+                if row['estimated_value'] is None:
+                    problem = app.target_valuation_problem(row, conn)
+                    candidates = app.sold_candidates(conn, row)
+                    trimmed = app.remove_price_outliers(candidates)
+                    selected = app.select_sold_evidence(conn, row)
+                    valuation = app.calculate_sold_valuation(conn, row)
+                    if problem:
+                        reason = problem
+                    elif not candidates:
+                        reason = 'no accepted sold candidates'
+                    elif len(trimmed) < app.MIN_COMPARABLES:
+                        reason = 'too few candidates after outlier filtering'
+                    elif not selected:
+                        reason = 'only relaxed specification evidence'
+                    else:
+                        reason = 'usable cached valuation not persisted'
+                    evidence[reason] += 1
+                    if len(samples) < limit:
+                        stored = conn.execute(
+                            'SELECT COUNT(*) FROM sold_comparables '
+                            'WHERE LOWER(brand)=LOWER(?) AND LOWER(model)=LOWER(?)',
+                            (row['brand'], row['model'])).fetchone()[0]
+                        samples.append({'id': row['item_id'], 'title': row['title'],
+                                        'valuation_basis': row['valuation_basis'],
+                                        'valuation_problem': problem, 'evidence_result': reason,
+                                        'stored_same_brand_model': stored,
+                                        'accepted_candidates': len(candidates),
+                                        'after_outliers': len(trimmed), 'selected': len(selected),
+                                        'cached_valuation': valuation,
+                                        'queries': queries,
+                                        'searches': [dict(r) if r else None for r in records]})
             if row['valuation_research_at']:
                 counts['has listing research-at timestamp'] += 1
             if row['estimated_value'] is not None:
@@ -100,6 +129,7 @@ def report(conn, hours, limit):
                                'telegram_error': row['telegram_notify_error']})
         return {'active': len(rows), 'recent_hours': hours, 'recent_active': len(recent),
                 'recent_counts': dict(counts), 'recent_scored_blockers_nonexclusive': dict(blockers),
+                'recent_eligible_unvalued_evidence': dict(evidence),
                 'all_active_positive_scores': scored, 'unvalued_query_samples': samples,
                 'notes': ['Query history may be shared across listings and may be stale.',
                           'A notification timestamp can represent baselining, not actual delivery.',
