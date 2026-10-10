@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.54"
+APP_VERSION = "0.10.55"
 CLASSIFIER_VERSION = "0.8.6"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -8710,7 +8710,7 @@ def ordinary_laptop(title, condition="", allow_repairable=False):
     # directly comparable to one ordinary used laptop.
     return not re.search(
         r"\b(?:lot(?:\s+of)?\s*\d+|bundle|job\s*lot|\d+\s*[x×]\s*(?:laptops?|Dell|HP|Lenovo)|"
-        r"[x×]\s*\d+|\d+\s+laptops?|choose|choice|various|"
+        r"[x×]\s*\d+|\d+\s+laptops|choose|choice|various|"
         r"brand new|sealed|charger only|screen only|keyboard only|"
         r"replacement|for Dell|for HP|for Lenovo|no ram|no memory)\b|"
         r"\b\d+\s*(?:GB|TB)?\s*(?:/|or)\s*\d+\s*(?:GB|TB)\b", text, re.I
