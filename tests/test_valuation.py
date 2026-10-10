@@ -323,6 +323,49 @@ class ValuationTests(unittest.TestCase):
         self.assertEqual(row['estimated_value'], 400)
         self.assertTrue(row['valuation_basis'].startswith('SOLD_'))
 
+    def test_network_budget_can_leave_later_cached_valuation_unprocessed(self):
+        self.pool()
+        self.active('older-network', model='Latitude 9999',
+                    first_seen='2025-01-01T00:00:00+00:00')
+        self.active('cached-ready', first_seen='2026-01-01T00:00:00+00:00')
+        with patch.object(app, 'collect_sold_search', return_value=0):
+            app.collect_needed_sold_data(self.conn, maximum=1)
+        self.assertIsNone(self.conn.execute(
+            "SELECT estimated_value FROM listings WHERE item_id='cached-ready'").fetchone()[0])
+        with patch.object(app, 'collect_sold_search') as fetch:
+            self.assertEqual(app.apply_cached_sold_valuations(self.conn), 1)
+            fetch.assert_not_called()
+        self.assertEqual(self.conn.execute(
+            "SELECT estimated_value FROM listings WHERE item_id='cached-ready'").fetchone()[0], 400)
+
+    def test_cached_sweep_retains_condition_and_evidence_gates(self):
+        self.pool()
+        self.active('review-required', status='HIGH_RISK', fault_reasons='["faulty"]')
+        self.active('no-evidence', model='Latitude 9999')
+        with patch.object(app, 'collect_sold_search') as fetch:
+            self.assertEqual(app.apply_cached_sold_valuations(self.conn), 0)
+            fetch.assert_not_called()
+        self.assertEqual(self.conn.execute(
+            'SELECT COUNT(*) FROM listings WHERE estimated_value IS NOT NULL').fetchone()[0], 0)
+
+    def test_worker_runs_local_sweep_before_open_circuit_gate(self):
+        with patch.object(app, '_product_research_load_rate_state',
+                          return_value={'interval_seconds': 30}), \
+             patch.object(app, 'connect_db') as connect, \
+             patch.object(app, 'refresh_runtime_settings'), \
+             patch.object(app, 'refresh_classifier_rules'), \
+             patch.object(app, 'apply_cached_sold_valuations', return_value=1) as sweep, \
+             patch.object(app, 'notify_pending_telegram_deals', return_value=0) as notify, \
+             patch.object(app, '_product_research_circuit_is_open', return_value=True), \
+             patch.object(app, '_product_research_circuit_remaining', return_value=60), \
+             patch.object(app, 'collect_needed_sold_data') as network, \
+             patch.object(app.time, 'sleep', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                app._product_research_worker()
+            sweep.assert_called_once_with(connect.return_value)
+            notify.assert_called_once_with(connect.return_value)
+            network.assert_not_called()
+
     def test_migration_is_idempotent_and_preserves_history(self):
         self.active('target', estimated_value=500, classifier_version='0.7.9')
         self.sold('old', evidence_version=None)
