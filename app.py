@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.55"
+APP_VERSION = "0.10.56"
 CLASSIFIER_VERSION = "0.8.6"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -8465,6 +8465,31 @@ def persist_listing_valuation(
     conn.commit()
 
     return True
+
+
+def apply_cached_sold_valuations(conn):
+    """Drain usable local evidence independently of the network query budget."""
+    rows = conn.execute(
+        "SELECT * FROM listings WHERE COALESCE(active,1)=1 "
+        "AND estimated_value IS NULL AND classifier_version=? "
+        "AND COALESCE(rules_revision,0)=? ORDER BY first_seen ASC",
+        (CLASSIFIER_VERSION, current_rules_revision(conn)),
+    ).fetchall()
+    updated = 0
+    print(f"Cached valuation sweep: checking {len(rows)} unvalued listings", flush=True)
+    for row in rows:
+        if target_valuation_problem(row, conn):
+            continue
+        valuation = calculate_sold_valuation(conn, row)
+        if valuation is not None:
+            persist_listing_valuation(conn, row, valuation)
+            updated += 1
+            print(
+                f"Cached valuation sweep: valued {row['item_id']} "
+                f"at {valuation['estimated_value']}", flush=True,
+            )
+    print(f"Cached valuation sweep: completed; saved {updated} valuations", flush=True)
+    return updated
 
 
 def collect_needed_sold_data(conn, maximum=None):
@@ -22759,9 +22784,8 @@ def _product_research_worker():
     """
     Continuously drain sold-evidence work independently of Browse discovery.
 
-    A Chromium challenge opens the Product Research circuit. While open this
-    worker does not touch the sold-evidence backlog; the session monitor owns
-    recovery probing.
+    A Chromium challenge pauses network research; the session monitor owns
+    recovery probing. Local cached valuations can still progress while open.
     """
     state = _product_research_load_rate_state()
 
@@ -22774,12 +22798,29 @@ def _product_research_worker():
 
     last_revalue = time.monotonic()
     last_circuit_log = 0.0
+    last_cache_sweep = None
 
     while True:
         conn = None
 
         try:
-            # Gate BEFORE opening the DB and BEFORE selecting a backlog row.
+            # Local valuations do not need Chromium or an available request
+            # slot. Run a full sweep at startup and every five minutes, even
+            # while the network circuit is open. The network worker otherwise
+            # stops after its first query, leaving later cached rows untouched.
+            if last_cache_sweep is None or time.monotonic() - last_cache_sweep >= 300:
+                conn = connect_db()
+                refresh_runtime_settings(conn)
+                refresh_classifier_rules(conn)
+                apply_cached_sold_valuations(conn)
+                telegram_sent = notify_pending_telegram_deals(conn)
+                if telegram_sent:
+                    print(f"Telegram alerts sent  : {telegram_sent}", flush=True)
+                conn.close()
+                conn = None
+                last_cache_sweep = time.monotonic()
+
+            # Gate network research before selecting its next backlog row.
             if _product_research_circuit_is_open():
                 remaining = (
                     _product_research_circuit_remaining()
