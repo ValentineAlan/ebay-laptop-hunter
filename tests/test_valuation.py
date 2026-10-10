@@ -26,7 +26,8 @@ class ValuationTests(unittest.TestCase):
         self.target = dict(item_id='target', title='Dell Latitude 5420 i5-1135G7 8GB RAM 256GB SSD',
             brand='Dell', model='Latitude 5420', cpu='i5-1135G7', cpu_confidence='EXACT',
             cpu_generation=11, ram_gb=8, storage_gb=256, total=150., postage=0.,
-            condition='Used', status='NORMAL', classifier_version=app.VERSION,
+            condition='Used', status='NORMAL', classifier_version=app.CLASSIFIER_VERSION,
+            rules_revision=app.current_rules_revision(self.conn),
             buying_options=json.dumps(['FIXED_PRICE']))
 
     def tearDown(self):
@@ -46,6 +47,11 @@ class ValuationTests(unittest.TestCase):
             last_sold=app.iso_now(), collected_at=app.iso_now(), currency='GBP',
             evidence_version=app.SOLD_EVIDENCE_VERSION)
         row.update(changes)
+        if 'title' not in changes:
+            # Keep advertised specs consistent with each test's stored specs.
+            # Production deliberately prefers explicit title capacities.
+            row['title'] = (f"{row['brand']} {row['model']} {row['cpu']} "
+                            f"{row['ram_gb']}GB RAM {row['storage_gb']}GB SSD listing {ident}")
         self.insert('sold_comparables', row)
 
     def insert(self, table, row):
@@ -95,7 +101,8 @@ class ValuationTests(unittest.TestCase):
 
     def test_unknown_specs_and_generic_cpu_withhold_value(self):
         self.pool()
-        for fields in [dict(ram_gb=None), dict(storage_gb=None),
+        for fields in [dict(ram_gb=None, title='Dell Latitude 5420 i5-1135G7 256GB SSD'),
+                       dict(storage_gb=None, title='Dell Latitude 5420 i5-1135G7 8GB RAM'),
                        dict(cpu='Intel Core i5 11th Gen', cpu_confidence='GENERATION'),
                        dict(cpu_confidence='MODEL')]:
             with self.subTest(fields=fields):
@@ -106,14 +113,47 @@ class ValuationTests(unittest.TestCase):
         result = app.calculate_valuation(self.conn, dict(self.target, classifier_version='0.7.9'))
         self.assertEqual(result['basis'], 'REANALYSIS_REQUIRED')
 
+    def test_changed_rules_revision_requires_reanalysis(self):
+        self.pool()
+        revision = app.current_rules_revision(self.conn) + 1
+        self.conn.execute("UPDATE app_meta SET value=? WHERE key='rules_revision'", (str(revision),))
+        self.conn.commit()
+        stale = app.calculate_valuation(self.conn, self.target)
+        self.assertEqual(stale['basis'], 'REANALYSIS_REQUIRED')
+        current = app.calculate_valuation(self.conn, dict(self.target, rules_revision=revision))
+        self.assertEqual(current['estimated_value'], 400)
+
+    def test_unambiguous_title_specs_override_missing_or_incorrect_stored_values(self):
+        self.pool()
+        for changes in [dict(ram_gb=None, storage_gb=None), dict(ram_gb=16, storage_gb=512)]:
+            with self.subTest(changes=changes):
+                value = app.calculate_sold_valuation(self.conn, dict(self.target, **changes))
+                self.assertEqual(value['estimated_value'], 400)
+                self.assertIn('SPEC_EXACT=3', value['basis'])
+
     def test_bad_comparable_titles_are_excluded(self):
-        for suffix in [' LOT OF 2', ' job lot', ' faulty', ' no charger', ' refurbished',
-                       ' 12 month warranty', ' choose 8/16GB', ' no ram', ' spares']:
+        for suffix in [' LOT OF 2', ' job lot', ' faulty', ' choose 8/16GB', ' no ram', ' spares']:
             with self.subTest(suffix=suffix):
                 self.conn.execute('DELETE FROM sold_comparables')
                 for i in range(3):
                     self.sold(i, title=self.target['title'] + suffix + ' listing ' + str(i))
                 self.assertIsNone(app.calculate_sold_valuation(self.conn, self.target))
+
+    def test_repairable_sold_condition_is_adjusted_and_refurbished_is_accepted(self):
+        for suffix, price, decision in [(' no charger', 424, 'USE_ADJUSTED'),
+                                        (' refurbished', 400, 'USE'),
+                                        (' 12 month warranty', 400, 'USE')]:
+            with self.subTest(suffix=suffix):
+                self.conn.execute('DELETE FROM sold_comparables')
+                for i in range(3):
+                    self.sold(i, title=self.target['title'] + suffix + ' listing ' + str(i))
+                evidence = app.select_sold_evidence(self.conn, self.target)
+                self.assertEqual(len(evidence), 3)
+                self.assertTrue(all(c['condition_decision'] == decision for c in evidence))
+                self.assertTrue(all(c['raw_total'] == 400 for c in evidence))
+                self.assertEqual(app.calculate_sold_valuation(self.conn, self.target)['estimated_value'], price)
+                if decision == 'USE_ADJUSTED':
+                    self.assertTrue(all(c['condition_adjustment_pct'] == 6 for c in evidence))
 
     def test_old_sale_or_collection_is_excluded(self):
         for field, days in [('last_sold', 91), ('collected_at', 8)]:
@@ -143,14 +183,14 @@ class ValuationTests(unittest.TestCase):
         value = app.calculate_sold_valuation(self.conn, self.target)
         self.assertEqual(value['estimated_value'], 400)
         self.assertEqual(value['confidence'], 'LOW')
-        self.assertLessEqual(value['deal_score'], 45)
+        self.assertEqual(value['deal_score'], 63.8)  # 85-point raw score × LOW multiplier 0.75
         self.assertEqual(len(app.sold_evidence_for_basis(self.conn, self.target, value['basis'])), 3)
 
-    def test_no_high_confidence_from_title_only_pool(self):
+    def test_large_independent_tight_pool_uses_current_confidence_and_score(self):
         self.pool(12)
         value = app.calculate_sold_valuation(self.conn, self.target)
-        self.assertEqual(value['confidence'], 'MEDIUM')
-        self.assertLessEqual(value['deal_score'], 75)
+        self.assertEqual(value['confidence'], 'HIGH')
+        self.assertEqual(value['deal_score'], 95)  # 85 raw + 10 Q1 bonus
 
     def test_no_bargain_score_above_conservative_value(self):
         self.pool()
@@ -245,8 +285,9 @@ class ValuationTests(unittest.TestCase):
 
     def test_fresh_query_does_not_refresh(self):
         self.active('target')
-        self.insert('sold_searches', dict(query_key='dell latitude 5420', keywords='Dell Latitude 5420',
-                    searched_at=app.iso_now(), status='OK'))
+        for query in app.sold_search_queries(self.target):
+            self.insert('sold_searches', dict(query_key=app.research_query_key(query), keywords=query,
+                        searched_at=app.iso_now(), status='OK'))
         with patch.object(app.os.path, 'exists', return_value=True), patch.object(app, 'collect_sold_search') as fetch:
             app.collect_needed_sold_data(self.conn)
             fetch.assert_not_called()
@@ -269,18 +310,46 @@ class ValuationTests(unittest.TestCase):
         self.pool()
         app.revalue_all(self.conn)
         rendered = app.dashboard_html()
-        self.assertIn('Value / asking reference', rendered)
-        self.assertIn('Comparable middle 50%', rendered)
+        saved = self.conn.execute("SELECT * FROM listings WHERE item_id='target'").fetchone()
+        self.assertEqual(saved['estimated_value'], 400)
+        self.assertEqual(saved['comparable_count'], 3)
+        self.assertTrue(saved['valuation_basis'].startswith('SOLD_'))
+        self.assertIn('<th>Normally sells for</th>', rendered)
+        self.assertIn(self.target['title'], rendered)
+        report = app.listing_report_html('target')
+        self.assertIn('Sold-price evidence', report)
+        self.assertIn('£400.00', report)
 
-    def test_premium_and_storage_type_markers_cannot_transfer(self):
+    def test_explicit_variant_contradictions_are_excluded(self):
+        variants = [('OLED', 'IPS'), ('RTX 3050', 'RTX 3060'), ('FHD', '4K'),
+                    ('60Hz', '144Hz'), ('HDD', 'eMMC'), ('eMMC', 'HDD'),
+                    ('non-touch', 'touchscreen')]
+        for target_feature, sold_feature in variants:
+            with self.subTest(target=target_feature, sold=sold_feature):
+                self.conn.execute('DELETE FROM sold_comparables')
+                for i in range(3):
+                    self.sold(i, title=self.target['title'] + ' ' + sold_feature + ' listing ' + str(i))
+                target = dict(self.target, title=self.target['title'] + ' ' + target_feature)
+                self.assertIsNone(app.calculate_sold_valuation(self.conn, target))
+                matching = dict(self.target, title=self.target['title'] + ' ' + sold_feature)
+                selected = app.select_sold_evidence(self.conn, matching)
+                self.assertEqual(len(selected), 3)
+                self.assertTrue(all(c['tier'] == 'EXACT' for c in selected))
+                self.assertEqual(app.calculate_sold_valuation(self.conn, matching)['estimated_value'], 400)
+
+    def test_omitted_optional_variant_is_compatible_at_reduced_weight(self):
         for feature in ['OLED', 'RTX 3050', '4K', '144Hz', 'HDD', 'eMMC', 'touchscreen']:
             with self.subTest(feature=feature):
                 self.conn.execute('DELETE FROM sold_comparables')
                 for i in range(3):
                     self.sold(i, title=self.target['title'] + ' ' + feature + ' listing ' + str(i))
-                self.assertIsNone(app.calculate_sold_valuation(self.conn, self.target))
-                matching_target = dict(self.target, title=self.target['title'] + ' ' + feature)
-                self.assertIsNotNone(app.calculate_sold_valuation(self.conn, matching_target))
+                compatible = app.select_sold_evidence(self.conn, self.target)
+                matching = dict(self.target, title=self.target['title'] + ' ' + feature)
+                exact = app.select_sold_evidence(self.conn, matching)
+                self.assertEqual(len(compatible), 3)
+                self.assertTrue(all(c['tier'] == 'COMPATIBLE' for c in compatible))
+                for comp, match in zip(compatible, exact):
+                    self.assertAlmostEqual(comp['weight'] / match['weight'], 0.75, places=5)
 
     def test_unidentified_sold_rows_are_not_independent_evidence(self):
         for i in range(3):
@@ -288,10 +357,15 @@ class ValuationTests(unittest.TestCase):
         self.assertIsNone(app.calculate_sold_valuation(self.conn, self.target))
 
     def test_target_cannot_be_its_own_comparable(self):
-        self.sold('123')
-        self.sold('234')
-        self.sold('345')
-        target = dict(self.target, item_id='v1|123|0')
+        self.sold('298374124379')
+        self.sold('298374124380')
+        self.sold('298374124381')
+        target = dict(self.target, item_id='v1|298374124379|0')
+        selected = app.select_sold_evidence(self.conn, target)
+        self.assertEqual({c['row']['item_id'] for c in selected},
+                         {'298374124380', '298374124381'})
+        self.assertEqual(app.calculate_sold_valuation(self.conn, target)['count'], 2)
+        self.conn.execute("DELETE FROM sold_comparables WHERE item_id='298374124381'")
         self.assertIsNone(app.calculate_sold_valuation(self.conn, target))
 
     def test_failed_cache_replacement_retains_previous_evidence(self):
@@ -337,7 +411,7 @@ class ValuationTests(unittest.TestCase):
             get.assert_called_once()
             second.assert_not_called()
         saved = self.conn.execute('SELECT * FROM listings').fetchone()
-        self.assertEqual(saved['classifier_version'], app.VERSION)
+        self.assertEqual(saved['classifier_version'], app.CLASSIFIER_VERSION)
         self.assertEqual(saved['total'], 180)
         self.assertEqual(app.browse_usage_today(self.conn), 1)
 

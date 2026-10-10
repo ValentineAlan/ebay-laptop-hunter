@@ -44,13 +44,20 @@ pending alerts and consecutive failures. Telemetry and its report parser include
 
 ## Validation
 
-Run `python -m unittest discover -s tests -p 'test_pr_operations.py' -v`.
-Tests mock Telegram and browser responses and use temporary SQLite databases.
+Run the complete suite with `python -m unittest discover -s tests -v`.
+The suite contains 44 valuation tests and 27 operational tests. Tests mock
+Telegram and browser responses and use temporary SQLite databases.
 
-The existing 40 valuation tests fail on unmodified `3fa86e84` because their
-fixtures refer to the removed `app.VERSION`. That suite needs a separate update
-to the current classifier/rules and valuation contract. These failures are not
-treated as passing validation.
+The previous 40 valuation tests failed during setup on unmodified `3fa86e84`
+because their fixtures referred to the removed `app.VERSION`. Their fixtures
+now use `CLASSIFIER_VERSION` and the current rules revision. Sold titles match
+the fixture capacities, missing-spec cases remove those capacities from the
+title, cache tests seed each generated query, and self-comparison uses realistic
+eBay IDs. Assertions reflect the current condition adjustment, confidence,
+scoring, two-comparable minimum and compatible-variant rules. Explicit variant
+contradictions, stale evidence, duplicate evidence and self-comparison remain
+covered. These updates change tests and documentation only; application
+behaviour and release version remain unchanged.
 
 ## Hunter-only deployment
 
