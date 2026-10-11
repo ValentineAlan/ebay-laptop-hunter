@@ -240,6 +240,108 @@ class ValuationTests(unittest.TestCase):
         app.repair_v01060_model_identities(self.conn)
         self.assertEqual(self.conn.execute("SELECT classifier_version FROM listings WHERE item_id='good'").fetchone()[0], app.CLASSIFIER_VERSION)
 
+    def preview_results(self, count, title=None):
+        return [self.research_result(listing={'itemId': str(900000000100+i),
+                'title': (title or self.target['title']) + ' listing ' + str(i), 'condition': 'Used'},
+                avgsalesprice=f'£{390+i*10}.00') for i in range(count)]
+
+    def test_supported_first_page_skips_second_page(self):
+        app._product_research_response_context.research_target = self.target
+        self.addCleanup(setattr, app._product_research_response_context, 'research_target', None)
+        with patch.object(app, 'PRODUCT_RESEARCH_LIMIT', 5), patch.object(app, 'product_research_search', return_value=self.preview_results(5)) as search:
+            app.collect_sold_search(self.conn, 'Dell Latitude 5420')
+        self.assertEqual(search.call_count, 1)
+        self.assertEqual(self.conn.execute('SELECT page_count FROM sold_searches').fetchone()[0], 1)
+        self.assertIsNotNone(app.calculate_sold_valuation(self.conn, self.target))
+
+    def test_insufficient_first_page_fetches_second_without_write_lock(self):
+        app._product_research_response_context.research_target = self.target
+        self.addCleanup(setattr, app._product_research_response_context, 'research_target', None)
+        def search(query, offset):
+            self.assertFalse(self.conn.in_transaction)
+            if offset == 0:
+                return self.preview_results(3, 'Dell Latitude 5430 i5-1245U 8GB RAM 256GB SSD')
+            return self.preview_results(3)
+        with patch.object(app, 'PRODUCT_RESEARCH_LIMIT', 3), patch.object(app, 'product_research_search', side_effect=search) as fetch:
+            app.collect_sold_search(self.conn, 'Dell Latitude 5420')
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(self.conn.execute('SELECT page_count FROM sold_searches').fetchone()[0], 2)
+
+    def test_low_confidence_first_page_keeps_second_page(self):
+        app._product_research_response_context.research_target = self.target
+        self.addCleanup(setattr, app._product_research_response_context, 'research_target', None)
+        with patch.object(app, 'PRODUCT_RESEARCH_LIMIT', 3), patch.object(app, 'product_research_search', return_value=self.preview_results(3)) as search:
+            app.collect_sold_search(self.conn, 'Dell Latitude 5420')
+        self.assertEqual(search.call_count, 2)
+
+    def test_page_preview_failure_restores_previous_evidence(self):
+        self.sold('original')
+        parsed = [app._parse_sold_result(r) for r in self.preview_results(5)]
+        with patch.object(app, 'calculate_sold_valuation', side_effect=RuntimeError('preview failed')):
+            with self.assertRaisesRegex(RuntimeError, 'preview failed'):
+                app.research_page_sufficient(self.conn, app.research_query_key('Dell Latitude 5420'), parsed, self.target)
+        self.assertEqual(self.conn.execute('SELECT item_id FROM sold_comparables').fetchone()[0], 'original')
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_page_preview_restores_previous_evidence(self):
+        self.sold('original')
+        key = app.research_query_key('Dell Latitude 5420')
+        parsed = [app._parse_sold_result(r) for r in self.preview_results(5)]
+        self.assertTrue(app.research_page_sufficient(self.conn, key, parsed, self.target))
+        ids = [r[0] for r in self.conn.execute('SELECT item_id FROM sold_comparables')]
+        self.assertEqual(ids, ['original'])
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_page_preview_does_not_promote_duplicate_rows(self):
+        parsed = [app._parse_sold_result(self.preview_results(1)[0])]*3
+        self.assertFalse(app.research_page_sufficient(self.conn, app.research_query_key('Dell Latitude 5420'), parsed, self.target))
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM sold_comparables').fetchone()[0], 0)
+
+    def test_model_query_order_changes_only_after_sufficient_observations(self):
+        queries = app.sold_search_queries(self.target)
+        key = app.research_model_key(self.target)
+        for tier in range(4):
+            self.conn.execute('INSERT INTO research_query_yield VALUES (?,?,?,?,?)', (key,tier,2,0,2))
+        self.assertEqual(app.prioritise_research_queries(self.conn, self.target, queries), queries)
+        self.conn.execute('UPDATE research_query_yield SET trials=3,requests=3')
+        self.conn.execute('UPDATE research_query_yield SET supported=3 WHERE tier=2')
+        ranked = app.prioritise_research_queries(self.conn, self.target, queries)
+        self.assertEqual(ranked[0], queries[2])
+        other = dict(self.target, model='Latitude 5430')
+        self.assertEqual(app.prioritise_research_queries(self.conn, other, queries), queries)
+
+    def test_query_yield_ignores_transport_failures_and_counts_pages(self):
+        query = app.sold_search_queries(self.target)[0]
+        key = app.research_query_key(query)
+        self.insert('sold_searches', dict(query_key=key, keywords=query, status='ERROR', searched_at=app.iso_now()))
+        app.record_research_yield(self.conn, self.target, query, None)
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM research_query_yield').fetchone()[0], 0)
+        self.conn.execute("UPDATE sold_searches SET status='OK',page_count=2")
+        app.record_research_yield(self.conn, self.target, query, dict(estimated_value=400))
+        row = self.conn.execute('SELECT * FROM research_query_yield').fetchone()
+        self.assertEqual((row['trials'], row['supported'], row['requests']), (1,1,2))
+
+    def test_condition_review_does_not_spend_its_own_research_budget(self):
+        self.active('blocked', status='HIGH_RISK', fault_reasons='["motherboard"]')
+        with patch.object(app, 'collect_sold_search') as fetch:
+            app.collect_needed_sold_data(self.conn, maximum=1)
+            fetch.assert_not_called()
+        self.assertEqual(self.conn.execute('SELECT backlog_queries FROM research_daily').fetchone()[0], 0)
+
+    def test_cosmetic_condition_still_researched(self):
+        self.active('cosmetic', status='MODERATE', fault_reasons='["scratches"]')
+        with patch.object(app, 'collect_sold_search', return_value=0) as fetch:
+            app.collect_needed_sold_data(self.conn, maximum=1)
+            fetch.assert_called_once()
+
+    def test_blocked_listing_does_not_prevent_shared_normal_listing_search(self):
+        self.active('blocked', status='HIGH_RISK', fault_reasons='["motherboard"]')
+        self.active('ordinary')
+        with patch.object(app, 'collect_sold_search', return_value=0) as fetch:
+            app.collect_needed_sold_data(self.conn, maximum=1)
+            fetch.assert_called_once()
+        self.assertEqual(self.conn.execute('SELECT backlog_listings FROM research_daily').fetchone()[0], 1)
+
     def test_one_aggregate_is_insufficient(self):
         self.sold('one', units_sold=100)
         self.assertIsNone(app.calculate_sold_valuation(self.conn, self.target))

@@ -1,4 +1,4 @@
-# Product Research demand policy — 0.10.60
+# Product Research demand policy — 0.10.61
 
 The 1,700 normal-request rolling allowance and 30-second minimum cadence are unchanged. These changes reduce repeat work and make fresh listings compete with each other instead of sitting behind the entire old backlog.
 
@@ -35,7 +35,7 @@ Counters are not reconstructed from old cache rows. The first day is partial. �
 
 ## Validation and deployment
 
-102 tests pass, including scheduling fallback and persistent turns, seven-day negative caching, retry escalation/reset, partial passes, shared-cache waits, cached evidence during deferral, model repair, request accounting and diagnostics rendering. Python compilation and diff checks pass.
+113 tests pass, including scheduling fallback and persistent turns, seven-day negative caching, retry escalation/reset, partial passes, shared-cache waits, cached evidence during deferral, model repair, request accounting and diagnostics rendering. Python compilation and diff checks pass.
 
 On TrueNAS:
 
@@ -46,4 +46,14 @@ python -m py_compile app.py pr_operations.py &&
 ./redeploy.sh
 ```
 
-Expected running application version: `0.10.60`. No admin Telegram messages are added for ordinary scheduling or retry waits.
+Expected running application version: `0.10.61`. No admin Telegram messages are added for ordinary scheduling or retry waits.
+
+## Additional efficiencies — 0.10.61
+
+A full first page is previewed against the real target using the same stored-row representation and complete valuation checks. Further pages are skipped only when the combined evidence supports a MEDIUM/HIGH valuation with at least three selected comparables. LOW confidence, insufficient evidence and duplicate-only pages retain pagination. The preview restores the previous cache, including on exceptions, before any further request; no write transaction spans a network/cadence wait. Direct searches without a target retain their configured pagination.
+
+Completed successful searches contribute model-specific query-tier outcomes: trials, supported valuations and page requests. Errors and cached-only reuse do not train the ordering. Specific-first order remains until every competing tier has at least three completed observations; tiers then rank by supported valuations per request, with original order retained for ties. This uses ordinary research outcomes, not additional exploratory calls. Evidence filters and early-stop requirements are unchanged.
+
+The worker no longer initiates research solely for a listing requiring condition review under the current valuation rules. Cosmetic-only listings that can be valued still receive research. Matching ordinary listings can collect shared evidence for the same model. Structural query generation remains available to diagnostic callers; the funnel report separately labels condition-review network suppression and excludes that work from due-query counts. Once classification/condition rules make a listing assessable, normal scheduling applies.
+
+Tests cover first-page sufficiency, LOW-confidence pagination, duplicates, rollback and write-lock release, learned ordering thresholds and model isolation, transport-error exclusion, page accounting, cosmetic eligibility and shared ordinary-listing work.
