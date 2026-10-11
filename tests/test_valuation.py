@@ -68,6 +68,178 @@ class ValuationTests(unittest.TestCase):
         for i in range(n):
             self.sold(i, 390+i*10)
 
+    def test_zero_result_cache_is_seven_days_but_positive_cache_is_one(self):
+        for key, rows in [('empty', 0), ('positive', 2), ('error', 0)]:
+            self.insert('sold_searches', dict(query_key=key, keywords=key,
+                searched_at=(app.utcnow()-timedelta(days=2)).isoformat(),
+                status='ERROR' if key == 'error' else 'OK', result_count=rows))
+        self.assertTrue(app.sold_search_is_fresh(self.conn, 'empty'))
+        self.assertFalse(app.sold_search_is_fresh(self.conn, 'positive'))
+        self.assertFalse(app.sold_search_is_fresh(self.conn, 'error'))
+        self.conn.execute("UPDATE sold_searches SET searched_at=? WHERE query_key='empty'",
+                          ((app.utcnow()-timedelta(days=7)).isoformat(),))
+        self.assertFalse(app.sold_search_is_fresh(self.conn, 'empty'))
+
+    def test_insufficient_retries_escalate_and_spec_change_resets(self):
+        self.active('retry')
+        now = app.utcnow()
+        with patch.object(app, 'utcnow', return_value=now):
+            for count, days in [(1, 1), (2, 3), (3, 7), (4, 7)]:
+                row = self.conn.execute("SELECT * FROM listings WHERE item_id='retry'").fetchone()
+                app.defer_insufficient_research(self.conn, row)
+                row = self.conn.execute("SELECT * FROM listings WHERE item_id='retry'").fetchone()
+                self.assertEqual(row['valuation_retry_count'], count)
+                self.assertEqual(row['valuation_retry_at'], (now+timedelta(days=days)).isoformat())
+                self.assertTrue(app.research_retry_deferred(row))
+            changed = dict(row, cpu='i7-1165G7')
+            self.assertFalse(app.research_retry_deferred(changed))
+            app.defer_insufficient_research(self.conn, changed)
+            self.assertEqual(self.conn.execute("SELECT valuation_retry_count FROM listings").fetchone()[0], 1)
+            self.assertTrue(app.research_retry_deferred(dict(row, total=1)))
+
+    def test_partial_research_does_not_defer_until_queries_complete(self):
+        self.active('partial')
+        with patch.object(app, 'product_research_search', return_value=[]) as search:
+            for i in range(4):
+                app.collect_needed_sold_data(self.conn, maximum=1)
+                row = self.conn.execute("SELECT * FROM listings WHERE item_id='partial'").fetchone()
+                self.assertEqual(row['valuation_retry_count'], 1 if i == 3 else 0)
+            self.assertEqual(search.call_count, 4)
+            app.collect_needed_sold_data(self.conn, maximum=1)
+            self.assertEqual(search.call_count, 4)
+
+    def test_shared_cache_wait_does_not_escalate_failure_count(self):
+        self.active('wait')
+        initial = app.utcnow()
+        with patch.object(app, 'utcnow', return_value=initial), patch.object(app, 'product_research_search', return_value=[]):
+            app.collect_needed_sold_data(self.conn, maximum=4)
+        later = initial + timedelta(days=2)
+        with patch.object(app, 'utcnow', return_value=later), patch.object(app, 'collect_sold_search') as search:
+            app.collect_needed_sold_data(self.conn, maximum=4)
+            search.assert_not_called()
+        row = self.conn.execute("SELECT * FROM listings WHERE item_id='wait'").fetchone()
+        self.assertEqual(row['valuation_retry_count'], 1)
+        self.assertEqual(row['valuation_retry_at'], (initial+timedelta(days=7)).isoformat())
+
+    def test_scheduler_reserves_one_in_five_turns_for_old_work(self):
+        fresh = dict(first_seen=app.iso_now(), item_id='fresh')
+        old = dict(first_seen=(app.utcnow()-timedelta(days=2)).isoformat(), item_id='old')
+        self.assertEqual([app.research_schedule([old, fresh], i)[0]['item_id']
+                          for i in range(5)], ['fresh']*4+['old'])
+        self.assertEqual(app.research_schedule([old], 0), [old])
+        self.assertEqual(app.research_schedule([fresh], 4), [fresh])
+
+    def test_worker_uses_persisted_backlog_turn(self):
+        self.active('old', first_seen=(app.utcnow()-timedelta(days=2)).isoformat(),
+                    model='Latitude 5430', cpu='i5-1245U', title='Dell Latitude 5430 i5-1245U 8GB 256GB')
+        self.active('fresh')
+        with patch.object(app, 'collect_sold_search', return_value=0) as search:
+            app.collect_needed_sold_data(self.conn, maximum=1)
+            self.assertIn('5420', search.call_args.args[1])
+            self.conn.execute('UPDATE research_daily SET scheduler_turn=4')
+            self.conn.commit()
+            search.reset_mock()
+            app.collect_needed_sold_data(self.conn, maximum=1)
+            self.assertIn('5430', search.call_args.args[1])
+            self.assertEqual(self.conn.execute('SELECT scheduler_turn FROM research_daily').fetchone()[0], 5)
+
+    def test_daily_backlog_deduplicates_shared_queries_and_excludes_deferred(self):
+        self.active('a')
+        self.active('b')
+        rows = self.conn.execute('SELECT * FROM listings').fetchall()
+        app.research_demand_snapshot(self.conn, rows)
+        daily = self.conn.execute('SELECT * FROM research_daily').fetchone()
+        self.assertEqual(daily['backlog_listings'], 2)
+        self.assertEqual(daily['backlog_queries'], 4)
+        for row in rows:
+            app.defer_insufficient_research(self.conn, row)
+        self.conn.commit()
+        app.research_demand_snapshot(self.conn, self.conn.execute('SELECT * FROM listings').fetchall())
+        daily = self.conn.execute('SELECT * FROM research_daily').fetchone()
+        self.assertEqual(daily['backlog_queries'], 0)
+        self.assertEqual(daily['retry_deferred'], 2)
+
+    def test_request_metrics_distinguish_new_repeat_page_and_probe(self):
+        url = 'https://www.ebay.co.uk/sh/research/api/search?keywords=Dell+Latitude+5420&offset='
+        app._product_research_response_context.repeat_query = False
+        self.addCleanup(setattr, app._product_research_response_context, 'repeat_query', None)
+        app._product_research_response_context.listing_first_seen = app.iso_now()
+        self.addCleanup(setattr, app._product_research_response_context, 'listing_first_seen', None)
+        app.record_research_request(url+'0')
+        app.record_research_request(url+'50')
+        app._product_research_response_context.repeat_query = True
+        app._product_research_response_context.listing_first_seen = (app.utcnow()-timedelta(days=2)).isoformat()
+        app.record_research_request(url+'0')
+        app.record_research_request(url+'0', recovery_probe=True)
+        rows = self.conn.execute('SELECT * FROM research_requests ORDER BY id').fetchall()
+        self.assertEqual([(r['repeat_query'], r['page_offset'], r['recovery_probe']) for r in rows],
+                         [(0, 0, 0), (0, 50, 0), (1, 0, 0), (1, 0, 1)])
+        self.assertEqual([r['fresh_listing'] for r in rows], [1, 1, 0, 0])
+
+    def test_demand_metrics_render_in_diagnostics(self):
+        self.conn.execute("INSERT INTO research_daily(day,valuations_produced,backlog_queries,retry_deferred) VALUES (?,2,4,3)", (app.utc_day(),))
+        self.conn.execute("INSERT INTO research_requests(requested_at,query_key,page_offset,repeat_query,recovery_probe) VALUES (?,'test',0,0,0)", (app.iso_now(),))
+        self.conn.commit()
+        with patch.object(app.urllib.request, 'urlopen', side_effect=RuntimeError('no network')):
+            rendered = app.diagnostics_html()
+        self.assertIn('new queries 1', rendered)
+        self.assertIn('valuations 2', rendered)
+        self.assertIn('due queries 4', rendered)
+
+    def test_cached_success_clears_deferral_and_counts_once(self):
+        self.pool()
+        self.active('cached')
+        row = self.conn.execute("SELECT * FROM listings WHERE item_id='cached'").fetchone()
+        app.defer_insufficient_research(self.conn, row)
+        value = app.calculate_sold_valuation(self.conn, row)
+        app.persist_listing_valuation(self.conn, row, value)
+        row = self.conn.execute("SELECT * FROM listings WHERE item_id='cached'").fetchone()
+        self.assertIsNone(row['valuation_retry_at'])
+        app.persist_listing_valuation(self.conn, row, value)
+        self.assertEqual(self.conn.execute('SELECT valuations_produced FROM research_daily').fetchone()[0], 1)
+
+    def test_cached_success_is_applied_during_retry_wait_without_network(self):
+        self.active('cached')
+        row = self.conn.execute("SELECT * FROM listings WHERE item_id='cached'").fetchone()
+        app.defer_insufficient_research(self.conn, row)
+        self.conn.commit()
+        self.pool()
+        with patch.object(app, 'collect_sold_search') as search:
+            app.collect_needed_sold_data(self.conn, maximum=1)
+            search.assert_not_called()
+        row = self.conn.execute("SELECT * FROM listings WHERE item_id='cached'").fetchone()
+        self.assertIsNotNone(row['estimated_value'])
+        self.assertIsNone(row['valuation_retry_at'])
+
+    def test_specific_models_bypass_old_persisted_patterns(self):
+        cases = [
+            ('Dell Vostro 15 3515 AMD Ryzen 5 3450U', 'Vostro 3515'),
+            ('Lenovo Laptop V14 G3 i5-1235U', 'V14 G3'),
+            ('Lenovo ThinkPad P14s Gen2 i5-1135G7', 'ThinkPad P14s Gen 2'),
+            ('Lenovo ThinkPad P15s Gen2 i7-1165G7', 'ThinkPad P15s Gen 2'),
+            ('MSI GS63 Stealth 8RE i7-8750H', 'GS63 Stealth 8RE'),
+            ('Alienware 16X Aurora AC16251', 'Alienware 16X Aurora AC16251')]
+        with patch.object(app, 'classifier_rule_values', return_value=[r'\bThinkPad\s+P14s\b']):
+            for title, expected in cases:
+                model = app.identify_model(title, {})
+                self.assertEqual(model, expected)
+                self.assertTrue(app.precise_model_for_valuation(app.identify_brand(title, {}), model))
+        for brand, model in [('Dell', 'Vostro'), ('Lenovo', 'V14'), ('ASUS', 'VivoBook'), ('HP', 'Victus 15')]:
+            self.assertFalse(app.precise_model_for_valuation(brand, model))
+
+    def test_targeted_model_migration_is_idempotent(self):
+        self.active('vostro', title='Dell Vostro 15 3515 AMD Ryzen 5 3450U 16GB 256GB', model='Vostro')
+        self.active('good')
+        self.sold('vostro-sold', title='Dell Vostro 15 3515 Ryzen 5 3450U 16GB 256GB', model='Vostro')
+        app.repair_v01060_model_identities(self.conn)
+        row = self.conn.execute("SELECT * FROM listings WHERE item_id='vostro'").fetchone()
+        self.assertEqual(row['model'], 'Vostro 3515')
+        self.assertEqual(row['valuation_basis'], 'REANALYSIS_REQUIRED')
+        self.assertIsNone(row['classifier_version'])
+        self.assertEqual(self.conn.execute("SELECT model FROM sold_comparables WHERE item_id='vostro-sold'").fetchone()[0], 'Vostro 3515')
+        app.repair_v01060_model_identities(self.conn)
+        self.assertEqual(self.conn.execute("SELECT classifier_version FROM listings WHERE item_id='good'").fetchone()[0], app.CLASSIFIER_VERSION)
+
     def test_one_aggregate_is_insufficient(self):
         self.sold('one', units_sold=100)
         self.assertIsNone(app.calculate_sold_valuation(self.conn, self.target))

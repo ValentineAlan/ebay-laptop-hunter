@@ -14,6 +14,8 @@ import sys
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]), '/app', str(Path.cwd())]
 import app
 
+retry_deferred = getattr(app, "research_retry_deferred", lambda row: False)
+
 
 def open_readonly(path):
     conn = sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True)
@@ -117,7 +119,7 @@ def report(conn, hours, limit, all_active=False):
                                       'promotion_blockers': promotion_blockers(hypothetical),
                                       'positive_score': (valuation['deal_score'] or 0) > 0,
                                       'notified_at': row['telegram_notified_at']})
-                    elif problem is None:
+                    elif problem is None and not retry_deferred(row):
                         for query in queries:
                             key = app.research_query_key(query)
                             if not app.sold_search_is_fresh(conn, key):
@@ -138,6 +140,8 @@ def report(conn, hours, limit, all_active=False):
                                         'cached_valuation': valuation,
                                         'queries': queries,
                                         'searches': [dict(r) if r else None for r in records]})
+            if row['estimated_value'] is None and retry_deferred(row):
+                counts['research retry deferred'] += 1
             if row['valuation_research_at']:
                 counts['has listing research-at timestamp'] += 1
             if row['estimated_value'] is not None:
@@ -161,7 +165,22 @@ def report(conn, hours, limit, all_active=False):
                                'telegram_error': row['telegram_notify_error']})
         unvalued = sum(r['estimated_value'] is None for r in recent)
         assert sum(backlog.values()) == unvalued, 'Backlog partition does not reconcile'
-        return {'scope': 'all active listings' if all_active else 'recent active listings',
+        daily = []
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='research_requests'").fetchone():
+            daily = [dict(r) for r in conn.execute("""SELECT substr(requested_at,1,10) AS day,
+                COUNT(*) AS admitted_requests,
+                SUM(page_offset=0 AND repeat_query=0 AND recovery_probe=0) AS new_query_requests,
+                SUM(page_offset=0 AND repeat_query=1 AND recovery_probe=0) AS repeat_query_requests,
+                SUM(page_offset>0) AS additional_page_requests,
+                SUM(recovery_probe) AS recovery_probe_requests,
+                SUM(fresh_listing=1 AND recovery_probe=0) AS fresh_listing_requests
+                FROM research_requests GROUP BY day ORDER BY day DESC LIMIT 7""")]
+        production = []
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='research_daily'").fetchone():
+            production = [dict(r) for r in conn.execute("SELECT * FROM research_daily ORDER BY day DESC LIMIT 7")]
+        return {'research_daily_requests_since_instrumentation': daily,
+                'research_daily_production_and_backlog': production,
+                'scope': 'all active listings' if all_active else 'recent active listings',
                 'active': len(rows), 'recent_hours': None if all_active else hours, 'recent_active': len(recent),
                 'scope_unvalued': unvalued,
                 'unvalued_partition': dict(backlog),
