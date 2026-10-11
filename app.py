@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.59"
+APP_VERSION = "0.10.60"
 CLASSIFIER_VERSION = "0.8.6"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -1091,6 +1091,9 @@ def init_db():
         "model": "TEXT",
         "ram_gb": "INTEGER",
         "storage_gb": "INTEGER",
+        "valuation_retry_at": "TEXT",
+        "valuation_retry_count": "INTEGER DEFAULT 0",
+        "valuation_retry_identity": "TEXT",
         "valuation_original_ram_gb": "INTEGER",
         "valuation_original_storage_gb": "INTEGER",
         "image_url": "TEXT",
@@ -1260,6 +1263,17 @@ def init_db():
             error TEXT
         )
     """)
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS research_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, requested_at TEXT NOT NULL,
+        query_key TEXT NOT NULL, page_offset INTEGER NOT NULL,
+        repeat_query INTEGER NOT NULL, recovery_probe INTEGER NOT NULL,
+        fresh_listing INTEGER NOT NULL DEFAULT 0)""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_research_requests_time ON research_requests(requested_at)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS research_daily (
+        day TEXT PRIMARY KEY, valuations_produced INTEGER NOT NULL DEFAULT 0,
+        backlog_listings INTEGER, backlog_queries INTEGER,
+        retry_deferred INTEGER, observed_at TEXT, scheduler_turn INTEGER NOT NULL DEFAULT 0)""")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS sold_comparables (
@@ -3072,6 +3086,7 @@ def all_text(
 # ============================================================
 
 BRANDS = {
+    "alienware": "Alienware",
     "dell": "Dell",
     "hp": "HP",
     "hewlett packard": "HP",
@@ -3507,6 +3522,13 @@ def precise_model_for_valuation(brand, model):
     ):
         return True
 
+    if normalise(brand).upper() in {"ALIENWARE", "DELL"} and re.fullmatch(r"Alienware\s+16X\s+Aurora\s+AC\d{5}", value, re.I):
+        return True
+    if normalise(brand).upper() == "MSI" and re.fullmatch(r"GS\d{2}\s+Stealth\s+\d[A-Z]{2}", value, re.I):
+        return True
+    if normalise(brand).upper() == "LENOVO" and re.fullmatch(r"V1[45]\s+G\d+(?:\s+(?:ITL|ALC|IJL|GML|ADA|IAP|IRU))?", value, re.I):
+        return True
+
     # Strong known-specific shapes.
     patterns = (
         r"^Latitude\s+(?:E)?\d{4}(?:\s+Detachable)?$",
@@ -3586,6 +3608,24 @@ def identify_model(
     )
 
     brand = identify_brand(title, detail)
+
+    specific = {
+        "Dell": (r"\b(Vostro|Inspiron)\s+(?:1[34567]\s+)?(\d{4})\b",),
+        "Lenovo": (r"\bThinkPad\s+(?:[TXELP]\d{2,3}[A-Za-z]?|X1\s+(?:Carbon|Yoga))\s+(?:Gen\s*|G)\d+\b",
+                   r"\bV1[45]\s+G\d+(?:\s+(?:ITL|ALC|IJL|GML|ADA|IAP|IRU))?\b"),
+        "Alienware": (r"\bAlienware\s+16X\s+Aurora\s+AC\d{5}\b",),
+        "MSI": (r"\bGS\d{2}\s+Stealth\s+\d[A-Z]{2}\b",),
+    }
+    alienware = re.search(r"\bAlienware\s+16X\s+Aurora\s+AC\d{5}\b", title, re.I)
+    if alienware and brand in {"Dell", "Alienware"}:
+        return clean_model(alienware.group(0))
+    for source in (title, aspect_model or ""):
+        for pattern in specific.get(brand, ()):
+            match = re.search(pattern, source, re.I)
+            if match:
+                if brand == "Dell":
+                    return clean_model(f"{match.group(1)} {match.group(2)}")
+                return clean_model(match.group(0))
 
     # Apple A-numbers identify a concrete hardware platform.
     if brand == "Apple":
@@ -7231,6 +7271,7 @@ def _product_research_fetch(
         bypass_volume_limit=bypass_volume_limit
     )
     _product_research_response_context.telemetry = telemetry
+    record_research_request(url, bypass_volume_limit)
 
     request_id = secrets.token_hex(16)
 
@@ -8181,14 +8222,15 @@ def _sold_search_queries(row):
 
 def sold_search_is_fresh(conn, key):
     row = conn.execute(
-        "SELECT searched_at, status FROM sold_searches WHERE query_key=?",
+        "SELECT searched_at, status, result_count FROM sold_searches WHERE query_key=?",
         (key,),
     ).fetchone()
     if not row or not row["searched_at"] or row["status"] != "OK":
         return False
     try:
         age = utcnow() - datetime.fromisoformat(row["searched_at"])
-        return 0 <= age.total_seconds() < PRODUCT_RESEARCH_CACHE_HOURS * 3600
+        hours = max(PRODUCT_RESEARCH_CACHE_HOURS, 7 * 24) if row["result_count"] == 0 else PRODUCT_RESEARCH_CACHE_HOURS
+        return 0 <= age.total_seconds() < hours * 3600
     except Exception:
         return False
 
@@ -8383,6 +8425,8 @@ def collect_sold_search(conn, keywords):
         return 0
 
     collected = 0
+    previous_search = conn.execute("SELECT 1 FROM sold_searches WHERE query_key=?", (key,)).fetchone()
+    _product_research_response_context.repeat_query = bool(previous_search)
     try:
         conn.execute(
             """INSERT INTO sold_searches(query_key, keywords, searched_at, status, result_count, error)
@@ -8463,6 +8507,116 @@ def collect_sold_search(conn, keywords):
         return 0
 
 
+    finally:
+        _product_research_response_context.repeat_query = None
+        _product_research_response_context.listing_first_seen = None
+
+
+def record_research_request(url, recovery_probe=False):
+    params = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    keywords = params.get("keywords", [""])[0]
+    key = research_query_key(keywords)
+    conn = connect_db()
+    try:
+        repeat = getattr(_product_research_response_context, "repeat_query", None)
+        if repeat is None:
+            repeat = bool(conn.execute("SELECT 1 FROM sold_searches WHERE query_key=?", (key,)).fetchone())
+        first_seen = getattr(_product_research_response_context, 'listing_first_seen', None)
+        fresh = bool(first_seen and str(first_seen) >= (utcnow() - timedelta(days=1)).isoformat())
+        conn.execute("""INSERT INTO research_requests
+            (requested_at,query_key,page_offset,repeat_query,recovery_probe,fresh_listing)
+            VALUES (?,?,?,?,?,?)""", (iso_now(), key, int(params.get("offset", [0])[0]),
+                                       int(repeat), int(recovery_probe), int(fresh)))
+        conn.execute("INSERT OR IGNORE INTO research_daily(day) VALUES (?)", (utc_day(),))
+        conn.execute("DELETE FROM research_requests WHERE requested_at<?",
+                     ((utcnow() - timedelta(days=30)).isoformat(),))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def research_retry_identity(row):
+    # Evidence queries change with specifications/title, not with price updates.
+    return json.dumps([row_value(row, k) for k in (
+        "brand", "model", "cpu", "cpu_confidence", "ram_gb", "storage_gb",
+        "valuation_original_ram_gb", "valuation_original_storage_gb", "title",
+        "rules_revision")], separators=(",", ":"))
+
+
+def research_retry_deferred(row):
+    retry = row_value(row, "valuation_retry_at")
+    return bool(retry and retry > iso_now()
+                and row_value(row, "valuation_retry_identity") == research_retry_identity(row))
+
+
+def defer_insufficient_research(conn, row):
+    same = row_value(row, "valuation_retry_identity") == research_retry_identity(row)
+    count = int(row_value(row, "valuation_retry_count", 0) or 0) + 1 if same else 1
+    days = (1, 3, 7)[min(count - 1, 2)]
+    conn.execute("""UPDATE listings SET valuation_retry_count=?, valuation_retry_at=?,
+        valuation_retry_identity=? WHERE item_id=?""", (count,
+        (utcnow() + timedelta(days=days)).isoformat(), research_retry_identity(row), row["item_id"]))
+
+
+def defer_cached_research(conn, row, queries):
+    # No new failed pass occurred: wait for shared cache expiry without
+    # escalating the listing's unsuccessful-research counter.
+    expiry = []
+    for query in queries:
+        search = conn.execute("SELECT searched_at,result_count FROM sold_searches WHERE query_key=?",
+                              (research_query_key(query),)).fetchone()
+        if search:
+            hours = max(PRODUCT_RESEARCH_CACHE_HOURS, 168) if search['result_count'] == 0 else PRODUCT_RESEARCH_CACHE_HOURS
+            expiry.append(datetime.fromisoformat(search['searched_at']) + timedelta(hours=hours))
+    if expiry:
+        count = int(row_value(row, 'valuation_retry_count', 0) or 0) if row_value(row, 'valuation_retry_identity') == research_retry_identity(row) else 0
+        conn.execute("""UPDATE listings SET valuation_retry_at=?, valuation_retry_count=?,
+            valuation_retry_identity=? WHERE item_id=?""",
+            (min(expiry).isoformat(), count, research_retry_identity(row), row['item_id']))
+
+
+def research_schedule(rows, turn):
+    cutoff = (utcnow() - timedelta(days=1)).isoformat()
+    fresh = [r for r in rows if str(row_value(r, "first_seen", "")) >= cutoff]
+    old = [r for r in rows if str(row_value(r, "first_seen", "")) < cutoff]
+    # Within each pool retain the SQL oldest-attempt ordering. Four fresh
+    # turns then one backlog turn; fall back if either pool has no due work.
+    return old + fresh if turn % 5 == 4 else fresh + old
+
+
+def research_demand_snapshot(conn, rows):
+    queries = set()
+    listings = deferred = 0
+    for row in rows:
+        if not research_needs_refresh(row):
+            continue
+        generated = sold_search_queries(row, conn)
+        if not generated:
+            continue
+        if research_retry_deferred(row):
+            deferred += 1
+            continue
+        due = {research_query_key(q) for q in generated
+               if not sold_search_is_fresh(conn, research_query_key(q))}
+        if due:
+            listings += 1
+            queries.update(due)
+    conn.execute("""INSERT INTO research_daily
+        (day,backlog_listings,backlog_queries,retry_deferred,observed_at) VALUES (?,?,?,?,?)
+        ON CONFLICT(day) DO UPDATE SET backlog_listings=excluded.backlog_listings,
+        backlog_queries=excluded.backlog_queries,retry_deferred=excluded.retry_deferred,
+        observed_at=excluded.observed_at""", (utc_day(), listings, len(queries), deferred, iso_now()))
+    conn.commit()
+    print(f"Product Research demand: due_listings={listings} unique_due_queries={len(queries)} retry_deferred={deferred}", flush=True)
+
+
+def research_needs_refresh(row):
+    age = evidence_age_days(row_value(row, "valuation_evidence_at"))
+    return not (normalise(row_value(row, "valuation_basis")).startswith("SOLD_")
+                and (safe_float(row_value(row, "deal_score")) or 0) <= 0
+                and age is not None and age < SOLD_CACHE_MAX_AGE_DAYS)
+
+
 def persist_listing_valuation(
     conn,
     row,
@@ -8500,6 +8654,10 @@ def persist_listing_valuation(
         row["item_id"],
     ))
 
+    conn.execute("UPDATE listings SET valuation_retry_at=NULL, valuation_retry_count=0, valuation_retry_identity=NULL WHERE item_id=?", (row["item_id"],))
+    if row_value(row, "estimated_value") is None or row_value(row, "valuation_evidence_at") != valuation.get("evidence_at"):
+        conn.execute("""INSERT INTO research_daily(day,valuations_produced) VALUES (?,1)
+            ON CONFLICT(day) DO UPDATE SET valuations_produced=valuations_produced+1""", (utc_day(),))
     conn.commit()
 
     return True
@@ -8576,6 +8734,12 @@ def collect_needed_sold_data(conn, maximum=None):
             first_seen ASC
     """, (CLASSIFIER_VERSION, current_rules_revision(conn))).fetchall()
 
+    turn_row = conn.execute("SELECT scheduler_turn FROM research_daily WHERE day=?", (utc_day(),)).fetchone()
+    turn = turn_row[0] if turn_row else 0
+    rows = research_schedule(rows, turn)
+    snapshot = conn.execute("SELECT observed_at FROM research_daily WHERE day=?", (utc_day(),)).fetchone()
+    if not snapshot or not snapshot[0] or (utcnow() - datetime.fromisoformat(snapshot[0])).total_seconds() >= 300:
+        research_demand_snapshot(conn, rows)
     done = 0
     attempted_listings = 0
 
@@ -8605,19 +8769,19 @@ def collect_needed_sold_data(conn, maximum=None):
         queries = sold_search_queries(row, conn)
         if not queries:
             continue
+        # Newly shared cached evidence can resolve a deferred listing immediately.
+        if row_value(row, "estimated_value") is None:
+            cached = calculate_sold_valuation(conn, row)
+            if cached is not None:
+                persist_listing_valuation(conn, row, cached)
+                continue
+        if research_retry_deferred(row):
+            continue
 
         if all(sold_search_is_fresh(conn, research_query_key(q)) for q in queries):
-            # Fresh searches suppress network refresh, not valuation. Another
-            # listing can have collected usable evidence since this row was
-            # last analysed. Apply that evidence to a still-unvalued row.
             if row_value(row, "estimated_value") is None:
-                valuation = calculate_sold_valuation(conn, row)
-                if valuation is not None:
-                    persist_listing_valuation(conn, row, valuation)
-                    print(
-                        "Product Research: cached evidence valued "
-                        f"{row['item_id']} at {valuation['estimated_value']}"
-                    )
+                defer_cached_research(conn, row, queries)
+                conn.commit()
             continue
 
         attempted_listings += 1
@@ -8649,6 +8813,7 @@ def collect_needed_sold_data(conn, maximum=None):
 
                 continue
 
+            _product_research_response_context.listing_first_seen = row_value(row, 'first_seen')
             collect_sold_search(conn, keywords)
             done += 1
             searched_this_listing = True
@@ -8676,6 +8841,13 @@ def collect_needed_sold_data(conn, maximum=None):
 
             if done >= maximum:
                 break
+
+        if searched_this_listing:
+            conn.execute("""INSERT INTO research_daily(day,scheduler_turn) VALUES (?,1)
+                ON CONFLICT(day) DO UPDATE SET scheduler_turn=scheduler_turn+1""", (utc_day(),))
+        current = conn.execute("SELECT * FROM listings WHERE item_id=?", (row["item_id"],)).fetchone()
+        if current["estimated_value"] is None and all(sold_search_is_fresh(conn, research_query_key(q)) for q in queries):
+            defer_insufficient_research(conn, current)
 
         # Mark the listing even when all useful queries were already cached.
         # This rotates the backlog instead of selecting the same rows forever.
@@ -10980,6 +11152,33 @@ def notify_pending_telegram_deals(conn):
 # ============================================================
 # BACKFILL
 # ============================================================
+
+def repair_v01060_model_identities(conn):
+    conn.execute("CREATE TABLE IF NOT EXISTS app_migrations (migration_key TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+    key = "v0.10.60_specific_model_identities"
+    if conn.execute("SELECT 1 FROM app_migrations WHERE migration_key=?", (key,)).fetchone():
+        return
+    changed = 0
+    for row in conn.execute("SELECT * FROM listings WHERE COALESCE(active,1)=1").fetchall():
+        if precise_model_for_valuation(row["brand"], row["model"]):
+            continue
+        model = identify_model(row["title"], {})
+        if model and precise_model_for_valuation(row["brand"], model) and normalise(model).lower() != normalise(row["model"]).lower():
+            conn.execute("UPDATE listings SET model=?, classifier_version=NULL, estimated_value=NULL, deal_score=NULL, undervaluation_gbp=NULL, undervaluation_pct=NULL, valuation_basis='REANALYSIS_REQUIRED', valuation_retry_at=NULL WHERE item_id=?", (model, row["item_id"]))
+            changed += 1
+    repaired_evidence = 0
+    for row in conn.execute("SELECT query_key,item_id,title,brand,model FROM sold_comparables").fetchall():
+        if precise_model_for_valuation(row['brand'], row['model']):
+            continue
+        model = identify_model(row['title'] or '', {})
+        if model and precise_model_for_valuation(row['brand'], model):
+            conn.execute("UPDATE sold_comparables SET model=? WHERE query_key=? AND item_id=?",
+                         (model, row['query_key'], row['item_id']))
+            repaired_evidence += 1
+    conn.execute("INSERT INTO app_migrations(migration_key,applied_at) VALUES (?,?)", (key, iso_now()))
+    conn.commit()
+    print(f"Model identity repair: queued {changed} affected listings for reanalysis; repaired {repaired_evidence} cached sold identities", flush=True)
+
 
 def needs_reanalysis(row):
     if (
@@ -17160,7 +17359,17 @@ def diagnostics_html(hp_model_probe=False):
 
     operations = _product_research_operations.state()
     rolling_count, volume_release = _product_research_volume_snapshot()
+    daily_demand = safe_rows("""SELECT d.*,
+        (SELECT COUNT(*) FROM research_requests r WHERE substr(r.requested_at,1,10)=d.day) AS requests,
+        (SELECT COUNT(*) FROM research_requests r WHERE substr(r.requested_at,1,10)=d.day AND page_offset=0 AND repeat_query=0 AND recovery_probe=0) AS new_queries,
+        (SELECT COUNT(*) FROM research_requests r WHERE substr(r.requested_at,1,10)=d.day AND page_offset=0 AND repeat_query=1 AND recovery_probe=0) AS repeat_queries,
+        (SELECT COUNT(*) FROM research_requests r WHERE substr(r.requested_at,1,10)=d.day AND page_offset>0) AS page_requests,
+        (SELECT COUNT(*) FROM research_requests r WHERE substr(r.requested_at,1,10)=d.day AND fresh_listing=1 AND recovery_probe=0) AS fresh_requests
+        FROM research_daily d ORDER BY day DESC LIMIT 7""")
     circuit_items = [
+        ("Research demand by UTC day (since v0.10.60)", " · ".join(
+            f"{d['day']}: requests {d['requests']}, new queries {d['new_queries']}, repeat queries {d['repeat_queries']}, extra pages {d['page_requests']}, fresh-listing requests {d['fresh_requests']}, valuations {d['valuations_produced']}, due queries {d['backlog_queries']}, deferred listings {d['retry_deferred']}"
+            for d in daily_demand) or "Collecting"),
         ("Rolling 24h requests / normal limit", f"{rolling_count} / {PRODUCT_RESEARCH_ROLLING_24H_LIMIT}"),
         ("Volume guard", "WAITING" if volume_release > time.time() else "AVAILABLE"),
         ("Next volume slot (UTC)", Operations.utc(volume_release) if volume_release else "Now"),
@@ -23535,6 +23744,7 @@ def main():
         repair_v080_valuation_cache(migration_conn)
         repair_v0944_telegram_notification_baseline(migration_conn)
         repair_v0947_sold_condition_cache(migration_conn)
+        repair_v01060_model_identities(migration_conn)
         repair_v0948_product_research_condition_filter(migration_conn)
     migration_conn.close()
 
