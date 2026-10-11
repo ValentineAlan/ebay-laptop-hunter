@@ -119,7 +119,7 @@ def report(conn, hours, limit, all_active=False):
                                       'promotion_blockers': promotion_blockers(hypothetical),
                                       'positive_score': (valuation['deal_score'] or 0) > 0,
                                       'notified_at': row['telegram_notified_at']})
-                    elif problem is None and not retry_deferred(row):
+                    elif problem is None and not retry_deferred(row) and not app.valuation_condition_requires_review(row):
                         for query in queries:
                             key = app.research_query_key(query)
                             if not app.sold_search_is_fresh(conn, key):
@@ -140,6 +140,8 @@ def report(conn, hours, limit, all_active=False):
                                         'cached_valuation': valuation,
                                         'queries': queries,
                                         'searches': [dict(r) if r else None for r in records]})
+            if app.valuation_condition_requires_review(row):
+                counts['network research suppressed: condition review'] += 1
             if row['estimated_value'] is None and retry_deferred(row):
                 counts['research retry deferred'] += 1
             if row['valuation_research_at']:

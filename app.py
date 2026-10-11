@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.60"
+APP_VERSION = "0.10.61"
 CLASSIFIER_VERSION = "0.8.6"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -1263,6 +1263,12 @@ def init_db():
             error TEXT
         )
     """)
+
+    ensure_column(conn, 'sold_searches', 'page_count', 'INTEGER DEFAULT 0')
+    conn.execute("""CREATE TABLE IF NOT EXISTS research_query_yield (
+        model_key TEXT NOT NULL, tier INTEGER NOT NULL, trials INTEGER NOT NULL DEFAULT 0,
+        supported INTEGER NOT NULL DEFAULT 0, requests INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(model_key,tier))""")
 
     conn.execute("""CREATE TABLE IF NOT EXISTS research_requests (
         id INTEGER PRIMARY KEY AUTOINCREMENT, requested_at TEXT NOT NULL,
@@ -8419,6 +8425,81 @@ def _parse_sold_result(result):
     }
 
 
+def store_research_rows(conn, key, parsed):
+    conn.execute("DELETE FROM sold_comparables WHERE query_key=?", (key,))
+    for row in parsed:
+        conn.execute(
+            """INSERT OR REPLACE INTO sold_comparables(
+                query_key,item_id,title,extended_title,brand,model,cpu,cpu_generation,
+                ram_gb,storage_gb,avg_sold_price,avg_postage,delivered_price,
+                units_sold,total_sales,last_sold,formats,sold_condition,sold_condition_id,
+                collected_at,currency,evidence_version,source
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'EBAY_PRODUCT_RESEARCH')""",
+            (
+                key, row["item_id"], row["title"], row["extended_title"],
+                row["brand"], row["model"], row["cpu"], row["cpu_generation"],
+                row["ram_gb"],
+                row["storage_gb"], row["avg_sold_price"], row["avg_postage"],
+                row["delivered_price"], row["units_sold"], row["total_sales"],
+                row["last_sold"], row["formats"], row["sold_condition"],
+                row["sold_condition_id"], iso_now(), row["currency"],
+                SOLD_EVIDENCE_VERSION,
+            ),
+        )
+
+
+def research_page_sufficient(conn, key, parsed, target):
+    if target is None or not parsed:
+        return False
+    # Stage the replacement exactly as it would be committed. Roll it back
+    # before another network request so no write lock spans cadence/guard waits.
+    conn.execute('SAVEPOINT research_page_preview')
+    try:
+        store_research_rows(conn, key, parsed)
+        value = calculate_sold_valuation(conn, target)
+        return bool(value and value['count'] >= 3 and value['confidence'] in {'MEDIUM', 'HIGH'})
+    finally:
+        conn.execute('ROLLBACK TO research_page_preview')
+        conn.execute('RELEASE research_page_preview')
+
+
+def research_query_tier(query):
+    capacities = len(re.findall(r'\b\d+GB\b', query, re.I))
+    if capacities >= 2:
+        return 0
+    if capacities == 1:
+        return 1
+    return 2 if parse_cpu(query, 'TITLE') else 3
+
+
+def research_model_key(row):
+    return json.dumps([normalise(row_value(row, 'brand')).lower(),
+                       normalise(valuation_model(row_value(row, 'brand'), row_value(row, 'model'))).lower()])
+
+
+def prioritise_research_queries(conn, row, queries):
+    stats = {r['tier']: r for r in conn.execute('SELECT * FROM research_query_yield WHERE model_key=?',
+                                              (research_model_key(row),))}
+    tiers = {research_query_tier(q) for q in queries}
+    # Preserve specific-first ordering until every competing tier has at least
+    # three completed observations. Rank by supported valuations per request.
+    if any(tier not in stats or stats[tier]['trials'] < 3 for tier in tiers):
+        return queries
+    return sorted(queries, key=lambda q: -stats[research_query_tier(q)]['supported'] /
+                  max(1, stats[research_query_tier(q)]['requests']))
+
+
+def record_research_yield(conn, row, query, valuation):
+    search = conn.execute('SELECT status,page_count FROM sold_searches WHERE query_key=?',
+                          (research_query_key(query),)).fetchone()
+    if not search or search['status'] != 'OK':
+        return
+    conn.execute("""INSERT INTO research_query_yield(model_key,tier,trials,supported,requests)
+        VALUES (?,?,1,?,?) ON CONFLICT(model_key,tier) DO UPDATE SET
+        trials=trials+1,supported=supported+excluded.supported,requests=requests+excluded.requests""",
+        (research_model_key(row), research_query_tier(query), int(valuation is not None), max(1, search['page_count'] or 0)))
+
+
 def collect_sold_search(conn, keywords):
     key = research_query_key(keywords)
     if sold_search_is_fresh(conn, key):
@@ -8453,37 +8534,22 @@ def collect_sold_search(conn, keywords):
                     parsed.append(row)
             if len(results) < PRODUCT_RESEARCH_LIMIT:
                 break
+            if page + 1 < PRODUCT_RESEARCH_MAX_PAGES and research_page_sufficient(
+                    conn, key, parsed, getattr(_product_research_response_context, 'research_target', None)):
+                print(f"Product Research: {keywords!r} first page supports valuation; skipping further pages", flush=True)
+                break
 
         if raw_result_count > 0 and not parsed:
             raise RuntimeError(
                 f"Product Research returned {raw_result_count} results but none parsed into usable sold rows"
             )
 
-        conn.execute("DELETE FROM sold_comparables WHERE query_key=?", (key,))
-        for row in parsed:
-            conn.execute(
-                """INSERT OR REPLACE INTO sold_comparables(
-                    query_key,item_id,title,extended_title,brand,model,cpu,cpu_generation,
-                    ram_gb,storage_gb,avg_sold_price,avg_postage,delivered_price,
-                    units_sold,total_sales,last_sold,formats,sold_condition,sold_condition_id,
-                    collected_at,currency,evidence_version,source
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'EBAY_PRODUCT_RESEARCH')""",
-                (
-                    key, row["item_id"], row["title"], row["extended_title"],
-                    row["brand"], row["model"], row["cpu"], row["cpu_generation"],
-                    row["ram_gb"],
-                    row["storage_gb"], row["avg_sold_price"], row["avg_postage"],
-                    row["delivered_price"], row["units_sold"], row["total_sales"],
-                    row["last_sold"], row["formats"], row["sold_condition"],
-                    row["sold_condition_id"], iso_now(), row["currency"],
-                    SOLD_EVIDENCE_VERSION,
-                ),
-            )
+        store_research_rows(conn, key, parsed)
         collected = len(parsed)
         conn.execute(
             """UPDATE sold_searches SET searched_at=?, status='OK',
-               result_count=?, error=NULL WHERE query_key=?""",
-            (iso_now(), collected, key),
+               result_count=?, page_count=?, error=NULL WHERE query_key=?""",
+            (iso_now(), collected, page + 1, key),
         )
         conn.commit()
         print(f"Product Research: {keywords!r} -> {collected} sold rows")
@@ -8510,6 +8576,7 @@ def collect_sold_search(conn, keywords):
     finally:
         _product_research_response_context.repeat_query = None
         _product_research_response_context.listing_first_seen = None
+        _product_research_response_context.research_target = None
 
 
 def record_research_request(url, recovery_probe=False):
@@ -8588,7 +8655,7 @@ def research_demand_snapshot(conn, rows):
     queries = set()
     listings = deferred = 0
     for row in rows:
-        if not research_needs_refresh(row):
+        if not research_needs_refresh(row) or valuation_condition_requires_review(row):
             continue
         generated = sold_search_queries(row, conn)
         if not generated:
@@ -8744,6 +8811,10 @@ def collect_needed_sold_data(conn, maximum=None):
     attempted_listings = 0
 
     for row in rows:
+        # Review-required listings cannot produce an actionable valuation under
+        # current rules. Matching ordinary listings can still collect shared evidence.
+        if valuation_condition_requires_review(row):
+            continue
         # A confirmed non-deal does not need to consume Product Research again
         # every time the 24-hour query cache expires. Keep its sold valuation
         # until the existing sold-evidence lifetime expires. Actual deals and
@@ -8787,7 +8858,7 @@ def collect_needed_sold_data(conn, maximum=None):
         attempted_listings += 1
         searched_this_listing = False
 
-        for keywords in queries:
+        for keywords in prioritise_research_queries(conn, row, queries):
             key = research_query_key(keywords)
 
             if sold_search_is_fresh(conn, key):
@@ -8814,7 +8885,12 @@ def collect_needed_sold_data(conn, maximum=None):
                 continue
 
             _product_research_response_context.listing_first_seen = row_value(row, 'first_seen')
-            collect_sold_search(conn, keywords)
+            _product_research_response_context.research_target = row
+            try:
+                collect_sold_search(conn, keywords)
+            finally:
+                _product_research_response_context.research_target = None
+                _product_research_response_context.listing_first_seen = None
             done += 1
             searched_this_listing = True
 
@@ -8823,6 +8899,7 @@ def collect_needed_sold_data(conn, maximum=None):
                 row
             )
 
+            record_research_yield(conn, row, keywords, valuation)
             if valuation is not None:
                 persist_listing_valuation(
                     conn,
@@ -17367,6 +17444,8 @@ def diagnostics_html(hp_model_probe=False):
         (SELECT COUNT(*) FROM research_requests r WHERE substr(r.requested_at,1,10)=d.day AND fresh_listing=1 AND recovery_probe=0) AS fresh_requests
         FROM research_daily d ORDER BY day DESC LIMIT 7""")
     circuit_items = [
+        ("Completed query-tier observations", safe_scalar("SELECT SUM(trials) FROM research_query_yield")),
+        ("Supported query-tier outcomes", safe_scalar("SELECT SUM(supported) FROM research_query_yield")),
         ("Research demand by UTC day (since v0.10.60)", " · ".join(
             f"{d['day']}: requests {d['requests']}, new queries {d['new_queries']}, repeat queries {d['repeat_queries']}, extra pages {d['page_requests']}, fresh-listing requests {d['fresh_requests']}, valuations {d['valuations_produced']}, due queries {d['backlog_queries']}, deferred listings {d['retry_deferred']}"
             for d in daily_demand) or "Collecting"),
