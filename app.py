@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.61"
+APP_VERSION = "0.10.62"
 CLASSIFIER_VERSION = "0.8.6"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -4700,6 +4700,36 @@ WIN11_OFFICIAL = "OFFICIAL"
 WIN11_UNOFFICIAL_OK = "UNOFFICIAL_OK"
 WIN11_UNSUITABLE = "UNSUITABLE"
 WIN11_UNKNOWN = "UNKNOWN"
+WIN11_OFFICIAL_BASIC = "OFFICIAL_BASIC"
+WIN11_MAC_VM = "MAC_VIRTUALIZATION"
+WIN11_CHROMEOS = "CHROMEOS"
+
+# Exact models: do not infer eligibility from overlapping N/Gold series numbers.
+WIN11_BASIC_SUPPORTED = {"N5000", "N5030", "5405U", "6405U"}
+WIN11_OLD_INTEL = {"N3350", "N3060", "N2840", "N4200", "N2940",
+                   "N3700", "N3050", "N3160", "N2830", "N270", "N450",
+                   "T6670", "T5800"}
+WIN11_OLD_AMD = {"A4-9120C", "A4-9125", "A6-9225", "A4-5000", "A4-9120E",
+                 "A8-7410", "A10-8700P", "A4-1250", "A6-9210", "A8-6410",
+                 "A10-9600P", "A6-5200", "A6-6310"}
+
+
+def windows11_named_cpu_category(cpu):
+    name = normalise((cpu or {}).get("name") or "")
+    if re.search(r"\bApple\s+M[1234](?:\s+Pro)?\b", name, re.I):
+        return WIN11_MAC_VM
+    if re.search(r"\b(?:MediaTek\s+)?Kompanio\s+(?:500|520|540)\b", name, re.I):
+        return WIN11_CHROMEOS
+    if re.search(r"\b(?:Intel\s+)?Pentium(?:\s+(?:Gold|Silver))?\s+(?:N5000|N5030|5405U|6405U)\b", name, re.I):
+        return WIN11_OFFICIAL_BASIC
+    if re.search(r"\b(?:Intel\s+)?(?:Celeron|Pentium|Atom|Core\s+2\s+Duo)\s+(?:" + "|".join(WIN11_OLD_INTEL) + r")\b", name, re.I):
+        return WIN11_UNSUITABLE
+    if re.search(r"\bAMD\s+(?:" + "|".join(WIN11_OLD_AMD) + r")\b", name, re.I):
+        return WIN11_UNSUITABLE
+    if re.search(r"\bPentium(?:\s+Gold)?\s+4415U\b", name, re.I):
+        return WIN11_UNKNOWN
+    return None
+
 
 WIN11_UNOFFICIAL_MIN_CPU_MARK = 5000
 WIN11_MICROSOFT_VERSION = "25H2"
@@ -4764,6 +4794,13 @@ def microsoft_windows11_cpu_status(cpu):
     False = recognised CPU family is outside Microsoft's supported set.
     None  = identity is insufficient to determine safely.
     """
+    category = windows11_named_cpu_category(cpu)
+    if category == WIN11_OFFICIAL_BASIC:
+        return True
+    if category == WIN11_UNSUITABLE:
+        return False
+    if category in (WIN11_UNKNOWN, WIN11_MAC_VM, WIN11_CHROMEOS):
+        return None
     if not cpu:
         return None
 
@@ -4955,6 +4992,21 @@ def windows11_cpu_assessment(conn, cpu):
         else None
     )
 
+    category = windows11_named_cpu_category(cpu)
+    if category in (WIN11_MAC_VM, WIN11_CHROMEOS, WIN11_OFFICIAL_BASIC, WIN11_UNKNOWN, WIN11_UNSUITABLE):
+        evidence = {
+            WIN11_MAC_VM: "Mac platform: Windows 11 ARM available through Parallels virtualization; not native Windows laptop eligibility",
+            WIN11_CHROMEOS: "Chromebook platform: no supported native Windows 11 route established",
+            WIN11_OFFICIAL_BASIC: "Supported Windows 11 CPU/upgrade candidate with basic performance; verify whole-device eligibility, TPM 2.0, Secure Boot and drivers. N5000/N5030 retain existing-device upgrade classification despite omission from the current OEM series table",
+            WIN11_UNKNOWN: "Pentium 4415U exact-model eligibility remains under review; broad Gold 4000U wording does not establish support",
+            WIN11_UNSUITABLE: "Unsupported older processor; not recommended by LaptopLander for current Windows 11. Installation workarounds do not establish good performance",
+        }[category]
+        return {"state": category,
+                "value": True if category == WIN11_OFFICIAL_BASIC else (None if category == WIN11_UNKNOWN else False),
+                "official": official, "cpu_mark": cpu_mark,
+                "confidence": "UNKNOWN" if category == WIN11_UNKNOWN else "HIGH",
+                "source": "LAPTOP_LANDER_NAMED_CPU_REVIEW_20261011", "evidence": evidence}
+
     if official is True:
         return {
             "state": WIN11_OFFICIAL,
@@ -4976,7 +5028,7 @@ def windows11_cpu_assessment(conn, cpu):
             "confidence": "UNKNOWN",
             "source": "CPU_SUPPORT_UNRESOLVED",
             "evidence":
-                "CPU identity is not precise enough for Windows 11 classification",
+                "Windows 11 processor support rule is unresolved for this CPU",
         }
 
     family_ok = unofficial_windows11_family_ok(cpu)
@@ -5026,6 +5078,23 @@ def windows11_cpu_assessment(conn, cpu):
         "evidence":
             "CPU is not officially supported and does not meet Laptop Lander's unofficial-good policy",
     }
+
+
+def repair_v01062_windows11_categories(conn):
+    """Refresh reviewed CPUs locally, preserving valuations and research queues."""
+    conn.execute("CREATE TABLE IF NOT EXISTS app_migrations (migration_key TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+    key = "v0.10.62_windows11_named_cpu_categories"
+    if conn.execute("SELECT 1 FROM app_migrations WHERE migration_key=?", (key,)).fetchone():
+        return
+    for row in conn.execute("SELECT item_id,cpu,cpu_generation FROM listings").fetchall():
+        cpu = _stored_cpu_descriptor(row["cpu"], row["cpu_generation"])
+        if windows11_named_cpu_category(cpu) is None:
+            continue
+        result = windows11_cpu_assessment(conn, cpu)
+        conn.execute("UPDATE listings SET win11=?,win11_state=?,win11_official=?,win11_cpu_mark=?,win11_confidence=?,win11_source=?,win11_evidence=? WHERE item_id=?",
+                     (result["value"], result["state"], result["official"], result["cpu_mark"], result["confidence"], result["source"], result["evidence"], row["item_id"]))
+    conn.execute("INSERT INTO app_migrations VALUES (?,?)", (key, iso_now()))
+    conn.commit()
 
 
 def windows11_assessment(cpu):
@@ -12445,6 +12514,14 @@ def _dashboard_html_base():
                 "</span>"
             )
 
+        platform_note = {
+            WIN11_OFFICIAL_BASIC: "Win11 supported CPU · basic performance",
+            WIN11_MAC_VM: "Mac · Windows through virtualization",
+            WIN11_CHROMEOS: "ChromeOS · no supported native Windows route",
+        }.get(row_value(row, "win11_state"))
+        if platform_note:
+            notes_html += "<span class='win11-ok-note' title='" + html.escape(row_value(row, "win11_evidence") or platform_note, quote=True) + "'>" + html.escape(platform_note) + "</span>"
+
         group_count = int(row_value(row, "display_group_count") or 1)
         group_html = (
             "<div class='duplicate-count'>"
@@ -17168,6 +17245,18 @@ def diagnostics_html(hp_model_probe=False):
         (
             "Officially supported",
             win11_counts.get(WIN11_OFFICIAL, 0)
+        ),
+        (
+            "Supported CPU, basic performance",
+            win11_counts.get(WIN11_OFFICIAL_BASIC, 0)
+        ),
+        (
+            "Mac — Windows through virtualization",
+            win11_counts.get(WIN11_MAC_VM, 0)
+        ),
+        (
+            "ChromeOS — no supported native Windows route",
+            win11_counts.get(WIN11_CHROMEOS, 0)
         ),
         (
             "Runs well, unsupported CPU",
@@ -23824,6 +23913,7 @@ def main():
         repair_v0944_telegram_notification_baseline(migration_conn)
         repair_v0947_sold_condition_cache(migration_conn)
         repair_v01060_model_identities(migration_conn)
+        repair_v01062_windows11_categories(migration_conn)
         repair_v0948_product_research_condition_filter(migration_conn)
     migration_conn.close()
 
