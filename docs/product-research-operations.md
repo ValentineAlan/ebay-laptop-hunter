@@ -1,4 +1,4 @@
-# Product Research operational alerts — 0.10.53
+# Product Research operational alerts — 0.10.59
 
 Operational notifications use `TELEGRAM_BOT_TOKEN` and
 `TELEGRAM_ADMIN_CHAT_ID`. Public deal alerts still use `TELEGRAM_CHAT_ID`.
@@ -7,17 +7,17 @@ Operational notifications use `TELEGRAM_BOT_TOKEN` and
 | --- | --- |
 | Healthy searches / normal 30-second cadence | Silent |
 | First challenge | One queued pause alert; automatic probe in 1 hour |
-| Recovery response still challenged or signed out | One queued update per response; cooldown 2h, 4h, then 6h |
-| Signed out / invalid session | Authentication-required alert with login instruction and Chromium link |
+| Recovery response still challenged or signed out | Silent repeated probes; cooldown still increases to 2h, 4h, then 6h |
+| Signed out / invalid session | One authentication-required alert with login instruction and Chromium link when sign-in first becomes required |
 | Waiting on circuit / manual recovery signal | Silent until a real search establishes the outcome |
 | Real search closes circuit | One restored alert; explicitly says whether the volume guard still prevents normal requests |
-| Rolling 24h allowance exhausted beyond normal cadence | One volume-wait alert with count, limit and next eligible request time |
-| Volume wait ends | One allowance-available alert; notes any still-open circuit |
+| Rolling 24h allowance exhausted beyond normal cadence | Silent; diagnostic state and periodic guard logs retained |
+| Volume wait ends | Silent; this is normal pacing, not recovery |
 | Guard waits no longer than normal cadence | Silent, avoiding pause/resume messages on each rolling slot |
 | HTTP 429 | One throttle alert per episode; further 429s update durable backoff without repeated alerts |
 | Three consecutive helper/response failures | One failure warning; further failures silent until recovery |
 | Valid response after throttle/failure warning | One healthy-response alert; suppressed when circuit recovery already supplies that alert |
-| Restart | Pending delivery resumes; existing circuit/volume states are not replayed |
+| Restart | Genuine pending alerts resume; legacy queued volume-wait/available messages are discarded |
 | Failed Telegram delivery | Retry the same event in FIFO order, initially after 30 seconds, increasing up to one hour |
 
 Circuit, rate and volume restrictions are independent. Probes can bypass volume
@@ -45,7 +45,7 @@ pending alerts and consecutive failures. Telemetry and its report parser include
 ## Validation
 
 Run the complete suite with `python -m unittest discover -s tests -v`.
-The suite contains 44 valuation tests and 27 operational tests. Tests mock
+Tests mock
 Telegram and browser responses and use temporary SQLite databases.
 
 The previous 40 valuation tests failed during setup on unmodified `3fa86e84`
@@ -75,7 +75,7 @@ docker exec ix-ebay-hunter-stack-hunter-1 python -c \
 docker logs --tail 100 ix-ebay-hunter-stack-hunter-1
 ```
 
-Expected version: `0.10.53`; minimum interval: `30.0` seconds. Check diagnostics
+Expected version: `0.10.59`; minimum interval: `30.0` seconds. Check diagnostics
 for rolling count and alert queue. Observe naturally occurring guard or circuit
 transitions and their corresponding private notifications; do not manufacture
 eBay challenges to test alerting. Chromium and the SID helper are preserved.
@@ -84,3 +84,5 @@ Older releases cannot restore 12–24h timestamps already discarded by a previou
 restart. The fixed guard becomes fully representative after a complete 24-hour
 window of retained history. Pending notifications require this release to drain;
 an older release ignores the new operational outbox.
+
+Routine volume waits suppress the stale-search homepage warning while the guard is active. Helper heartbeat, session errors and API failures still produce their existing warnings.

@@ -40,29 +40,12 @@ class Operations:
             state = self.state()
             waiting = release_at > self.clock()
             previous = bool(state.get("volume_waiting"))
-            message = None
-            if waiting and not previous:
-                message = (
-                    "eBay Product Research waiting for volume allowance\n\n"
-                    "No action required. The valuation backlog is preserved.\n"
-                    f"Rolling 24h requests: {count}; normal-request limit: {limit}.\n"
-                    f"Next eligible normal request: {self.utc(release_at)}.\n"
-                    "Recovery probes can exceed the normal-request limit."
-                )
-            elif previous and not waiting:
-                message = (
-                    "eBay Product Research volume allowance available\n\n"
-                    f"Rolling 24h requests: {count}; normal-request limit: {limit}.\n"
-                    + ("The circuit is still open; recovery is required."
-                       if circuit_open else
-                       "Normal requests are eligible, subject to rate backoff and cadence.")
-                )
             changed = (previous != waiting or state.get("volume_release_at") != release_at
                        or state.get("rolling_24h_count") != count)
             state.update(volume_waiting=waiting, volume_release_at=release_at,
                          rolling_24h_count=count)
             if changed:
-                self.commit(state, message)
+                self.commit(state)
 
     @staticmethod
     def utc(epoch):
@@ -122,7 +105,17 @@ class Operations:
             return False
         try:
             with self.lock:
-                pending = self.state().get("pending") or []
+                state = self.state()
+                pending = state.get("pending") or []
+                # Retire routine notifications queued by older releases, including
+                # delayed retries. Genuine failure/recovery events keep FIFO order.
+                retained = [event for event in pending if not event.get("text", "").startswith((
+                    "eBay Product Research waiting for volume allowance\n",
+                    "eBay Product Research volume allowance available\n",
+                ))]
+                if len(retained) != len(pending):
+                    state["pending"] = pending = retained
+                    self.commit(state)
                 if not pending or pending[0].get("retry_at", 0) > self.clock():
                     return False
                 event = dict(pending[0])
