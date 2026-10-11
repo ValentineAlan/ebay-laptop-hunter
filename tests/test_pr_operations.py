@@ -29,18 +29,28 @@ class OutboxTests(unittest.TestCase):
     def messages(self):
         return [e["text"] for e in self.saved.get("pending", [])]
 
-    def test_volume_transition_suppression_and_release(self):
-        self.ops.volume(1700, 1700, self.now + 100)
-        self.ops.volume(1701, 1700, self.now + 200)
-        self.assertEqual(len(self.messages()), 1)
-        self.ops.volume(1699, 1700, 0, circuit_open=True)
-        self.assertEqual(len(self.messages()), 2)
-        self.assertIn("circuit is still open", self.messages()[1])
-        self.ops.volume(1699, 1700, 0)
-        self.assertEqual(len(self.messages()), 2)
+    def test_volume_transitions_are_silent_and_preserve_state(self):
+        for count, release in [(1700, self.now + 100), (1699, 0),
+                               (1700, self.now + 200), (1699, 0)]:
+            self.ops.volume(count, 1700, release, circuit_open=True)
+            self.assertEqual(self.messages(), [])
+            self.assertEqual(self.saved["volume_waiting"], release > self.now)
+            self.assertEqual(self.saved["rolling_24h_count"], count)
+
+    def test_restart_discards_legacy_volume_messages_but_delivers_problem(self):
+        self.ops.throttled(self.now + 300, 60)
+        problem = self.messages()[0]
+        self.saved["pending"] = [dict(id=str(i), text=title + "\n\nObserved: old",
+                                      retry_at=self.now + 999, attempts=2)
+                                 for i, title in enumerate([
+            "eBay Product Research waiting for volume allowance",
+            "eBay Product Research volume allowance available"])] + self.saved["pending"]
+        self.assertTrue(self.ops.deliver_one())
+        self.send.assert_called_once_with(problem)
+        self.assertEqual(self.messages(), [])
 
     def test_failed_delivery_survives_restart_and_retries_same_event(self):
-        self.ops.volume(1700, 1700, self.now + 100)
+        self.ops.throttled(self.now + 100, 60)
         original = copy.deepcopy(self.saved["pending"][0])
         self.send.return_value = (False, "offline")
         self.assertFalse(self.ops.deliver_one())
@@ -56,10 +66,10 @@ class OutboxTests(unittest.TestCase):
         self.assertEqual(self.saved["pending"], [])
 
     def test_fifo_and_new_event_added_during_delivery(self):
-        self.ops.volume(1700, 1700, self.now + 100)
+        self.ops.throttled(self.now + 100, 60)
         first = self.messages()[0]
         def send(text):
-            self.ops.volume(1699, 1700, 0)
+            self.ops.healthy()
             return True, ""
         self.ops.send = send
         self.assertTrue(self.ops.deliver_one())
@@ -67,8 +77,8 @@ class OutboxTests(unittest.TestCase):
         self.assertNotEqual(self.messages()[0], first)
 
     def test_concurrent_transition_queues_once(self):
-        threads = [threading.Thread(target=self.ops.volume,
-                   args=(1700, 1700, self.now + 100)) for _ in range(12)]
+        threads = [threading.Thread(target=self.ops.throttled,
+                   args=(self.now + 100, 60)) for _ in range(12)]
         for t in threads:
             t.start()
         for t in threads:
@@ -154,23 +164,55 @@ class ProductResearchTests(unittest.TestCase):
         self.assertEqual(self.pending(), [])
         self.seed([self.now-100] * 1700)
         app._product_research_update_volume_state()
-        self.assertEqual(len(self.pending()), 1)
+        self.assertEqual(len(self.pending()), 0)
         self.now += 86400
         app._product_research_update_volume_state()
-        self.assertEqual(len(self.pending()), 2)
+        self.assertEqual(len(self.pending()), 0)
         self.seed([self.now-86400+20] * 1700)
         app._product_research_update_volume_state()
-        self.assertEqual(len(self.pending()), 2)
+        self.assertEqual(len(self.pending()), 0)
 
     def test_cooldowns_and_single_recovery_alert(self):
         for expected in [3600, 7200, 14400, 21600, 21600]:
             app._product_research_open_circuit('eBay Chromium session challenged')
             self.assertEqual(app._product_research_circuit_state()['cooldown_seconds'], expected)
-        self.assertEqual(len(self.pending()), 5)
+        self.assertEqual(len(self.pending()), 1)
         self.assertTrue(app._product_research_close_circuit())
         self.assertFalse(app._product_research_close_circuit())
-        self.assertEqual(len(self.pending()), 6)
+        self.assertEqual(len(self.pending()), 2)
         self.assertFalse(app._product_research_circuit_is_open())
+
+    def test_new_auth_requirement_alerts_once_inside_existing_circuit(self):
+        app._product_research_open_circuit('challenged')
+        app._product_research_open_circuit('eBay signed out')
+        app._product_research_open_circuit('eBay signed out')
+        self.assertEqual(len(self.pending()), 2)
+        self.assertIn('authentication required', self.pending()[1]['text'])
+
+    def test_volume_wait_does_not_claim_stale_search_outage(self):
+        session = dict(status='WORKING', last_success_at=app.Operations.utc(self.now - 3600))
+        helper = dict(status='CONNECTED', last_seen_at=app.Operations.utc(self.now))
+        with patch.object(app, '_read_json_file', side_effect=[session, helper]), \
+             patch.object(app, '_dashboard_state_age_seconds', side_effect=[3600, 0]), \
+             patch.object(app, '_product_research_volume_wait_seconds', return_value=3600), \
+             patch.object(app, 'ebay_rate_limit_remaining', return_value=0):
+            self.assertNotIn('SOME DATA MAY BE DELAYED', app._dashboard_health_alert())
+
+    def test_volume_wait_still_warns_about_stale_helper(self):
+        with patch.object(app, '_read_json_file', side_effect=[
+                dict(status='WORKING'), dict(status='CONNECTED')]), \
+             patch.object(app, '_dashboard_state_age_seconds', side_effect=[3600, 600]), \
+             patch.object(app, '_product_research_volume_wait_seconds', return_value=3600), \
+             patch.object(app, 'ebay_rate_limit_remaining', return_value=0):
+            self.assertIn('SOME DATA MAY BE DELAYED', app._dashboard_health_alert())
+
+    def test_stale_search_without_volume_wait_still_warns(self):
+        with patch.object(app, '_read_json_file', side_effect=[
+                dict(status='WORKING'), dict(status='CONNECTED')]), \
+             patch.object(app, '_dashboard_state_age_seconds', side_effect=[3600, 0]), \
+             patch.object(app, '_product_research_volume_wait_seconds', return_value=0), \
+             patch.object(app, 'ebay_rate_limit_remaining', return_value=0):
+            self.assertIn('SOME DATA MAY BE DELAYED', app._dashboard_health_alert())
 
     def test_concurrent_close_queues_one_recovery(self):
         app._product_research_open_circuit('challenged')

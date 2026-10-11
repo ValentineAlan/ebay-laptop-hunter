@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.58"
+APP_VERSION = "0.10.59"
 CLASSIFIER_VERSION = "0.8.6"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -7126,10 +7126,12 @@ def _product_research_open_circuit_locked(reason):
     operations.update(rate_limited=False, failure_count=0, failure_alerted=False)
     _product_research_operations.commit(
         operations,
-        _product_research_challenge_telegram_message(
+        (_product_research_challenge_telegram_message(
             cooldown_seconds=cooldown_seconds, challenge_count=challenge_count,
             reason=reason,
-        ),
+        ) if not previous.get("opened_at") or (
+            "signed out" in reason and "signed out" not in str(previous.get("reason", ""))
+        ) else None),
         {RUNTIME_STATE_PRODUCT_RESEARCH_CIRCUIT: state},
     )
 
@@ -19927,6 +19929,7 @@ def _dashboard_health_alert():
 
     if (
         not circuit_open
+        and _product_research_volume_wait_seconds() <= 0
         and success_age is not None
         and success_age > 15 * 60
     ):
