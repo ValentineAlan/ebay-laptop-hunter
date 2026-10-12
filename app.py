@@ -57,7 +57,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.62"
+APP_VERSION = "0.10.63"
 CLASSIFIER_VERSION = "0.8.6"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -270,7 +270,6 @@ _rate_store_last_prune = {}
 PUBLIC_READ_CACHE_SECONDS = 5 * 60
 _public_cache_lock = threading.Lock()
 _valuation_evidence_cache = {}
-_live_deals_cache = {"expires": 0.0, "deal_ids": None}
 _fault_pattern_cache_lock = threading.Lock()
 _fault_pattern_cache = {"revision": None, "key": None, "candidates": None}
 _RUNTIME_RULES_REVISION = 0
@@ -15859,7 +15858,7 @@ def _dashboard_html_base():
         // This is deliberately the set visible when THIS page was loaded.
         // We do not update it during polling: a deal remains "new" until
         // the visitor chooses to reload and see it.
-        const displayedIds = new Set([
+        let displayedIds = new Set([
             ...idsFrom(
                 document.getElementById("buy-now-deals-body")
             ),
@@ -15899,7 +15898,7 @@ def _dashboard_html_base():
 
                 let newCount = 0;
 
-                incoming.forEach(id => {{
+                new Set(incoming.map(String)).forEach(id => {{
                     if (!displayedIds.has(String(id))) {{
                         newCount += 1;
                     }}
@@ -15939,7 +15938,22 @@ def _dashboard_html_base():
         }}
 
         button.addEventListener("click", () => {{
-            window.location.reload();
+            hideLiveUpdate();
+            button.disabled = true;
+            const url = new URL(window.location.href);
+            url.searchParams.set("show_new_deals", String(Date.now()));
+            window.location.replace(url.toString());
+        }});
+
+        // Back/forward navigation can restore the old visible banner from bfcache.
+        window.addEventListener("pageshow", () => {{
+            hideLiveUpdate();
+            button.disabled = false;
+            displayedIds = new Set([
+                ...idsFrom(document.getElementById("buy-now-deals-body")),
+                ...idsFrom(document.getElementById("auction-deals-body"))
+            ]);
+            checkForUpdates();
         }});
 
         document.addEventListener(
@@ -19194,22 +19208,13 @@ def _change_settings_password(new_password):
 
 
 def _cached_live_deal_ids():
-    now = time.monotonic()
-    with _public_cache_lock:
-        cached = _live_deals_cache.get("deal_ids")
-        if (
-            cached is not None
-            and now < _live_deals_cache.get("expires", 0.0)
-        ):
-            return list(cached)
-
-    deal_ids = _live_deal_ids()
-    with _public_cache_lock:
-        _live_deals_cache["deal_ids"] = tuple(deal_ids)
-        _live_deals_cache["expires"] = (
-            now + PUBLIC_DASHBOARD_CACHE_SECONDS
-        )
-    return deal_ids
+    # Poll against the exact rendered snapshot, including grouping and caching.
+    # Independent ID/page caches can advertise a row a reload cannot display.
+    page = dashboard_html()
+    return list(dict.fromkeys(
+        html.unescape(item_id)
+        for item_id in re.findall(r'<tr\b[^>]*\bdata-item-id="([^"]+)"', page)
+    ))
 
 
 def _cached_valuation_evidence_html(item_id):
@@ -19889,7 +19894,8 @@ class DashboardHandler(
             return
 
         if path in ("/", "/index.html"):
-            page = dashboard_html()
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            page = dashboard_html(force_refresh="show_new_deals" in query)
             self._send_html(page)
             return
 
@@ -21420,12 +21426,12 @@ document.addEventListener("DOMContentLoaded", () => {
 """
 
 
-def dashboard_html():
+def dashboard_html(force_refresh=False):
     global _dashboard_cache_page, _dashboard_cache_expires
 
     now = time.monotonic()
     with _dashboard_cache_lock:
-        if _dashboard_cache_page is not None and now < _dashboard_cache_expires:
+        if not force_refresh and _dashboard_cache_page is not None and now < _dashboard_cache_expires:
             return _dashboard_cache_page
 
     refresh_runtime_settings()
