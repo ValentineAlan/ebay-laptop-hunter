@@ -46,6 +46,7 @@ import hashlib
 import hmac
 import secrets
 from pr_operations import Operations
+import seo_pages
 from http.cookies import SimpleCookie
 
 from datetime import datetime, timezone, timedelta
@@ -57,7 +58,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.63"
+APP_VERSION = "0.10.64"
 CLASSIFIER_VERSION = "0.8.6"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -19759,6 +19760,9 @@ class DashboardHandler(
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
 
+        if seo_pages.handle(self, path, connect_db, sold_condition_assessment):
+            return
+
         if path == "/favicon.ico":
             # Tiny embedded SVG favicon: LaptopLander "L".
             favicon = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="12" fill="#111827"/><path d="M18 14h10v27h20v9H18z" fill="white"/></svg>"""
@@ -21460,6 +21464,7 @@ def dashboard_html(force_refresh=False):
 
     privacy_footer = (
         "<footer style='margin:28px 0 8px;text-align:center;font-size:12px;color:#667085'>"
+        "<a href='/buying-guides'>Laptop buying guides and used prices</a> · "
         "<a href='/privacy'>Privacy notice</a> · "
         "<a href='#' onclick='window.llChangeAnalyticsChoice();return false'>Change analytics choice</a>"
         "</footer>"

@@ -5,4 +5,5 @@
 !Dockerfile.ebaysid-helper
 !app.py
 !pr_operations.py
+!seo_pages.py
 !ebaysid-helper.py
