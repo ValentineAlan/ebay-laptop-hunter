@@ -2,6 +2,12 @@
 
 Notable changes to Laptop Lander are recorded here.
 
+## 0.10.64
+
+- Add crawlable buying categories, evidence-backed model price guides, a sitemap,
+  robots endpoint and a homepage link to the guide hub.
+- Publish model guides only with sufficient recent, deduplicated GBP sold evidence.
+
 ## 0.10.33
 
 ### Brand and laptop-family search pages
