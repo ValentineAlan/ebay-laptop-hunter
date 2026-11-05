@@ -4,6 +4,9 @@ import hashlib
 import json
 import os
 import re
+import sys
+
+from helper_supervisor import HEARTBEAT, supervise
 import time
 import urllib.parse
 from datetime import datetime, timezone
@@ -846,6 +849,7 @@ def main():
                 next_status = 0.0
 
                 while True:
+                    HEARTBEAT.touch()
                     now = time.monotonic()
 
                     if now >= next_status:
@@ -916,4 +920,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--worker" in sys.argv:
+        main()
+    else:
+        supervise(str(Path(__file__).resolve()))
