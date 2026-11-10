@@ -58,7 +58,7 @@ from html.parser import HTMLParser
 # CLASSIFIER_VERSION / CONFIG
 # ============================================================
 
-APP_VERSION = "0.10.64"
+APP_VERSION = "0.10.65"
 CLASSIFIER_VERSION = "0.8.6"
 MIN_UNDERVALUE_GBP = 20.0
 MIN_UNDERVALUE_PCT = 10.0
@@ -19759,6 +19759,11 @@ class DashboardHandler(
 
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
+
+        if path == "/healthz":
+            # HTTP liveness only: do not read the database or call eBay.
+            self._send_json({"status": "ok", "app_version": APP_VERSION})
+            return
 
         if seo_pages.handle(self, path, connect_db, sold_condition_assessment):
             return

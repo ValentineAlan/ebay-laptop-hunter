@@ -8,6 +8,13 @@ Notable changes to Laptop Lander are recorded here.
 - Require versioned changelog entries for future runtime changes through repository instructions and an automated check.
 - Distinguish Hunter releases, Chromium image changes and successful redeployments without code changes.
 
+## 0.10.65
+
+- Add a lightweight `/healthz` endpoint that returns the installed application version for monitoring and deployment checks.
+- Health requests bypass database access, eBay requests and page rendering, and return uncached JSON.
+- This is an HTTP liveness check, not a guarantee that eBay authentication or background research is healthy.
+- Validation: HTTP endpoint tests cover response content, no-cache headers and independence from database/page rendering; all 122 regression tests passed before deployment.
+
 ## 0.10.64
 
 - Add crawlable buying categories, evidence-backed model price guides, a sitemap,
