@@ -2,6 +2,12 @@
 
 Notable changes to Laptop Lander are recorded here.
 
+## Unreleased
+
+- Add deployed-version changelog reporting support for TrueNAS update emails.
+- Require versioned changelog entries for future runtime changes through repository instructions and an automated check.
+- Distinguish Hunter releases, Chromium image changes and successful redeployments without code changes.
+
 ## 0.10.64
 
 - Add crawlable buying categories, evidence-backed model price guides, a sitemap,

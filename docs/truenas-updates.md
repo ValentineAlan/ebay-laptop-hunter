@@ -71,3 +71,20 @@ Retain the previous local image tags and your private NAS backup. Restore the
 previous app configuration through TrueNAS. If an update changed the database
 schema, stop the app and restore the matching database backup as well. Never
 publish a backup or a live app-config export to GitHub.
+
+## Daily email release notes
+
+The configured NAS updater now maps `ebay-hunter-stack/hunter` to this repository
+and reads `APP_VERSION` from the deployed `/app/app.py`. It compares image IDs and
+versions before/after an update and against the last emailed deployment. Matching
+`CHANGELOG.md` sections are included in the email; unchanged code is explicitly
+reported as unchanged, with current release notes labelled as context. Chromium
+and the unversioned SID helper are separate services, not Hunter release numbers.
+
+Every runtime change must increment `APP_VERSION` and add its exact version heading
+to `CHANGELOG.md`. See `AGENTS.md` and the `Changelog contract` check. Publishing a
+GitHub commit alone does not mean it is deployed. Manual deployments are detected
+by the next daily report without requesting another restart.
+
+The shared reporter is maintained in
+[wyoming-omnivoice/tools/truenas-update-reporting](https://github.com/ValentineAlan/wyoming-omnivoice/tree/main/tools/truenas-update-reporting).
