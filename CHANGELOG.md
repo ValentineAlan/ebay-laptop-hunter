@@ -8,6 +8,14 @@ Notable changes to Laptop Lander are recorded here.
 - Require versioned changelog entries for future runtime changes through repository instructions and an automated check.
 - Distinguish Hunter releases, Chromium image changes and successful redeployments without code changes.
 
+## 0.10.66
+
+- Add visible guide breadcrumbs and matching WebSite, CollectionPage and BreadcrumbList structured data, including the buying-guide hub in each child page's hierarchy.
+- Link related buying categories from guide pages and add a practical used-laptop buying checklist to the hub.
+- Add permanent redirects for the former `/laptops-under-200` URL, `/index.html`, and trailing-slash variants of the static guide routes.
+- Add explicit noindex metadata to unavailable model guides while retaining HTTP 404, and consistent social metadata and deal-finder positioning on guide pages.
+- Validation: regression coverage includes canonical redirects, structured-data escaping, breadcrumb hierarchy, internal links and unavailable-guide indexing.
+
 ## 0.10.65
 
 - Add a lightweight `/healthz` endpoint that returns the installed application version for monitoring and deployment checks.

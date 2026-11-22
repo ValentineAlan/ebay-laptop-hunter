@@ -1,4 +1,6 @@
 import io
+import json
+import re
 import sqlite3
 import unittest
 from datetime import datetime, timezone
@@ -85,6 +87,47 @@ class SeoTests(unittest.TestCase):
         handler = Handler()
         seo_pages.handle(handler, '/used-laptop-prices/missing', Connection, None)
         self.assertEqual(handler.status, 404)
+        self.assertIn('content="noindex,follow"', handler.body)
+
+    def test_permanent_redirects_without_database_access(self):
+        for source, target in [
+            ('/index.html', '/'),
+            ('/laptops-under-200', '/used-laptops-under-200'),
+            ('/laptops-under-200/', '/used-laptops-under-200'),
+            ('/buying-guides/', '/buying-guides'),
+            *[(path + '/', path) for path in seo_pages.CATEGORIES],
+        ]:
+            with self.subTest(source=source):
+                handler = Handler()
+                self.assertTrue(seo_pages.handle(handler, source, None, None))
+                self.assertEqual(handler.status, 301)
+                self.assertEqual(handler.headers['Location'], seo_pages.ORIGIN + target)
+                self.assertEqual(handler.headers['Content-Length'], '0')
+        self.assertFalse(seo_pages.handle(Handler(), '/unknown/', None, None))
+        self.assertFalse(seo_pages.handle(Handler(), '/', None, None))
+
+    def test_structured_data_matches_visible_hierarchy_and_escapes_markup(self):
+        title = 'Laptop </script><script>alert(1)</script>'
+        path = '/used-laptops-under-200'
+        page = seo_pages.page(path, title, 'Budget choices', '')
+        scripts = re.findall(r'<script type="application/ld\+json">(.*?)</script>', page, re.S)
+        self.assertEqual(len(scripts), 1)
+        graph = json.loads(scripts[0])['@graph']
+        self.assertEqual(graph[0]['@type'], 'WebSite')
+        self.assertEqual(graph[1]['url'], seo_pages.ORIGIN + path)
+        self.assertEqual(graph[1]['name'], title)
+        crumbs = graph[2]['itemListElement']
+        self.assertEqual([c['position'] for c in crumbs], [1, 2, 3])
+        self.assertEqual(crumbs[1]['item'], seo_pages.ORIGIN + '/buying-guides')
+        self.assertIn('aria-label="Breadcrumb"', page)
+        self.assertIn('aria-current="page"', page)
+        self.assertNotIn('<script>alert(1)', page)
+        self.assertIn('href="/windows-11-used-laptops"', page)
+        self.assertIn('href="/usb-c-charging-used-laptops"', page)
+        hub = seo_pages.page('/buying-guides', 'Guides', 'Choose a laptop', '')
+        hub_graph = json.loads(re.search(
+            r'<script type="application/ld\+json">(.*?)</script>', hub, re.S)[1])['@graph']
+        self.assertEqual(len(hub_graph[2]['itemListElement']), 2)
 
 
 if __name__ == '__main__':
