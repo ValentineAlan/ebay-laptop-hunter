@@ -65,20 +65,50 @@ def evidence_groups(conn, assess):
     return {key: rows for key, rows in groups.items() if len(rows) >= 5}
 
 
-def page(path, title, description, body):
+def page(path, title, description, body, *, indexable=True):
     canonical = ORIGIN + path
-    schema = json.dumps({
-        '@context': 'https://schema.org', '@type': 'BreadcrumbList',
+    crumbs = [('/', 'LaptopLander')]
+    if path != '/buying-guides':
+        crumbs.append(('/buying-guides', 'Buying guides'))
+    crumbs.append((path, title))
+    breadcrumb = {
+        '@type': 'BreadcrumbList', '@id': canonical + '#breadcrumb',
         'itemListElement': [
-            {'@type': 'ListItem', 'position': 1, 'name': 'LaptopLander', 'item': ORIGIN + '/'},
-            {'@type': 'ListItem', 'position': 2, 'name': title, 'item': canonical},
+            {'@type': 'ListItem', 'position': i, 'name': name, 'item': ORIGIN + url}
+            for i, (url, name) in enumerate(crumbs, 1)
+        ],
+    }
+    schema = json.dumps({
+        '@context': 'https://schema.org',
+        '@graph': [
+            {'@type': 'WebSite', '@id': ORIGIN + '/#website',
+             'url': ORIGIN + '/', 'name': 'LaptopLander', 'inLanguage': 'en-GB'},
+            {'@type': 'CollectionPage', '@id': canonical + '#webpage',
+             'url': canonical, 'name': title, 'description': description,
+             'inLanguage': 'en-GB', 'isPartOf': {'@id': ORIGIN + '/#website'},
+             'breadcrumb': {'@id': canonical + '#breadcrumb'}},
+            breadcrumb,
         ],
     }).replace('<', '\\u003c')
+    breadcrumb_html = '<nav aria-label="Breadcrumb"><ol>' + ''.join(
+        f'<li><a href="{escape(url)}">{escape(name)}</a></li>'
+        if i < len(crumbs) - 1 else f'<li aria-current="page">{escape(name)}</li>'
+        for i, (url, name) in enumerate(crumbs)
+    ) + '</ol></nav>'
+    related = [(url, values[0]) for url, values in CATEGORIES.items() if url != path]
+    related_html = '<section><h2>More laptop buying guides</h2><ul>' + ''.join(
+        f'<li><a href="{escape(url)}">{escape(name)}</a></li>' for url, name in related
+    ) + '</ul></section>' if path != '/buying-guides' else ''
+    robots = 'index,follow' if indexable else 'noindex,follow'
     return f'''<!doctype html><html lang="en-GB"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{escape(title)} | LaptopLander</title>
 <meta name="description" content="{escape(description)}">
+<meta name="robots" content="{robots}">
 <link rel="canonical" href="{escape(canonical)}">
+<meta property="og:site_name" content="LaptopLander">
+<meta property="og:locale" content="en_GB">
+<meta name="twitter:card" content="summary">
 <meta property="og:title" content="{escape(title)}">
 <meta property="og:description" content="{escape(description)}">
 <meta property="og:url" content="{escape(canonical)}"><meta property="og:type" content="website">
@@ -89,7 +119,8 @@ h1{{line-height:1.2}}section{{background:white;border:1px solid #dce2ec;border-r
 table{{width:100%;border-collapse:collapse}}th,td{{text-align:left;padding:12px;border-bottom:1px solid #ddd}}
 .scroll{{overflow:auto}}footer{{margin-top:32px}}small{{color:#536075}}</style></head>
 <body><main><nav aria-label="Main"><a href="/">LaptopLander deals</a><a href="/buying-guides">Buying guides</a></nav>
-<h1>{escape(title)}</h1><p>{escape(description)}</p>{body}
+{breadcrumb_html}<h1>{escape(title)}</h1><p>{escape(description)}</p>
+<p>LaptopLander compares eBay UK listings and sold-price evidence. We find deals; we do not sell laptops.</p>{body}{related_html}
 <footer><a href="/privacy">Privacy notice</a></footer></main></body></html>'''
 
 
@@ -109,6 +140,18 @@ def listing_table(conn, condition, params=()):
 
 
 def handle(handler, path, connect, assess):
+    # Only redirect known equivalents; unknown URLs must retain their 404.
+    aliases = {'/index.html': '/', '/laptops-under-200': '/used-laptops-under-200'}
+    clean_path = path.rstrip('/')
+    target = aliases.get(clean_path)
+    if target is None and path.endswith('/') and clean_path in (*CATEGORIES, '/buying-guides'):
+        target = clean_path
+    if target:
+        handler.send_response(301)
+        handler.send_header('Location', ORIGIN + target)
+        handler.send_header('Content-Length', '0')
+        handler.end_headers()
+        return True
     if path == '/robots.txt':
         text = 'User-agent: *\nAllow: /\nDisallow: /settings\nDisallow: /diagnostics\nDisallow: /analytics\nDisallow: /live-deals\nDisallow: /valuation-evidence\nSitemap: ' + ORIGIN + '/sitemap.xml\n'
         send_text(handler, text, 'text/plain; charset=utf-8')
@@ -131,7 +174,12 @@ def handle(handler, path, connect, assess):
             # Link every eligible model so sitemap entries are also discoverable in HTML.
             if len(models) > 5:
                 body += '<h3>More model guides</h3><ul>' + ''.join(f'<li><a href="{p}">{escape(models[p][0]["brand"])} {escape(models[p][0]["model"])}</a></li>' for p in sorted(models) if p not in top) + '</ul>'
-            body += '</section>'
+            body += '</section><section><h2>Used laptop buying checklist</h2><ul>'
+            body += '<li>Match the exact processor, RAM and storage, not just the laptop family name. Different configurations can have very different values.</li>'
+            body += '<li>Read the condition description and inspect photographs for screen damage, broken hinges, missing keys and missing chargers.</li>'
+            body += '<li>Ask about battery health and whether the machine has BIOS passwords, company management or account locks that prevent normal use.</li>'
+            body += '<li>Compare the delivered price and likely replacement costs. An auction bid is not the final sale price.</li>'
+            body += '<li>Check the seller\'s stated returns and warranty terms on eBay before buying.</li></ul></section>'
             title, description = 'Used laptop buying guides and prices UK', 'Choose a used laptop by budget, Windows 11 CPU support or USB-C charging, and compare model prices using recent sold evidence.'
         elif path in CATEGORIES:
             title, description, condition, advice = CATEGORIES[path]
@@ -149,7 +197,7 @@ def handle(handler, path, connect, assess):
                 body += f'<tr><td>{escape(spec)}</td><td>{escape(r["sold_condition"])}</td><td>£{r["delivered_price"]:.2f}</td><td>{escape(r["last_sold"])}</td></tr>'
             body += '</tbody></table></div><p>Evidence collected: ' + escape(max(r['collected_at'] for r in rows)) + '.</p></section><section><h2>Current listings</h2>' + listing_table(conn, 'LOWER(brand) = ? AND LOWER(model) = ?', (first['brand'].lower(), first['model'].lower())) + '</section>'
         else:
-            handler._send_html(page(path, 'Price guide unavailable', 'There is not enough current evidence to publish this guide.', '<p><a href="/buying-guides">Browse available guides</a></p>'), status=404)
+            handler._send_html(page(path, 'Price guide unavailable', 'There is not enough current evidence to publish this guide.', '<p><a href="/buying-guides">Browse available guides</a></p>', indexable=False), status=404)
             return True
         handler._send_html(page(path, title, description, body))
         return True
