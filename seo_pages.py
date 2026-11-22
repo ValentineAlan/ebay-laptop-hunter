@@ -11,8 +11,8 @@ from urllib.parse import quote
 ORIGIN = 'https://laptoplander.com'
 CATEGORIES = {
     '/used-laptops-under-200': (
-        'Used laptops under �200 UK',
-        'Compare UK laptop listings below �200 including delivery. Check condition, missing accessories and upgrade costs before deciding whether a low price is good value.',
+        'Used laptops under £200 UK',
+        'Compare UK laptop listings below £200 including delivery. Check condition, missing accessories and upgrade costs before deciding whether a low price is good value.',
         'total < 200',
         'At this budget, prioritise a working machine with an SSD, sufficient memory and a usable battery. A missing charger, replacement battery or operating-system licence can change the total cost. Auction prices can rise before the listing ends.'),
     '/windows-11-used-laptops': (
@@ -135,7 +135,7 @@ def listing_table(conn, condition, params=()):
     cells = []
     for row in rows:
         report = '/report?item_id=' + quote(row['item_id'], safe='')
-        cells.append(f'<tr><td><a href="{report}">{escape(row["title"])}</a><br><small>{escape(row["condition"])} � {escape(row["status"])}</small></td><td>�{row["total"]:.2f}</td></tr>')
+        cells.append(f'<tr><td><a href="{report}">{escape(row["title"])}</a><br><small>{escape(row["condition"])} · {escape(row["status"])}</small></td><td>£{row["total"]:.2f}</td></tr>')
     return '<p>Cached listing prices include delivery. Availability and auction prices can change; these are matching listings, not all qualified bargains.</p><div class="scroll"><table><thead><tr><th scope="col">Laptop and condition</th><th scope="col">Current delivered price</th></tr></thead><tbody>' + ''.join(cells) + '</tbody></table></div>'
 
 
@@ -170,7 +170,7 @@ def handle(handler, path, connect, assess):
             return True
         if path == '/buying-guides':
             body = '<section><h2>Choose a laptop</h2><ul>' + ''.join(f'<li><a href="{p}">{escape(v[0])}</a></li>' for p, v in CATEGORIES.items()) + '</ul></section><section><h2>Used laptop price guides</h2>'
-            body += '<ul>' + ''.join(f'<li><a href="{p}">{escape(models[p][0]["brand"])} {escape(models[p][0]["model"])} used prices UK</a> - {len(models[p])} sold listings</li>' for p in top) + '</ul>' if top else '<p>Price guides appear when at least five distinct recent sold listings meet the evidence requirements.</p>'
+            body += '<ul>' + ''.join(f'<li><a href="{p}">{escape(models[p][0]["brand"])} {escape(models[p][0]["model"])} used prices UK</a> — {len(models[p])} sold listings</li>' for p in top) + '</ul>' if top else '<p>Price guides appear when at least five distinct recent sold listings meet the evidence requirements.</p>'
             # Link every eligible model so sitemap entries are also discoverable in HTML.
             if len(models) > 5:
                 body += '<h3>More model guides</h3><ul>' + ''.join(f'<li><a href="{p}">{escape(models[p][0]["brand"])} {escape(models[p][0]["model"])}</a></li>' for p in sorted(models) if p not in top) + '</ul>'
@@ -190,11 +190,11 @@ def handle(handler, path, connect, assess):
             title = f'{first["brand"]} {first["model"]} used prices UK'
             description = f'Recent UK sold-price evidence for {first["brand"]} {first["model"]}, with specification differences and current listings.'
             prices = [r['delivered_price'] for r in rows]
-            body = f'<section><h2>Observed sold prices</h2><p>Median delivered price: <strong>�{statistics.median(prices):.2f}</strong> across {len(rows)} distinct sold listings. Observed range: �{min(prices):.2f}-�{max(prices):.2f}.</p><p>These are cached GBP records sold and collected within the last 90 days. Duplicate listing IDs, new items, unknown conditions and listings with detected faults are excluded. Each listing counts once, regardless of units sold. Prices may be listing averages. No specification or condition adjustment is applied.</p><p>This is a model-level summary, not an exact valuation: CPU, RAM, storage, battery health and warranty can materially change value. Confirm those details before comparing a listing with the median.</p></section>'
+            body = f'<section><h2>Observed sold prices</h2><p>Median delivered price: <strong>£{statistics.median(prices):.2f}</strong> across {len(rows)} distinct sold listings. Observed range: £{min(prices):.2f}–£{max(prices):.2f}.</p><p>These are cached GBP records sold and collected within the last 90 days. Duplicate listing IDs, new items, unknown conditions and listings with detected faults are excluded. Each listing counts once, regardless of units sold. Prices may be listing averages. No specification or condition adjustment is applied.</p><p>This is a model-level summary, not an exact valuation: CPU, RAM, storage, battery health and warranty can materially change value. Confirm those details before comparing a listing with the median.</p></section>'
             body += '<section><h2>Sold evidence by specification</h2><div class="scroll"><table><thead><tr><th scope="col">CPU / RAM / storage</th><th scope="col">Condition</th><th scope="col">Delivered</th><th scope="col">Last sold</th></tr></thead><tbody>'
             for r in rows[:50]:
                 spec = f'{r["cpu"] or "CPU unknown"} / {r["ram_gb"] or "?"} GB / {r["storage_gb"] or "?"} GB'
-                body += f'<tr><td>{escape(spec)}</td><td>{escape(r["sold_condition"])}</td><td>�{r["delivered_price"]:.2f}</td><td>{escape(r["last_sold"])}</td></tr>'
+                body += f'<tr><td>{escape(spec)}</td><td>{escape(r["sold_condition"])}</td><td>£{r["delivered_price"]:.2f}</td><td>{escape(r["last_sold"])}</td></tr>'
             body += '</tbody></table></div><p>Evidence collected: ' + escape(max(r['collected_at'] for r in rows)) + '.</p></section><section><h2>Current listings</h2>' + listing_table(conn, 'LOWER(brand) = ? AND LOWER(model) = ?', (first['brand'].lower(), first['model'].lower())) + '</section>'
         else:
             handler._send_html(page(path, 'Price guide unavailable', 'There is not enough current evidence to publish this guide.', '<p><a href="/buying-guides">Browse available guides</a></p>', indexable=False), status=404)

@@ -61,6 +61,7 @@ class SeoTests(unittest.TestCase):
             status TEXT, total REAL, postage REAL, active INTEGER, end_date TEXT)''')
         self.conn.execute("INSERT INTO listings VALUES ('v1|123456789|0', '<script>bad</script>', 'Used', 'NORMAL', 120, 0, 1, NULL)")
         body = seo_pages.listing_table(self.conn, 'total < 200')
+        self.assertIn('\u00a3120.00', body)
         self.assertIn('&lt;script&gt;', body)
         self.assertNotIn('<script>bad', body)
         self.assertIn('/report?item_id=v1%7C', body)

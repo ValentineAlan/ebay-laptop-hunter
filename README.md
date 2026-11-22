@@ -66,7 +66,7 @@ asking-price reference. That reference never generates a bargain score or an
 apparent saving. Auction targets do not receive a buy-now score.
 
 Unknown postage is no longer free shipping. Browse prices must explicitly be GBP;
-Product Research prices must carry GBP currency evidence (a GBP code or � symbol).
+Product Research prices must carry GBP currency evidence (a GBP code or £ symbol).
 Unrecognised Product Research price/date structures are excluded, so changes to
 eBay's response format may reduce coverage until the parser is updated. Optionally
 set `BUYER_POSTCODE` in `.env` for location-aware Browse shipping estimates.
@@ -107,9 +107,9 @@ The tests cover synthetic cases and mocked responses, not live eBay transactions
 
 The Compose stack has three services:
 
-- `hunter` - discovery, valuation and dashboard
-- `browser` - persistent LinuxServer Chromium session
-- `sid-helper` - reads/refreshes the live eBay browser session via CDP
+- `hunter` — discovery, valuation and dashboard
+- `browser` — persistent LinuxServer Chromium session
+- `sid-helper` — reads/refreshes the live eBay browser session via CDP
 
 The helper shares the Chromium network namespace and connects directly to
 `127.0.0.1:9222`, so the DevTools port is not exposed on the host/LAN.
