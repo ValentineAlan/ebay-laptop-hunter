@@ -44,9 +44,15 @@ def evidence_groups(conn, assess):
     cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
     groups = {}
     seen = set()
-    rows = conn.execute('''SELECT * FROM sold_comparables
+    assessments = {}
+    # Missing conditions cannot qualify. Reject them before materialising rows,
+    # and fetch only the evidence fields actually used by guide rendering.
+    rows = conn.execute('''SELECT item_id, title, brand, model, currency,
+        delivered_price, sold_condition, cpu, ram_gb, storage_gb,
+        last_sold, collected_at FROM sold_comparables
         WHERE last_sold >= ? AND collected_at >= ? AND currency = 'GBP'
         AND delivered_price > 0 AND brand != '' AND model != ''
+        AND sold_condition IS NOT NULL AND sold_condition != ''
         ORDER BY collected_at DESC''', (cutoff, cutoff))
     for raw in rows:
         row = dict(raw)
@@ -54,11 +60,16 @@ def evidence_groups(conn, assess):
             continue
         if not re.search(r'used|refurbished|pre.?owned', row.get('sold_condition') or '', re.I):
             continue
-        if assess(row.get('title') or '', row['sold_condition'])['decision'] != 'USE':
-            continue
         key = (row['brand'].casefold().strip(), row['model'].casefold().strip())
         identity = (key, row['item_id'])
         if identity in seen:
+            continue
+        # Keep only accepted identities in seen: an excluded latest observation
+        # must not hide an older qualifying record for the same sold item.
+        assessment_key = (row.get('title') or '', row['sold_condition'])
+        if assessment_key not in assessments:
+            assessments[assessment_key] = assess(*assessment_key)['decision']
+        if assessments[assessment_key] != 'USE':
             continue
         seen.add(identity)
         groups.setdefault(key, []).append(row)

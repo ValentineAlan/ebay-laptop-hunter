@@ -8,6 +8,13 @@ Notable changes to Laptop Lander are recorded here.
 - Require versioned changelog entries for future runtime changes through repository instructions and an automated check.
 - Distinguish Hunter releases, Chromium image changes and successful redeployments without code changes.
 
+## 0.10.67
+
+- Reduce buying-guide, model-guide and sitemap query work by excluding missing sold conditions in SQLite and selecting only the fields used by the guides.
+- Skip already accepted duplicate sold-item observations and reuse identical title/condition assessments within each request; subsequent requests still use current classifier decisions.
+- Preserve evidence freshness, currency, condition and five-distinct-listing requirements. An excluded newer observation does not hide an older qualifying observation for the same item.
+- Validation: all 127 regression tests pass. On a read-only production database backup, evidence grouping returned identical results and fell from 0.87 seconds to 0.12 seconds in an isolated benchmark; this is not an HTTP response-time measurement.
+
 ## 0.10.66
 
 - Add visible guide breadcrumbs and matching WebSite, CollectionPage and BreadcrumbList structured data, including the buying-guide hub in each child page's hierarchy.
