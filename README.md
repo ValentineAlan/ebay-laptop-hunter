@@ -13,7 +13,7 @@ Self-hosted eBay UK laptop deal hunter with:
 
 Current version:
 
-- Laptop Lander / Hunter: `0.10.65`
+- Laptop Lander / Hunter: `0.10.66`
 - Chromium/Product Research helper: bundled with the application
 
 See `CHANGELOG.md` for release history.
@@ -230,7 +230,7 @@ Chromium profile files are staged.
 ## HTTP liveness check
 
 `GET /healthz` returns uncached JSON such as
-`{"status":"ok","app_version":"0.10.65"}`. Use it to confirm the HTTP server
+`{"status":"ok","app_version":"0.10.66"}`. Use it to confirm the HTTP server
 responds and to identify the deployed application version without rendering a
 dashboard or accessing the database/eBay. It does not check Product Research
 authentication, worker progress or upstream availability.
