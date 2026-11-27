@@ -70,6 +70,49 @@ class SeoTests(unittest.TestCase):
         page = seo_pages.page('/used-laptops-under-200', 'Budget', 'Description', body)
         self.assertIn('href="https://laptoplander.com/used-laptops-under-200"', page)
 
+    def test_missing_conditions_are_filtered_before_rows_reach_python(self):
+        for i in range(30):
+            self.insert(str(i), sold_condition=None if i % 2 else '')
+        fetched = []
+        def row_factory(cursor, row):
+            fetched.append(row)
+            return sqlite3.Row(cursor, row)
+        self.conn.row_factory = row_factory
+        groups = seo_pages.evidence_groups(self.conn, None)
+        self.assertEqual(groups, {})
+        self.assertEqual(fetched, [])
+
+    def test_duplicate_assessments_are_reused_only_within_request(self):
+        for i in range(5):
+            self.insert(str(i))
+            self.insert(str(i))
+        calls = []
+        def assess(title, condition):
+            calls.append((title, condition))
+            return {'decision': 'USE'}
+        groups = seo_pages.evidence_groups(self.conn, assess)
+        self.assertEqual(len(next(iter(groups.values()))), 5)
+        self.assertEqual(calls, [('Laptop', 'Used')])
+        # A subsequent request must see changed classifier decisions immediately.
+        self.assertEqual(seo_pages.evidence_groups(self.conn, lambda *_: {'decision': 'EXCLUDE'}), {})
+
+    def test_excluded_newer_record_does_not_hide_older_eligible_observation(self):
+        from datetime import timedelta
+        for i in range(5):
+            self.insert(str(i))
+        newer = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+        self.insert('0', title='Faulty', collected_at=newer)
+        self.insert('1', title='Laptop', sold_condition='Refurbished', collected_at=newer)
+        calls = []
+        def assess(title, condition):
+            calls.append((title, condition))
+            return {'decision': 'EXCLUDE' if title == 'Faulty' or condition == 'Refurbished' else 'USE'}
+        groups = seo_pages.evidence_groups(self.conn, assess)
+        rows = next(iter(groups.values()))
+        self.assertEqual({r['item_id'] for r in rows}, {str(i) for i in range(5)})
+        self.assertTrue(all(r['title'] == 'Laptop' and r['sold_condition'] == 'Used' for r in rows))
+        self.assertEqual(len(calls), 3)
+
     def test_sitemap_and_robots_and_missing_model(self):
         handler = Handler()
         self.assertTrue(seo_pages.handle(handler, '/robots.txt', None, None))

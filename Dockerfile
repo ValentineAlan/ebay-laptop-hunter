@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 ARG VCS_REF=unknown
-LABEL org.opencontainers.image.version="0.10.66" \
+LABEL org.opencontainers.image.version="0.10.67" \
       org.opencontainers.image.revision=$VCS_REF
 
 WORKDIR /app
